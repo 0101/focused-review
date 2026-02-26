@@ -1,0 +1,14 @@
+[project]
+name = "focused-review"
+version = "0.1.0"
+description = "Focused review plugin for code review automation"
+requires-python = ">=3.10"
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[tool.setuptools]
+py-modules = []
+
+[tool.pytest.ini_options]
+testpaths = ["skills/focused-review/scripts/tests"]

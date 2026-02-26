@@ -1,0 +1,17 @@
+{
+  "name": "focused-review",
+  "description": "Auto-generates review rules from instruction files and runs parallel code reviews",
+  "version": "0.1.0",
+  "skills": [
+    {
+      "name": "focused-review",
+      "path": "skills/focused-review/SKILL.md"
+    }
+  ],
+  "agents": [
+    {
+      "name": "review-runner",
+      "path": "agents/review-runner.agent.md"
+    }
+  ]
+}

@@ -1,0 +1,6 @@
+{
+  "name": "focused-review",
+  "description": "Auto-generates review rules from instruction files and runs parallel code reviews",
+  "version": "0.1.0",
+  "author": "Petr Pokorný"
+}
