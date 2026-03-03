@@ -273,6 +273,49 @@ public string FormatUserName(User user) =>
 ```
 ~~~
 
+**Built-in: bug-spotter**
+
+Use this exact content for the `review/bug-spotter.md` file:
+
+~~~yaml
+---
+autofix: false
+model: inherit
+source: "built-in"
+---
+# Bug Spotter
+
+## Rule
+Find bugs, logic errors, and correctness issues in new or changed code. Nothing else.
+
+## Why
+Dedicated bug-finding without distraction from style, naming, or documentation concerns. A focused reviewer examining only correctness catches issues that broader reviews miss under cognitive load.
+
+## Requirements
+- Look for logic errors: wrong comparisons, off-by-one, boundary conditions (`>` vs `>=`, `<` vs `<=`)
+- Look for state management bugs: variables not updated in all branches, missing else clauses, incomplete switch cases
+- Look for null/resource bugs: use-after-dispose, null dereference on error paths, missing cleanup
+- Look for concurrency bugs: race conditions, shared state without synchronization, non-atomic check-then-act
+- Look for arithmetic bugs: integer overflow, division by zero, sign errors, lossy casts
+- Reason about what the code is trying to do, then check whether it actually does that
+- ONLY report actual bugs or very likely bugs — not style, not naming, not "could be cleaner"
+- If unsure whether something is a bug, explain the concern and the conditions under which it would fail
+
+## Wrong
+```
+// Off-by-one: skips first IPv6 address when index is 0
+if (nextIPv6AddressIndex > 0 && nextIPv4AddressIndex >= 0)
+    parallelConnect = true;
+```
+
+## Correct
+```
+// Includes index 0
+if (nextIPv6AddressIndex >= 0 && nextIPv4AddressIndex >= 0)
+    parallelConnect = true;
+```
+~~~
+
 ### Step 4: Present summary to user
 
 Show the user a **numbered** summary of proposed changes. Each entry shows the rule name, description, autofix status, and model. Default action is to apply everything.
@@ -286,12 +329,13 @@ Show the user a **numbered** summary of proposed changes. Each entry shows the r
 
 ### Built-in rules (will be added):
 3. code-duplication — flag new code that duplicates existing codebase patterns [autofix: no, model: sonnet] (built-in)
+4. bug-spotter — find bugs, logic errors, and correctness issues [autofix: no, model: inherit] (built-in)
 
 ### Updated rules (will be updated):
-4. existing-rule — what changed [autofix: no, model: haiku] (source: CLAUDE.md)
+5. existing-rule — what changed [autofix: no, model: haiku] (source: CLAUDE.md)
 
 ### Orphaned rules (will be kept, no source match):
-5. old-rule — source file removed/changed
+6. old-rule — source file removed/changed
 
 ### Unchanged rules (no action):
 - good-rule — still matches source
