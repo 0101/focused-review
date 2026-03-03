@@ -53,9 +53,37 @@ Refresh review rules from instruction files:
 /focused-review refresh
 ```
 
+Configure rules directory:
+
+```
+/focused-review configure
+```
+
+## Configuration
+
+Rules directory is controlled by a `focused-review.json` config file:
+
+```json
+{ "rules_dir": "custom-rules/" }
+```
+
+The config file is discovered from these locations (first match wins):
+
+1. `.claude/focused-review.json` -- project shared (version-controlled)
+2. `focused-review.json` -- repo root
+3. `.github/focused-review.json` -- GitHub convention
+4. `~/.claude/focused-review.json` -- user-wide (Claude Code)
+5. `~/.copilot/focused-review.json` -- user-wide (Copilot CLI)
+
+If no config file is found, defaults to `review/`.
+
+Resolution priority: explicit `--rules-dir` CLI flag > `focused-review.json` config file > `review/` default.
+
+Run `/focused-review configure` to create or update the config file interactively.
+
 ## Review Rules
 
-Review rules live in the `review/` directory at your repo root. Each rule is a Markdown file with YAML frontmatter:
+Review rules live in the rules directory (`review/` by default, configurable via `focused-review.json`). Each rule is a Markdown file with YAML frontmatter:
 
 ```yaml
 ---

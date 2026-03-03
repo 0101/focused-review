@@ -33,6 +33,55 @@ INSTRUCTION_PATTERNS: list[str] = [
 
 DIFF_TARGET_CHUNK_LINES = 3000
 
+CONFIG_FILENAME = "focused-review.json"
+CONFIG_SCAN_LOCATIONS: list[str] = [
+    os.path.join(".claude", CONFIG_FILENAME),
+    CONFIG_FILENAME,
+    os.path.join(".github", CONFIG_FILENAME),
+]
+CONFIG_USER_LOCATIONS: list[str] = [
+    os.path.join("~", ".claude", CONFIG_FILENAME),
+    os.path.join("~", ".copilot", CONFIG_FILENAME),
+]
+
+DEFAULT_RULES_DIR = "review/"
+
+
+# ---------------------------------------------------------------------------
+# Config file resolution
+# ---------------------------------------------------------------------------
+
+
+def _resolve_rules_dir(repo: str = ".") -> str:
+    """Scan config file locations and return the rules_dir value, or the default.
+
+    Scan order (first match wins):
+      1. .claude/focused-review.json  (project)
+      2. focused-review.json          (repo root)
+      3. .github/focused-review.json  (GitHub convention)
+      4. ~/.claude/focused-review.json (user-wide, Claude Code)
+      5. ~/.copilot/focused-review.json (user-wide, Copilot CLI)
+
+    Falls back to ``review/`` if no config file is found.
+    """
+    repo_path = Path(repo).resolve()
+
+    candidates = [repo_path / loc for loc in CONFIG_SCAN_LOCATIONS] + [
+        Path(os.path.expanduser(loc)) for loc in CONFIG_USER_LOCATIONS
+    ]
+
+    for candidate in candidates:
+        if candidate.is_file():
+            try:
+                data = json.loads(candidate.read_text(encoding="utf-8"))
+                raw = data.get("rules_dir", DEFAULT_RULES_DIR)
+                return raw.replace("\\", "/")
+            except (json.JSONDecodeError, AttributeError):
+                pass
+
+    return DEFAULT_RULES_DIR
+
+
 # ---------------------------------------------------------------------------
 # Path helpers
 # ---------------------------------------------------------------------------
@@ -422,7 +471,8 @@ def _build_dispatch(
 def prepare_review(args: argparse.Namespace) -> None:
     """Read committed rules, generate diff, filter, chunk, produce dispatch plan."""
     repo = Path(args.repo).resolve()
-    rules_dir = repo / args.rules_dir
+    raw_rules_dir = args.rules_dir if args.rules_dir is not None else _resolve_rules_dir(str(repo))
+    rules_dir = repo / Path(raw_rules_dir.replace("\\", "/"))
     scope: str = args.scope
 
     rules = _read_rules(rules_dir, repo)
@@ -527,8 +577,8 @@ def main() -> int:
     )
     prepare_parser.add_argument(
         "--rules-dir",
-        default="review/",
-        help="Directory containing review rule files (default: review/)",
+        default=None,
+        help="Directory containing review rule files (default: resolved from focused-review.json, then review/)",
     )
     prepare_parser.set_defaults(func=prepare_review)
 

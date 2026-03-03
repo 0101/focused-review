@@ -3,7 +3,7 @@
 ## Goals
 
 Build an installable plugin (Copilot CLI native, Claude Code compatible) that:
-1. Reads committed review rules from a repo's `review/` directory (one rule per file)
+1. Reads committed review rules from the rules directory (`review/` by default, configurable via `focused-review.json`)
 2. Runs parallel review agents — one per rule — against the user's diff
 3. Supports path-scoped rules (`applies-to` globs), diff chunking for large diffs, and full-codebase review
 4. Offers a `refresh` command that discovers instruction files, extracts potential new rules via LLM, compares against existing rules, and lets the user decide what to update
@@ -12,7 +12,7 @@ Build an installable plugin (Copilot CLI native, Claude Code compatible) that:
 
 ### Review Mode: `/focused-review [scope]`
 
-The primary flow. Rules are already committed in the repo's `review/` directory.
+The primary flow. Rules are already committed in the rules directory (`review/` by default, configurable via `focused-review.json`).
 
 1. **Prepare**: Python reads all rule `.md` files from `review/`, generates diff based on scope (`branch` default, or `commit|staged|unstaged|full`), chunks large diffs at file boundaries, filters rules by `applies-to` against changed files, produces a dispatch plan JSON.
 
@@ -75,6 +75,7 @@ focused-review/
 | `unstaged` | Review: unstaged changes |
 | `full` | Review: scan entire codebase (no diff) |
 | `refresh` | Refresh: re-scan instruction files, suggest rule updates |
+| `configure` | Configure: create or update `focused-review.json` interactively |
 
 ### Python Script Subcommands
 
@@ -158,4 +159,4 @@ $COPILOT_CUSTOM_INSTRUCTIONS_DIRS (env var, colon/semicolon-separated paths)
 - **Review agents use Haiku by default** — fast and cheap for single-criterion checking
 - **Generation agents use Sonnet** — better at structured extraction from prose
 - **Windows path compatibility required** — primary dev environment is Windows
-- **Default rules directory is `review/`** at repo root — simple, visible, not hidden
+- **Default rules directory is `review/`** at repo root — simple, visible, not hidden; configurable via `focused-review.json` config file (see `docs/spec/configurable-rules-dir.md`)

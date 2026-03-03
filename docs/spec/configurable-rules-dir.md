@@ -2,10 +2,29 @@
 
 ## Goals
 
-1. Setting `FOCUSED_REVIEW_RULES_DIR=custom-rules/` causes both review and refresh modes to read/write rules from `custom-rules/` instead of `review/`.
-2. Passing `--rules-dir X` on the CLI overrides the env var.
-3. Omitting both falls back to `review/` (backward compatible).
+1. A `focused-review.json` config file controls which directory rules are read from/written to.
+2. Passing `--rules-dir X` on the Python CLI overrides the config file.
+3. No config file falls back to `review/` (backward compatible).
 4. Windows path separators are normalized.
+5. `/focused-review configure` provides an interactive flow to create/update the config file.
+
+## Config File
+
+### Format
+
+```json
+{ "rules_dir": "custom-rules/" }
+```
+
+### Scan Locations (priority order)
+
+1. `.claude/focused-review.json` — project shared (version-controlled)
+2. `focused-review.json` — repo root (platform-agnostic)
+3. `.github/focused-review.json` — GitHub convention
+4. `~/.claude/focused-review.json` — user-wide (Claude Code)
+5. `~/.copilot/focused-review.json` — user-wide (Copilot CLI)
+
+First match wins. If none found → default `review/`.
 
 ## Expected Behavior
 
@@ -13,46 +32,67 @@
 
 The rules directory resolves in this order:
 1. Explicit `--rules-dir` CLI flag (Python script only)
-2. `FOCUSED_REVIEW_RULES_DIR` environment variable
+2. `focused-review.json` config file (first match from scan locations)
 3. `review/` (default)
 
-Both relative paths (relative to repo root) and absolute paths are accepted. Path separators are normalized for Windows compatibility.
+Relative paths are relative to repo root. Path separators are normalized for Windows compatibility.
 
 ### Review Mode
 
-SKILL.md resolves the rules directory once at the start of Review Mode and passes the resolved value to the Python script via `--rules-dir`. All user-facing messages reference the resolved directory, not the hardcoded default.
+SKILL.md resolves the rules directory once at the start via a Python one-liner that scans config file locations. The resolved value is passed to the Python script via `--rules-dir`.
 
 ### Refresh Mode
 
-SKILL.md resolves the rules directory once at the start of Refresh Mode. Rules are created/updated/deleted in the resolved directory. On first run (no existing rules), the skill tells the user:
+SKILL.md resolves the rules directory once at the start. Rules are created/updated/deleted in the resolved directory. On first run (no existing rules), the skill tells the user:
 
-> "Rules will be stored in `{rules_dir}`. To use a different directory, set `FOCUSED_REVIEW_RULES_DIR` in your Claude Code settings (`env` section) or shell environment."
+> "Rules will be stored in `{rules_dir}`. Run `/focused-review configure` to change the rules directory."
 
 ### Python Script
 
-The `--rules-dir` argument's default changes from the hardcoded `"review/"` to: `os.environ.get("FOCUSED_REVIEW_RULES_DIR", "review/")`. Explicit `--rules-dir` on the command line still takes precedence.
+The `--rules-dir` argument's default calls a `_resolve_rules_dir()` function that scans the same config file locations as SKILL.md. Explicit `--rules-dir` on the command line still takes precedence.
+
+### Configure Mode
+
+`/focused-review configure` runs an interactive flow:
+
+1. **Detect platform**: `CLAUDE_PLUGIN_ROOT` present → Copilot CLI, otherwise → Claude Code
+2. **Ask for rules directory**: Show current resolved value, ask for new value (Enter = keep)
+3. **Ask where to save**: Present location options based on platform:
+   - Claude Code: `.claude/focused-review.json`, `focused-review.json`, `.github/focused-review.json`, `~/.claude/focused-review.json`
+   - Copilot CLI: `focused-review.json`, `.github/focused-review.json`, `~/.copilot/focused-review.json`
+4. **Write the file**: Read existing JSON or start from `{}`, set `rules_dir`, write with indent=2. Create parent dir if needed.
+5. **Confirm**: Tell user what was written. If project-shared location, remind to commit.
 
 ## Technical Approach
 
 ### Python Changes (`focused-review.py`)
 
-- Change `--rules-dir` default from `"review/"` to `os.environ.get("FOCUSED_REVIEW_RULES_DIR", "review/")`
-- Normalize path separators for Windows
+- Add `_resolve_rules_dir()` function that scans config file locations
+- Change `--rules-dir` default from env var to `_resolve_rules_dir()`
+- Keep Windows path normalization
 
 ### SKILL.md Changes
 
-- Add a rules-dir resolution block near the top (after script path resolution), using a Python one-liner or inline logic to read the env var
-- Replace all ~15 hardcoded `review/` references with the resolved value
-- Add first-run messaging in Refresh Mode
+- Update argument-hint to include `configure`
+- Add `configure` to mode dispatch
+- Replace env var resolution one-liner with config file scanner one-liner
+- Add Configure Mode section between Mode Selection and Review Mode
+- Update first-run message to reference `/focused-review configure`
+
+### Test Changes
+
+- Rewrite `test_rules_dir_resolution.py` for config file instead of env var
 
 ### Documentation Updates
 
-- README.md: document `FOCUSED_REVIEW_RULES_DIR` in configuration section
-- `docs/spec/focused-review.md`: update rules directory references to note configurability
+- `docs/spec/focused-review.md`: add `configure` to arguments, update config references
+- `README.md`: update configuration section for config file
 - `CLAUDE.md`: update architecture notes
 
 ## Decisions
 
-- **Env var over config file**: env var is settable via Claude Code `settings.json` `env` section, follows existing `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` pattern, no extra files
+- **Config file over env var**: works identically on Claude Code and Copilot CLI, no platform-specific settings mechanism needed, dedicated file is discoverable
+- **Multiple scan locations**: project-scoped (3 options for team preference) + user-scoped (platform-aware)
 - **Default stays `review/`**: backward compatible, no migration needed
-- **SKILL.md resolves once**: avoids repeated env var checks throughout the prompt
+- **SKILL.md resolves once**: avoids repeated config file reads throughout the prompt
+- **Platform detection via `CLAUDE_PLUGIN_ROOT`**: already used in SKILL.md line 8 for script path resolution

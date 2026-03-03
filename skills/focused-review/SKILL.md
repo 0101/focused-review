@@ -1,38 +1,89 @@
 ---
 name: focused-review
 description: Run parallel focused code reviews using committed review rules
-argument-hint: "[branch|commit|staged|unstaged|full|refresh]"
+argument-hint: "[branch|commit|staged|unstaged|full|refresh|configure]"
 ---
 
 <!-- Resolve the Python helper path at load time. Works for plugin installs (CLAUDE_PLUGIN_ROOT), user/project skill dirs, and direct repo use. -->
 **Script path:** !`python -c "import os; from pathlib import Path; pr=os.environ.get('CLAUDE_PLUGIN_ROOT',''); candidates=[Path(pr)/'skills/focused-review/scripts/focused-review.py'] if pr else []; candidates+=[Path.home()/'.claude/skills/focused-review/scripts/focused-review.py',Path('.claude/skills/focused-review/scripts/focused-review.py'),Path('skills/focused-review/scripts/focused-review.py')]; p=next((c.resolve() for c in candidates if c.exists()),None); print(p or 'ERROR_SCRIPT_NOT_FOUND')"`
 
-You are the orchestrator for the focused-review plugin. You have two modes based on the argument.
+<!-- Resolve the rules directory from config file. Scans .claude/focused-review.json, .focused-review.json, .github/focused-review.json, ~/.claude/focused-review.json, ~/.copilot/focused-review.json. First match wins, fallback review/. -->
+**Rules directory:** !`python -c "import json,os; from pathlib import Path; locs=[Path('.claude/focused-review.json'),Path('focused-review.json'),Path('.github/focused-review.json')]+[Path(os.path.expanduser(p)) for p in ['~/.claude/focused-review.json','~/.copilot/focused-review.json']]; d=next((json.loads(f.read_text()).get('rules_dir','review/') for f in locs if f.is_file()),'review/'); d=d.replace(chr(92),'/').rstrip('/')+'/'; print(d)"`
+
+You are the orchestrator for the focused-review plugin. You have three modes based on the argument.
 
 ## Mode Selection
 
 Parse the user's argument (available as `$ARGUMENTS`):
 
+- `configure` → **Configure Mode** (below)
 - `refresh` → **Refresh Mode** (below)
 - `branch`, `commit`, `staged`, `unstaged`, `full` → **Review Mode** with that scope
 - Empty or missing → **Review Mode** with scope `branch`
 
 ---
 
+## Configure Mode
+
+Interactive flow to create or update a `focused-review.json` config file that controls where rules are stored.
+
+### Step 1: Detect platform
+
+Check if `CLAUDE_PLUGIN_ROOT` is set:
+- **Set** → running under Copilot CLI
+- **Not set** → running under Claude Code
+
+### Step 2: Ask for rules directory
+
+Tell the user the current resolved rules directory (from **Rules directory** above) and ask what it should be. If the user presses Enter or says "keep", use the current value.
+
+### Step 3: Ask where to save
+
+Present numbered options based on platform:
+
+**Claude Code:**
+1. `.claude/focused-review.json` — project shared (version-controlled)
+2. `focused-review.json` — repo root (platform-agnostic)
+3. `.github/focused-review.json` — GitHub convention
+4. `~/.claude/focused-review.json` — user-wide
+
+**Copilot CLI:**
+1. `focused-review.json` — repo root (platform-agnostic)
+2. `.github/focused-review.json` — GitHub convention
+3. `~/.copilot/focused-review.json` — user-wide
+
+### Step 4: Write the config file
+
+Write the config file using a Python one-liner (using the **Script path** resolved above for consistency):
+
+```bash
+python -c "import json,os; from pathlib import Path; p=Path('{chosen_path}'); p.parent.mkdir(parents=True,exist_ok=True); d=json.loads(p.read_text()) if p.is_file() else {}; d['rules_dir']='{rules_dir_value}'; p.write_text(json.dumps(d,indent=2)+'\n')"
+```
+
+Where `{chosen_path}` is the path selected in Step 3 (expand `~` for user-wide paths) and `{rules_dir_value}` is the directory from Step 2.
+
+### Step 5: Confirm
+
+Tell the user:
+- What was written and where
+- If a project-shared location was chosen (`.claude/`, `focused-review.json`, `.github/`), remind them to commit the file
+
+---
+
 ## Review Mode
 
-Run a parallel code review using committed rules from the repo's `review/` directory.
+Run a parallel code review using committed rules from the repo's `{rules_dir}` directory (using the **Rules directory** resolved above).
 
 ### Step 1: Prepare dispatch
 
-Determine the scope from the argument (default `branch`), then run the Python helper using the **Script path** resolved above:
+Determine the scope from the argument (default `branch`), then run the Python helper using the **Script path** and **Rules directory** resolved above:
 
 ```bash
-python {script_path} prepare-review --repo . --scope {scope} --rules-dir review/
+python {script_path} prepare-review --repo . --scope {scope} --rules-dir {rules_dir}
 ```
 
 The script will:
-- Read all rule files from `review/`
+- Read all rule files from `{rules_dir}`
 - Generate the diff for the requested scope
 - Chunk large diffs at file boundaries
 - Filter rules by `applies-to` globs
@@ -40,7 +91,7 @@ The script will:
 - Print a JSON summary to stdout on success
 
 **Error handling:**
-- **No rules found**: If the script reports no rules in `review/`, this is likely the user's first run. Do NOT ask — tell the user "No review rules found — collecting rules from instruction files" and automatically proceed with **Refresh Mode** below. After refresh completes, re-run this prepare-review step with the same scope.
+- **No rules found**: If the script reports no rules in `{rules_dir}`, this is likely the user's first run. Do NOT ask — tell the user "No review rules found — collecting rules from instruction files" and automatically proceed with **Refresh Mode** below. After refresh completes, re-run this prepare-review step with the same scope.
 - **Other errors**: If the script prints nothing to stdout, or prints an error to stderr, or exits non-zero for any other reason, report the error to the user and stop.
 
 ### Step 2: Read dispatch plan
@@ -50,7 +101,7 @@ Read `.agents/focused-review/dispatch.json`. It contains an array of dispatch en
 ```json
 [
   {
-    "rule_path": "review/sealed-classes.md",
+    "rule_path": "{rules_dir}sealed-classes.md",
     "model": "haiku",
     "autofix": false,
     "chunk_path": ".agents/focused-review/diff.patch",
@@ -134,7 +185,7 @@ After writing the report, tell the user:
 
 ## Refresh Mode
 
-Re-scan instruction files and update review rules in `review/`.
+Re-scan instruction files and update review rules in `{rules_dir}` (using the **Rules directory** resolved above).
 
 ### Step 1: Discover instruction files
 
@@ -148,7 +199,7 @@ This outputs a JSON array of instruction file paths (relative to repo root). If 
 
 ### Step 2: Read all sources
 
-Read **every** instruction file returned by discover. Also read **all** existing rule files from `review/*.md` (if any exist).
+Read **every** instruction file returned by discover. Also read **all** existing rule files from `{rules_dir}*.md` (if any exist).
 
 You need both sets of content to compare what instructions say vs. what rules currently enforce.
 
@@ -173,11 +224,15 @@ Analyze the instruction files against the existing rules. Produce a categorized 
 
 ### Step 3b: Built-in bootstrap rules (first use only)
 
-If `review/` was empty before this refresh (i.e. no existing rule files were found in Step 2), include the following built-in rules in the proposal alongside the rules extracted from instructions. If `review/` already had rules, skip this step — built-ins are only offered on first use.
+If `{rules_dir}` was empty before this refresh (i.e. no existing rule files were found in Step 2), include the following built-in rules in the proposal alongside the rules extracted from instructions. If `{rules_dir}` already had rules, skip this step — built-ins are only offered on first use.
+
+**First-run message:** When `{rules_dir}` is empty, before presenting the summary, tell the user:
+
+> "Rules will be stored in `{rules_dir}`. Run `/focused-review configure` to change the rules directory."
 
 **Built-in: code-duplication**
 
-Use this exact content for the `review/code-duplication.md` file:
+Use this exact content for the `{rules_dir}code-duplication.md` file:
 
 ~~~yaml
 ---
@@ -248,10 +303,10 @@ Do NOT use AskUserQuestion — just output the numbered list and let the user re
 
 ### Step 5: Apply changes
 
-Based on the user's decisions, directly create, edit, or delete rule files in `review/`:
+Based on the user's decisions, directly create, edit, or delete rule files in `{rules_dir}`:
 
-- **New rules**: Create `review/{rule-name}.md` with the drafted content
-- **Updated rules**: Edit `review/{rule-name}.md` with the updated content
+- **New rules**: Create `{rules_dir}{rule-name}.md` with the drafted content
+- **Updated rules**: Edit `{rules_dir}{rule-name}.md` with the updated content
 - **Removed rules** (if user chose to remove orphaned ones): Delete the file
 - **Unchanged/Kept**: Do nothing
 
@@ -287,4 +342,4 @@ Code example showing compliant code.
 \`\`\`
 ```
 
-After applying changes, tell the user what was done (files created, updated, deleted) and remind them to review and commit the changes in `review/`.
+After applying changes, tell the user what was done (files created, updated, deleted) and remind them to review and commit the changes in `{rules_dir}`.
