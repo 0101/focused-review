@@ -8,6 +8,7 @@ Copilot CLI plugin / Claude Code skill that runs parallel code reviews using com
 - `skills/focused-review/SKILL.md` — orchestration skill (dispatches review agents)
 - `skills/focused-review/scripts/focused-review.py` — Python helper (discovery, diff generation, dispatch planning)
 - `agents/review-runner.agent.md` — subagent profile (reviews one rule against one diff chunk)
+- `skills/focused-review/defaults/` — built-in bootstrap rules (shipped with the plugin, loaded on first refresh)
 - `review/` — committed review rules (version-controlled, one rule per `.md` file); directory configurable via `focused-review.json` config file
 - `.agents/focused-review/` — ephemeral working directory (gitignored)
 

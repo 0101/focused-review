@@ -10,6 +10,9 @@ argument-hint: "[branch|commit|staged|unstaged|full|refresh|configure]"
 <!-- Resolve the rules directory from config file. Scans .claude/focused-review.json, .focused-review.json, .github/focused-review.json, ~/.claude/focused-review.json, ~/.copilot/focused-review.json. First match wins, fallback review/. -->
 **Rules directory:** !`python -c "import json,os; from pathlib import Path; locs=[Path('.claude/focused-review.json'),Path('focused-review.json'),Path('.github/focused-review.json')]+[Path(os.path.expanduser(p)) for p in ['~/.claude/focused-review.json','~/.copilot/focused-review.json']]; d=next((json.loads(f.read_text()).get('rules_dir','review/') for f in locs if f.is_file()),'review/'); d=d.replace(chr(92),'/').rstrip('/')+'/'; print(d)"`
 
+<!-- Resolve the defaults directory (built-in bootstrap rules). Same candidate logic as Script path. -->
+**Defaults directory:** !`python -c "import os; from pathlib import Path; pr=os.environ.get('CLAUDE_PLUGIN_ROOT',''); candidates=[Path(pr)/'skills/focused-review/defaults/'] if pr else []; candidates+=[Path.home()/'.claude/skills/focused-review/defaults/',Path('.claude/skills/focused-review/defaults/'),Path('skills/focused-review/defaults/')]; p=next((c.resolve() for c in candidates if c.is_dir()),None); print(str(p).replace(chr(92),'/')+'/' if p else 'ERROR_DEFAULTS_NOT_FOUND')"`
+
 You are the orchestrator for the focused-review plugin. You have three modes based on the argument.
 
 ## Mode Selection
@@ -222,99 +225,16 @@ Analyze the instruction files against the existing rules. Produce a categorized 
 
 **IMPORTANT — extract ALL rules.** Do NOT skip rules because they seem "subjective", "design-level", or "hard to check mechanically". Review agents are LLMs — they can evaluate style, design patterns, idiomatic usage, and architectural guidance just as well as mechanical checks. If an instruction file says to prefer a certain pattern, that becomes a rule. The only instructions to skip are those that are purely about tooling/workflow (e.g. "run tests with pytest") rather than code quality.
 
-### Step 3b: Built-in bootstrap rules (first use only)
+### Step 3b: Built-in rules
 
-If `{rules_dir}` was empty before this refresh (i.e. no existing rule files were found in Step 2), include the following built-in rules in the proposal alongside the rules extracted from instructions. If `{rules_dir}` already had rules, skip this step — built-ins are only offered on first use.
+Read all `.md` files from the **Defaults directory** resolved above. Each file is a complete rule in standard format (YAML frontmatter + Markdown body). Compare each built-in (by filename) against the existing rules in `{rules_dir}`:
 
-**First-run message:** When `{rules_dir}` is empty, before presenting the summary, tell the user:
+- **Missing**: no matching file in `{rules_dir}` → include as a "Built-in" new rule in the proposal
+- **Already present**: a file with the same name exists in `{rules_dir}` → skip (do not propose)
+
+If `{rules_dir}` was empty (no existing rules found in Step 2), also tell the user before presenting the summary:
 
 > "Rules will be stored in `{rules_dir}`. Run `/focused-review configure` to change the rules directory."
-
-**Built-in: code-duplication**
-
-Use this exact content for the `{rules_dir}code-duplication.md` file:
-
-~~~yaml
----
-autofix: false
-model: sonnet
-source: "built-in"
----
-# Code Duplication
-
-## Rule
-Flag new or changed code that duplicates logic already present in the codebase.
-
-## Why
-Duplicated code increases maintenance burden — bugs must be fixed in multiple places, and behavior diverges over time. Catching duplication at review time prevents it from accumulating.
-
-## Requirements
-- New code should not replicate logic that already exists elsewhere in the codebase
-- If a diff adds code similar to an existing function/method/pattern, flag it and suggest reusing or extracting a shared abstraction
-- Use grep to search the codebase for similar patterns when reviewing added code
-- Minor duplication (a single repeated line, common boilerplate) is acceptable — focus on duplicated logic or algorithms
-
-## Wrong
-```
-// In UserService.cs — new code in diff
-public string FormatUserName(User user) =>
-    $"{user.LastName}, {user.FirstName} ({user.Email})";
-
-// Already exists in DisplayHelper.cs
-public string FormatName(Person p) =>
-    $"{p.LastName}, {p.FirstName} ({p.Email})";
-```
-
-## Correct
-```
-// Reuse the existing helper
-public string FormatUserName(User user) =>
-    DisplayHelper.FormatName(user);
-```
-~~~
-
-**Built-in: bug-spotter**
-
-Use this exact content for the `review/bug-spotter.md` file:
-
-~~~yaml
----
-autofix: false
-model: inherit
-source: "built-in"
----
-# Bug Spotter
-
-## Rule
-Find bugs, logic errors, and correctness issues in new or changed code. Nothing else.
-
-## Why
-Dedicated bug-finding without distraction from style, naming, or documentation concerns. A focused reviewer examining only correctness catches issues that broader reviews miss under cognitive load.
-
-## Requirements
-- Look for logic errors: wrong comparisons, off-by-one, boundary conditions (`>` vs `>=`, `<` vs `<=`)
-- Look for state management bugs: variables not updated in all branches, missing else clauses, incomplete switch cases
-- Look for null/resource bugs: use-after-dispose, null dereference on error paths, missing cleanup
-- Look for concurrency bugs: race conditions, shared state without synchronization, non-atomic check-then-act
-- Look for arithmetic bugs: integer overflow, division by zero, sign errors, lossy casts
-- Reason about what the code is trying to do, then check whether it actually does that
-- ONLY report actual bugs or very likely bugs — not style, not naming, not "could be cleaner"
-- If unsure whether something is a bug, explain the concern and the conditions under which it would fail
-
-## Wrong
-```
-// Off-by-one: skips first IPv6 address when index is 0
-if (nextIPv6AddressIndex > 0 && nextIPv4AddressIndex >= 0)
-    parallelConnect = true;
-```
-
-## Correct
-```
-// Includes index 0
-if (nextIPv6AddressIndex >= 0 && nextIPv4AddressIndex >= 0)
-    parallelConnect = true;
-```
-~~~
 
 ### Step 4: Present summary to user
 
