@@ -2,6 +2,17 @@
 
 Auto-generates review rules from instruction files and runs parallel code reviews.
 
+## Why
+
+AI coding agents can follow a single instruction reliably — but give them a long list of rules and they start dropping things. The more instructions you pile into `CLAUDE.md`, `.cursorrules`, or `AGENTS.md`, the less consistently any one of them gets enforced.
+
+Focused Review fixes this by giving each rule to its own agent. One rule, one agent, one job. The result is reliable enforcement even across dozens of rules.
+
+- **Rules from your instructions**: Extracts review criteria from the instruction files already in your repo
+- **One rule per agent**: Each rule gets full attention — no competition for context
+- **Version-controlled rules**: Rules live in `review/` as Markdown files, reviewed in PRs like code
+- **Works with your diff workflow**: Branch, commit, staged, unstaged, or full codebase scans
+
 ## Installation
 
 ### Copilot CLI
