@@ -158,7 +158,11 @@ class TestConfigFileResolution:
         """When no config file exists, _resolve_rules_dir returns review/."""
         repo = _setup_repo(tmp_path, "review")
 
-        result = fr._resolve_rules_dir(str(repo))
+        # Mocking CONFIG_SCAN_LOCATIONS to ensure no config file is found
+        # in the test environment, regardless of the actual file system state.
+        with patch.object(fr, "CONFIG_SCAN_LOCATIONS", ["nonexistent.json"]), \
+             patch.object(fr, "CONFIG_USER_LOCATIONS", []):
+             result = fr._resolve_rules_dir(str(repo))
         assert result == "review/"
 
     def test_backslash_in_config_value_normalized(self, tmp_path: Path) -> None:
@@ -215,19 +219,22 @@ class TestConfigResolutionIntegration:
         repo = _setup_repo(tmp_path, "review")
         diff = _make_diff("src/Foo.cs")
 
-        with patch(
-            "sys.argv",
-            [
-                "focused-review",
-                "prepare-review",
-                "--repo", str(repo),
-                "--scope", "branch",
-            ],
-        ):
-            with patch.object(
-                fr, "_run_git", side_effect=_mock_git_results(diff, ["src/Foo.cs"])
+        # Mocking CONFIG_SCAN_LOCATIONS to avoid picking up the project's actual config
+        with patch.object(fr, "CONFIG_SCAN_LOCATIONS", ["nonexistent.json"]), \
+             patch.object(fr, "CONFIG_USER_LOCATIONS", []):
+             with patch(
+                "sys.argv",
+                [
+                    "focused-review",
+                    "prepare-review",
+                    "--repo", str(repo),
+                    "--scope", "branch",
+                ],
             ):
-                fr.main()
+                with patch.object(
+                    fr, "_run_git", side_effect=_mock_git_results(diff, ["src/Foo.cs"])
+                ):
+                    fr.main()
 
         captured = capsys.readouterr()
         summary = json.loads(captured.out)
