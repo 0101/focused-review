@@ -19,9 +19,10 @@ Dedicated bug-finding without distraction from style, naming, or documentation c
 - Look for arithmetic bugs: integer overflow, division by zero, sign errors, lossy casts
 - Reason about what the code is trying to do, then check whether it actually does that
 - ONLY report actual bugs or very likely bugs — not style, not naming, not "could be cleaner"
-- If unsure whether something is a bug, explain the concern and the conditions under which it would fail
+- Do NOT report speculative or theoretical concerns. A bug report must identify a concrete scenario where the code produces a wrong result, crashes, or corrupts state. "Another process might modify the file between check and use" is not a bug unless the code's own contract requires atomicity. "What if the array is empty" is not a bug if the caller guarantees non-empty input. "This could overflow" is not a bug unless the value range actually reaches overflow in practice.
+- If unsure whether something is a bug, explain the concern and the conditions under which it would fail — but only report it if those conditions are plausible given the surrounding code and API contract
 
-## Wrong
+## Wrong (real bug)
 ```
 // Off-by-one: skips first IPv6 address when index is 0
 if (nextIPv6AddressIndex > 0 && nextIPv4AddressIndex >= 0)
@@ -33,4 +34,14 @@ if (nextIPv6AddressIndex > 0 && nextIPv4AddressIndex >= 0)
 // Includes index 0
 if (nextIPv6AddressIndex >= 0 && nextIPv4AddressIndex >= 0)
     parallelConnect = true;
+```
+
+## Wrong (false positive — do NOT report concerns like this)
+```
+// Reviewer flags: "The file could be deleted by another process between
+// File.Exists and File.ReadAllText, causing a FileNotFoundException."
+// This is speculative — the method's contract does not guarantee atomicity
+// against external modifications, and the caller handles exceptions upstream.
+if (File.Exists(path))
+    return File.ReadAllText(path);
 ```

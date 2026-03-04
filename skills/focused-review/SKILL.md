@@ -215,10 +215,10 @@ Analyze the instruction files against the existing rules. Produce a categorized 
 
 - **New rules**: Instructions contain guidance that has no matching committed rule. For each, draft the full rule content in the standard format (YAML frontmatter with `autofix: false`, `model: haiku|sonnet|inherit`, `source: {instruction file}`, optional `applies-to` glob, then Markdown body with `# Rule Name`, `## Rule`, `## Why`, `## Requirements`, `## Wrong`, `## Correct` sections).
 
-  **Choosing `model`** — pick the model that matches the rule's complexity:
-  - **haiku**: syntactic/mechanical checks — keyword presence/absence, operator usage, structural patterns (e.g. "no `mutable`", "no `break`/`continue`", "use `|>` operator", "no `null`")
-  - **sonnet**: rules requiring semantic judgment, design reasoning, or understanding intent (e.g. "simplicity over complexity", "prefer expressions over statements", code duplication detection)
-  - **inherit**: rules requiring deep understanding — architectural evaluation, nuanced trade-off analysis, or holistic design review (e.g. "model domain with DUs", "simplicity over complexity" when applied to architecture-level decisions)
+  **Choosing `model`** — pick the model that matches the rule's cognitive demand:
+  - **haiku**: simple pattern matching — keyword presence/absence, operator usage, structural patterns (e.g. "no `mutable`", "no `break`/`continue`", "use `|>` operator", "no `null`"). The rule can be checked by looking at syntax alone.
+  - **sonnet**: rules requiring semantic understanding — API design review, code duplication detection, design pattern evaluation, "prefer expressions over statements", simplicity judgments. The rule requires understanding what the code means, not just what it looks like.
+  - **inherit**: rules requiring deep reasoning about correctness — bug finding, concurrency analysis, race condition detection, security review, subtle logic errors, architectural trade-offs. The rule requires reasoning about runtime behavior, state transitions, or cross-cutting concerns.
 
 - **Updated rules**: A committed rule exists but the source instruction has changed in a way that affects the rule's requirements. Include the updated content.
 
@@ -228,8 +228,9 @@ Analyze the instruction files against the existing rules. Produce a categorized 
 
 **IMPORTANT — extract ALL substantive rules.** Do NOT skip rules because they seem "subjective", "design-level", or "hard to check mechanically". Review agents are LLMs — they can evaluate style, design patterns, idiomatic usage, and architectural guidance just as well as mechanical checks. If an instruction file says to prefer a certain pattern, that becomes a rule. Skip only these categories:
 - **Tooling/workflow** instructions (e.g. "run tests with pytest") — not code quality.
-- **Cosmetic-only** rules — if the only substance is whitespace, indentation, brace style, or blank line placement, skip it. These are enforced by formatters, not reviewers.
-- **Rules without substantive examples** — if you cannot write Wrong/Correct examples that differ in behavior or readability (not just formatting), the rule is too vague to produce actionable findings. Skip it.
+- **Cosmetic-only** rules — if the ONLY substance is whitespace, indentation, brace style, brace placement, blank line counts, or line length, skip it. These are enforced by formatters, not reviewers. If a rule mixes cosmetic checks with behavioral checks (e.g. "use consistent indentation AND prefer early returns"), drop the cosmetic parts and keep the behavioral ones.
+- **Rules without substantive examples** — if you cannot write Wrong/Correct examples that differ in behavior or semantic meaning (not just formatting or whitespace), the rule is too vague to produce actionable findings. Skip it.
+- **Purely subjective rules** — if every requirement in the rule is subjective ("ensure quality", "keep it clean", "write good code") with no concrete, testable checkpoint, skip it. A rule must have at least one requirement that a reviewer could unambiguously check against a code sample.
 
 **Quality guidance for drafted rules:**
 - **Scope rules tightly.** If a rule only applies to specific file types (test files, native code, scripts, etc.), add an `applies-to` glob. For example: `applies-to: "**/*Test*.cs"` for test-only rules, `applies-to: "**/*.{cpp,h,c}"` for native code. Broad scope produces more noise.
@@ -275,8 +276,8 @@ Enter numbers to INCLUDE (e.g. "1, 3, 4"), "all", or "all but 3, 5":
 
 **Quality flags** — append these inline warnings to flagged rules in the summary above:
 - `[! missing applies-to]` — rule text references specific file types (e.g. "test files", "*.cpp") but has no `applies-to` glob. Broad scope will produce noise.
-- `[! formatting-only examples]` — Wrong and Correct examples differ only in whitespace/formatting, not behavior or readability.
-- `[! no concrete checkpoints]` — rule uses purely subjective language ("ensure quality", "keep it clean") without concrete, checkable requirements.
+- `[! formatting-only examples]` — Wrong and Correct examples differ only in whitespace, formatting, or cosmetic layout, not in behavior or semantic meaning. Rule will likely produce false positives.
+- `[! no concrete checkpoints]` — every requirement in the rule is subjective ("ensure quality", "keep it clean") with no concrete, testable checkpoint. Rule cannot be checked unambiguously.
 
 These flags help the user decide which rules to exclude. Do not auto-exclude flagged rules — the user decides.
 
