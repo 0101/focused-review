@@ -223,7 +223,14 @@ Analyze the instruction files against the existing rules. Produce a categorized 
 
 - **Unchanged rules**: A committed rule that still accurately reflects its source instruction. No action needed.
 
-**IMPORTANT — extract ALL rules.** Do NOT skip rules because they seem "subjective", "design-level", or "hard to check mechanically". Review agents are LLMs — they can evaluate style, design patterns, idiomatic usage, and architectural guidance just as well as mechanical checks. If an instruction file says to prefer a certain pattern, that becomes a rule. The only instructions to skip are those that are purely about tooling/workflow (e.g. "run tests with pytest") rather than code quality.
+**IMPORTANT — extract ALL substantive rules.** Do NOT skip rules because they seem "subjective", "design-level", or "hard to check mechanically". Review agents are LLMs — they can evaluate style, design patterns, idiomatic usage, and architectural guidance just as well as mechanical checks. If an instruction file says to prefer a certain pattern, that becomes a rule. Skip only these categories:
+- **Tooling/workflow** instructions (e.g. "run tests with pytest") — not code quality.
+- **Cosmetic-only** rules — if the only substance is whitespace, indentation, brace style, or blank line placement, skip it. These are enforced by formatters, not reviewers.
+- **Rules without substantive examples** — if you cannot write Wrong/Correct examples that differ in behavior or readability (not just formatting), the rule is too vague to produce actionable findings. Skip it.
+
+**Quality guidance for drafted rules:**
+- **Scope rules tightly.** If a rule only applies to specific file types (test files, native code, scripts, etc.), add an `applies-to` glob. For example: `applies-to: "**/*Test*.cs"` for test-only rules, `applies-to: "**/*.{cpp,h,c}"` for native code. Broad scope produces more noise.
+- **Favor stronger models for judgment calls.** Rules about thread safety, API design, interop correctness, and architectural patterns need `sonnet` or `inherit` — not `haiku`. Reserve `haiku` for mechanical/syntactic checks only.
 
 ### Step 3b: Built-in rules
 
@@ -262,6 +269,13 @@ Show the user a **numbered** summary of proposed changes. Each entry shows the r
 
 Enter numbers to INCLUDE (e.g. "1, 3, 4"), "all", or "all but 3, 5":
 ```
+
+**Quality flags** — append these inline warnings to flagged rules in the summary above:
+- `[! missing applies-to]` — rule text references specific file types (e.g. "test files", "*.cpp") but has no `applies-to` glob. Broad scope will produce noise.
+- `[! formatting-only examples]` — Wrong and Correct examples differ only in whitespace/formatting, not behavior or readability.
+- `[! no concrete checkpoints]` — rule uses purely subjective language ("ensure quality", "keep it clean") without concrete, checkable requirements.
+
+These flags help the user decide which rules to exclude. Do not auto-exclude flagged rules — the user decides.
 
 Do NOT use AskUserQuestion — just output the numbered list and let the user reply freely. Interpret their response naturally (e.g. "all", "1-5", "all but 3", "1, 2, 4"). Only apply the rules the user selected.
 
