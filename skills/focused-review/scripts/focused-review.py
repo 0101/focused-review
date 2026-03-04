@@ -518,6 +518,9 @@ def prepare_review(args: argparse.Namespace) -> None:
 
     dispatch = _build_dispatch(rules, chunk_paths, changed_files, scope, repo)
 
+    if getattr(args, "no_autofix", False):
+        dispatch = [{**entry, "autofix": False} for entry in dispatch]
+
     dispatch_path = work_dir / "dispatch.json"
     dispatch_path.write_text(json.dumps(dispatch, indent=2), encoding="utf-8")
 
@@ -579,6 +582,12 @@ def main() -> int:
         "--rules-dir",
         default=None,
         help="Directory containing review rule files (default: resolved from focused-review.json, then review/)",
+    )
+    prepare_parser.add_argument(
+        "--no-autofix",
+        action="store_true",
+        default=False,
+        help="Force all rules to report-only mode, ignoring per-rule autofix settings",
     )
     prepare_parser.set_defaults(func=prepare_review)
 

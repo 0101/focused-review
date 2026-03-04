@@ -1,7 +1,7 @@
 ---
 name: focused-review
 description: Run parallel focused code reviews using committed review rules
-argument-hint: "[branch|commit|staged|unstaged|full|refresh|configure]"
+argument-hint: "[branch|commit|staged|unstaged|full|refresh|configure] [--no-autofix]"
 ---
 
 <!-- Resolve the Python helper path at load time. Works for plugin installs (CLAUDE_PLUGIN_ROOT), user/project skill dirs, and direct repo use. -->
@@ -19,6 +19,7 @@ You are the orchestrator for the focused-review plugin. You have three modes bas
 
 Parse the user's argument (available as `$ARGUMENTS`):
 
+- First, check if `--no-autofix` is present anywhere in the arguments. If so, set `no_autofix = true` and remove it from the argument string before parsing the mode. This flag suppresses all autofix behavior — violations are reported but never fixed. Useful for CI runs, remote PR reviews, or read-only contexts.
 - `configure` → **Configure Mode** (below)
 - `refresh` → **Refresh Mode** (below)
 - `branch`, `commit`, `staged`, `unstaged`, `full` → **Review Mode** with that scope
@@ -82,8 +83,10 @@ Run a parallel code review using committed rules from the repo's `{rules_dir}` d
 Determine the scope from the argument (default `branch`), then run the Python helper using the **Script path** and **Rules directory** resolved above:
 
 ```bash
-python {script_path} prepare-review --repo . --scope {scope} --rules-dir {rules_dir}
+python {script_path} prepare-review --repo . --scope {scope} --rules-dir {rules_dir} {no_autofix_flag}
 ```
+
+Where `{no_autofix_flag}` is `--no-autofix` if `no_autofix` was set during mode selection, or omitted entirely otherwise.
 
 The script will:
 - Read all rule files from `{rules_dir}`
