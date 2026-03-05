@@ -12,21 +12,34 @@ Find bugs, logic errors, and correctness issues in new or changed code. Nothing 
 Dedicated bug-finding without distraction from style, naming, or documentation concerns. A focused reviewer examining only correctness catches issues that broader reviews miss under cognitive load.
 
 ## Requirements
-- Look for logic errors: wrong comparisons, off-by-one, boundary conditions (`>` vs `>=`, `<` vs `<=`)
-- Look for state management bugs: variables not updated in all branches, missing else clauses, incomplete switch cases
-- Look for null/resource bugs: use-after-dispose, null dereference on error paths, missing cleanup
-- Look for concurrency bugs: race conditions, shared state without synchronization, non-atomic check-then-act
-- Look for arithmetic bugs: integer overflow, division by zero, sign errors, lossy casts
 - Reason about what the code is trying to do, then check whether it actually does that
-- ONLY report actual bugs or very likely bugs — not style, not naming, not "could be cleaner"
-- Do NOT report speculative or theoretical concerns. A bug report must identify a concrete scenario where the code produces a wrong result, crashes, or corrupts state. "Another process might modify the file between check and use" is not a bug unless the code's own contract requires atomicity. "What if the array is empty" is not a bug if the caller guarantees non-empty input. "This could overflow" is not a bug unless the value range actually reaches overflow in practice.
-- If unsure whether something is a bug, explain the concern and the conditions under which it would fail — but only report it if those conditions are plausible given the surrounding code and API contract
+- Look for: wrong comparisons, off-by-one (`>` vs `>=`), wrong variable in a condition, dead code paths, early returns that block needed logic, race conditions, use-after-dispose, null dereference on error paths
+- When you find a concrete bug — a scenario where the code produces wrong results, crashes, or corrupts state — report it. Do not stay silent on real bugs.
+- Skip style, naming, documentation, and speculative concerns about external factors (e.g. "another process might delete the file"). Focus on bugs provable from the code itself.
 
-## Wrong (real bug)
+## Wrong
 ```
-// Off-by-one: skips first IPv6 address when index is 0
+// Off-by-one: skips index 0
 if (nextIPv6AddressIndex > 0 && nextIPv4AddressIndex >= 0)
     parallelConnect = true;
+```
+
+```
+// Dead code: parallelConnect is checked before indices are initialized,
+// so the parallel path is unreachable
+bool parallelConnect = idx6 >= 0 && idx4 >= 0;  // idx6 is still -1 here
+if (parallelConnect) {
+    idx6 = GetNextAddress(...);  // never reached
+}
+```
+
+```
+// Early return prevents comparing strategies: returns immediately
+// without evaluating whether an alternative approach would be better
+if (PrefixMatchWorks(data)) {
+    Mode = PrefixMatch;
+    return;  // blocks FixedDistanceSets from being considered
+}
 ```
 
 ## Correct
@@ -36,12 +49,16 @@ if (nextIPv6AddressIndex >= 0 && nextIPv4AddressIndex >= 0)
     parallelConnect = true;
 ```
 
-## Wrong (false positive — do NOT report concerns like this)
 ```
-// Reviewer flags: "The file could be deleted by another process between
-// File.Exists and File.ReadAllText, causing a FileNotFoundException."
-// This is speculative — the method's contract does not guarantee atomicity
-// against external modifications, and the caller handles exceptions upstream.
-if (File.Exists(path))
-    return File.ReadAllText(path);
+// Initialize indices before checking
+idx6 = GetNextAddress(...);
+idx4 = GetNextAddress(...);
+bool parallelConnect = idx6 >= 0 && idx4 >= 0;
+```
+
+```
+// Evaluate both strategies before choosing
+var prefixResult = EvaluatePrefix(data);
+var fixedResult = EvaluateFixedDistance(data);
+Mode = prefixResult.IsBetter(fixedResult) ? PrefixMatch : FixedDistance;
 ```
