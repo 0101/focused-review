@@ -52,8 +52,8 @@ DEFAULT_RULES_DIR = "review/"
 # ---------------------------------------------------------------------------
 
 
-def _resolve_rules_dir(repo: str = ".") -> str:
-    """Scan config file locations and return the rules_dir value, or the default.
+def _resolve_config(repo: str = ".") -> dict[str, object]:
+    """Scan config file locations and return the merged config values.
 
     Scan order (first match wins):
       1. .claude/focused-review.json  (project)
@@ -62,7 +62,8 @@ def _resolve_rules_dir(repo: str = ".") -> str:
       4. ~/.claude/focused-review.json (user-wide, Claude Code)
       5. ~/.copilot/focused-review.json (user-wide, Copilot CLI)
 
-    Falls back to ``review/`` if no config file is found.
+    Returns a dict with ``rules_dir`` (str) and ``sources`` (list[str]).
+    Falls back to defaults if no config file is found.
     """
     repo_path = Path(repo).resolve()
 
@@ -75,11 +76,18 @@ def _resolve_rules_dir(repo: str = ".") -> str:
             try:
                 data = json.loads(candidate.read_text(encoding="utf-8"))
                 raw = data.get("rules_dir", DEFAULT_RULES_DIR)
-                return raw.replace("\\", "/")
+                rules_dir = raw.replace("\\", "/")
+                sources: list[str] = data.get("sources", [])
+                return {"rules_dir": rules_dir, "sources": sources}
             except (json.JSONDecodeError, AttributeError):
                 pass
 
-    return DEFAULT_RULES_DIR
+    return {"rules_dir": DEFAULT_RULES_DIR, "sources": []}
+
+
+def _resolve_rules_dir(repo: str = ".") -> str:
+    """Scan config file locations and return the rules_dir value, or the default."""
+    return str(_resolve_config(repo)["rules_dir"])
 
 
 # ---------------------------------------------------------------------------
@@ -135,6 +143,24 @@ def _resolve_and_deduplicate(paths: list[Path]) -> list[Path]:
             seen.add(resolved)
             result.append(resolved)
     return result
+
+
+def resolve_config(args: argparse.Namespace) -> None:
+    """Print resolved config values as JSON (rules_dir and sources)."""
+    repo = Path(args.repo).resolve()
+    if not repo.is_dir():
+        print(
+            json.dumps({"error": f"Repository path not found: {_posix(repo)}"}),
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    config = _resolve_config(str(repo))
+    rules_dir = str(config["rules_dir"])
+    if not rules_dir.endswith("/"):
+        rules_dir += "/"
+    config["rules_dir"] = rules_dir
+    print(json.dumps(config))
 
 
 def discover(args: argparse.Namespace) -> None:
@@ -549,6 +575,18 @@ def main() -> int:
         description="Deterministic helpers for the focused-review plugin",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
+
+    # resolve-config subcommand
+    config_parser = subparsers.add_parser(
+        "resolve-config",
+        help="Resolve config values (rules_dir and sources) from config file scan",
+    )
+    config_parser.add_argument(
+        "--repo",
+        default=".",
+        help="Path to the repository root (default: current directory)",
+    )
+    config_parser.set_defaults(func=resolve_config)
 
     # discover subcommand
     discover_parser = subparsers.add_parser(

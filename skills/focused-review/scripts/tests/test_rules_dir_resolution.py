@@ -70,6 +70,18 @@ def _write_config(repo: Path, rel_path: str, rules_dir: str) -> Path:
     return config_path
 
 
+def _write_config_with_sources(
+    repo: Path, rel_path: str, rules_dir: str, sources: list[str]
+) -> Path:
+    """Write a focused-review.json config file with both rules_dir and sources."""
+    config_path = repo / rel_path
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(
+        json.dumps({"rules_dir": rules_dir, "sources": sources}), encoding="utf-8"
+    )
+    return config_path
+
+
 # ---------------------------------------------------------------------------
 # Config file resolution for --rules-dir
 # ---------------------------------------------------------------------------
@@ -272,3 +284,135 @@ class TestRulesDirPathNormalization:
         captured = capsys.readouterr()
         summary = json.loads(captured.out)
         assert summary["agents"] == 1
+
+
+# ---------------------------------------------------------------------------
+# _resolve_config (unified config resolution)
+# ---------------------------------------------------------------------------
+
+
+class TestResolveConfig:
+    """_resolve_config returns both rules_dir and sources from config file."""
+
+    def test_returns_rules_dir_and_empty_sources_by_default(self, tmp_path: Path) -> None:
+        """No config file returns defaults for both fields."""
+        repo = _setup_repo(tmp_path)
+        with patch.object(fr, "CONFIG_SCAN_LOCATIONS", ["nonexistent.json"]), \
+             patch.object(fr, "CONFIG_USER_LOCATIONS", []):
+            result = fr._resolve_config(str(repo))
+        assert result == {"rules_dir": "review/", "sources": []}
+
+    def test_returns_rules_dir_from_config(self, tmp_path: Path) -> None:
+        """Config with only rules_dir returns it with empty sources."""
+        repo = _setup_repo(tmp_path, "custom-rules")
+        _write_config(repo, ".claude/focused-review.json", "custom-rules/")
+        result = fr._resolve_config(str(repo))
+        assert result["rules_dir"] == "custom-rules/"
+        assert result["sources"] == []
+
+    def test_returns_sources_from_config(self, tmp_path: Path) -> None:
+        """Config with sources returns them."""
+        repo = _setup_repo(tmp_path, "review")
+        _write_config_with_sources(
+            repo, ".claude/focused-review.json", "review/",
+            [".github/skills/code-review/SKILL.md", "docs/review-guide.md"],
+        )
+        result = fr._resolve_config(str(repo))
+        assert result["rules_dir"] == "review/"
+        assert result["sources"] == [
+            ".github/skills/code-review/SKILL.md",
+            "docs/review-guide.md",
+        ]
+
+    def test_backslash_in_rules_dir_normalized(self, tmp_path: Path) -> None:
+        """Backslash path separators in rules_dir are normalized."""
+        repo = _setup_repo(tmp_path, os.path.join("custom", "rules"))
+        _write_config(repo, ".claude/focused-review.json", "custom\\rules")
+        result = fr._resolve_config(str(repo))
+        assert result["rules_dir"] == "custom/rules"
+
+    def test_priority_order_matches_resolve_rules_dir(self, tmp_path: Path) -> None:
+        """_resolve_config uses the same priority order as _resolve_rules_dir."""
+        repo = _setup_repo(tmp_path, "claude-rules")
+        _write_config_with_sources(
+            repo, ".claude/focused-review.json", "claude-rules/", ["source-a.md"],
+        )
+        _write_config_with_sources(
+            repo, "focused-review.json", "root-rules/", ["source-b.md"],
+        )
+        result = fr._resolve_config(str(repo))
+        assert result["rules_dir"] == "claude-rules/"
+        assert result["sources"] == ["source-a.md"]
+
+
+# ---------------------------------------------------------------------------
+# resolve-config subcommand (CLI integration)
+# ---------------------------------------------------------------------------
+
+
+class TestResolveConfigSubcommand:
+    """The resolve-config subcommand outputs JSON with rules_dir and sources."""
+
+    def test_outputs_defaults_when_no_config(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """With no config file, outputs default rules_dir and empty sources."""
+        repo = _setup_repo(tmp_path)
+        with patch.object(fr, "CONFIG_SCAN_LOCATIONS", ["nonexistent.json"]), \
+             patch.object(fr, "CONFIG_USER_LOCATIONS", []):
+            with patch("sys.argv", [
+                "focused-review", "resolve-config", "--repo", str(repo),
+            ]):
+                fr.main()
+
+        captured = capsys.readouterr()
+        result = json.loads(captured.out)
+        assert result == {"rules_dir": "review/", "sources": []}
+
+    def test_outputs_config_values(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """With a config file, outputs its values."""
+        repo = _setup_repo(tmp_path, "my-rules")
+        _write_config_with_sources(
+            repo, ".claude/focused-review.json", "my-rules/",
+            ["docs/guide.md"],
+        )
+        with patch("sys.argv", [
+            "focused-review", "resolve-config", "--repo", str(repo),
+        ]):
+            fr.main()
+
+        captured = capsys.readouterr()
+        result = json.loads(captured.out)
+        assert result == {"rules_dir": "my-rules/", "sources": ["docs/guide.md"]}
+
+    def test_rules_dir_gets_trailing_slash(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """rules_dir without trailing slash gets one added."""
+        repo = _setup_repo(tmp_path, "norules")
+        _write_config(repo, ".claude/focused-review.json", "norules")
+        with patch("sys.argv", [
+            "focused-review", "resolve-config", "--repo", str(repo),
+        ]):
+            fr.main()
+
+        captured = capsys.readouterr()
+        result = json.loads(captured.out)
+        assert result["rules_dir"] == "norules/"
+
+    def test_invalid_repo_exits_with_error(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Non-existent repo path causes exit with error."""
+        fake_repo = str(tmp_path / "nonexistent")
+        with patch("sys.argv", [
+            "focused-review", "resolve-config", "--repo", fake_repo,
+        ]):
+            with pytest.raises(SystemExit) as exc:
+                fr.main()
+            assert exc.value.code == 1
+
+        captured = capsys.readouterr()
+        assert "error" in captured.err.lower()
