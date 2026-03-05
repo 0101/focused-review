@@ -13,6 +13,9 @@ argument-hint: "[branch|commit|staged|unstaged|full|refresh|configure] [--no-aut
 <!-- Resolve the defaults directory (built-in bootstrap rules). Same candidate logic as Script path. -->
 **Defaults directory:** !`python -c "import os; from pathlib import Path; pr=os.environ.get('CLAUDE_PLUGIN_ROOT',''); candidates=[Path(pr)/'skills/focused-review/defaults/'] if pr else []; candidates+=[Path.home()/'.claude/skills/focused-review/defaults/',Path('.claude/skills/focused-review/defaults/'),Path('skills/focused-review/defaults/')]; p=next((c.resolve() for c in candidates if c.is_dir()),None); print(str(p).replace(chr(92),'/')+'/' if p else 'ERROR_DEFAULTS_NOT_FOUND')"`
 
+<!-- Resolve explicit source files from config. Returns JSON array of paths, or empty array if none configured. -->
+**Configured sources:** !`python -c "import json,os; from pathlib import Path; locs=[Path('.claude/focused-review.json'),Path('focused-review.json'),Path('.github/focused-review.json')]+[Path(os.path.expanduser(p)) for p in ['~/.claude/focused-review.json','~/.copilot/focused-review.json']]; s=next((json.loads(f.read_text()).get('sources',[]) for f in locs if f.is_file()),[]); print(json.dumps(s))"`
+
 You are the orchestrator for the focused-review plugin. You have three modes based on the argument.
 
 ## Mode Selection
@@ -195,13 +198,43 @@ Re-scan instruction files and update review rules in `{rules_dir}` (using the **
 
 ### Step 1: Discover instruction files
 
+**1a. Fast scan (Python globs)**
+
 Run the Python helper using the **Script path** resolved above:
 
 ```bash
 python {script_path} discover --repo .
 ```
 
-This outputs a JSON array of instruction file paths (relative to repo root). If the output is empty or an error, tell the user no instruction files were found and stop.
+This outputs a JSON array of instruction file paths (relative to repo root). Start building the discovered-files list from this output.
+
+**1b. Configured sources**
+
+Check **Configured sources** (resolved above). If the array is non-empty, add each path to the discovered-files list (skip any that do not exist on disk). These are user-specified source files from the `"sources"` array in `focused-review.json`.
+
+**1c. Agent-assisted exploration**
+
+Search the repo for additional files that contain **code review guidance** but are not covered by the Python glob patterns. The Python discover step catches standard locations (CLAUDE.md, copilot-instructions.md, .cursor/rules, etc.) but misses project-specific locations like `.github/skills/` directories, `docs/review/`, or custom guideline files.
+
+Search strategy:
+1. Look for candidate files in these locations (glob for `.md` files):
+   - `.github/skills/**/*.md`
+   - `.github/review*/**/*.md`
+   - `docs/review*/**/*.md`
+   - `docs/coding*/**/*.md`
+   - `docs/style*/**/*.md`
+   - Any `*review*guide*.md` or `*coding*standard*.md` at the repo root
+2. For each candidate, **read the file** (or at least the first ~100 lines) and determine whether it contains substantive code review guidance — rules about correctness, style, conventions, patterns, security, concurrency, API design, etc.
+3. **Include** files that contain actionable code review rules or guidelines that a reviewer should enforce.
+4. **Exclude** files that are about: deployment, CI/CD pipelines, workflow automation, testing infrastructure setup, project management, release processes, or general documentation that does not prescribe code quality standards.
+5. Add any relevant files to the discovered-files list, deduplicating against what the Python discover step already found.
+
+After this step, tell the user what was discovered:
+- List all discovered instruction files (from all three sub-steps)
+- Indicate which files came from Python discovery, which from configured sources, and which from agent exploration
+- If agent exploration found no additional files, say so — this is normal for repos that keep all instructions in standard locations.
+
+If the combined discovered-files list is empty after all three sub-steps, tell the user no instruction files were found and stop.
 
 ### Step 2: Read all sources
 
@@ -215,10 +248,12 @@ Analyze the instruction files against the existing rules. Produce a categorized 
 
 - **New rules**: Instructions contain guidance that has no matching committed rule. For each, draft the full rule content in the standard format (YAML frontmatter with `autofix: false`, `model: haiku|sonnet|inherit`, `source: {instruction file}`, optional `applies-to` glob, then Markdown body with `# Rule Name`, `## Rule`, `## Why`, `## Requirements`, `## Wrong`, `## Correct` sections).
 
-  **Choosing `model`** — pick the model that matches the rule's cognitive demand:
+  **Choosing `model`** — pick the model that matches the rule's cognitive demand AND the project's complexity:
   - **haiku**: simple pattern matching — keyword presence/absence, operator usage, structural patterns (e.g. "no `mutable`", "no `break`/`continue`", "use `|>` operator", "no `null`"). The rule can be checked by looking at syntax alone.
   - **sonnet**: rules requiring semantic understanding — API design review, code duplication detection, design pattern evaluation, "prefer expressions over statements", simplicity judgments. The rule requires understanding what the code means, not just what it looks like.
   - **inherit**: rules requiring deep reasoning about correctness — bug finding, concurrency analysis, race condition detection, security review, subtle logic errors, architectural trade-offs. The rule requires reasoning about runtime behavior, state transitions, or cross-cutting concerns.
+
+  **Project complexity adjustment:** For large or complex codebases (runtime libraries, frameworks, systems code with concurrency/interop/security concerns), bias upward — rules that might be `haiku` in a simple CRUD app should be `sonnet` or `inherit` here. If the discovered instruction files contain guidance on thread safety, native interop, security, or complex API design, the codebase is complex enough that most rules need `sonnet` or `inherit`.
 
 - **Updated rules**: A committed rule exists but the source instruction has changed in a way that affects the rule's requirements. Include the updated content.
 
@@ -235,6 +270,7 @@ Analyze the instruction files against the existing rules. Produce a categorized 
 **Quality guidance for drafted rules:**
 - **Scope rules tightly.** If a rule only applies to specific file types (test files, native code, scripts, etc.), add an `applies-to` glob. For example: `applies-to: "**/*Test*.cs"` for test-only rules, `applies-to: "**/*.{cpp,h,c}"` for native code. Broad scope produces more noise.
 - **Favor stronger models for judgment calls.** Rules about thread safety, API design, interop correctness, and architectural patterns need `sonnet` or `inherit` — not `haiku`. Reserve `haiku` for mechanical/syntactic checks only.
+- **Check model assignments before presenting.** After drafting all rules, review the model assignments as a batch. If more than half the rules are `haiku` in a complex codebase, something is wrong — re-evaluate. Rules that require reading surrounding code for context (not just the changed lines) should never be `haiku`.
 
 ### Step 3b: Built-in rules
 

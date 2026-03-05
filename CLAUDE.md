@@ -18,7 +18,8 @@ Copilot CLI plugin / Claude Code skill that runs parallel code reviews using com
 - **One rule per agent**: each subagent checks exactly one criterion against one diff chunk
 - **Rules are version-controlled**: live in `review/` (configurable via `focused-review.json`), reviewed in PRs like code
 - **Refresh is explicit**: user runs `/focused-review refresh` — no auto-generation
-- **Python for deterministic work** (discovery, diffing, chunking); **LLM for semantic work** (rule extraction, comparison)
+- **Python for deterministic work** (discovery, diffing, chunking); **LLM for semantic work** (rule extraction, comparison, agent-assisted discovery)
+- **Three-layer discovery**: Python globs (fast first pass) → configured `sources` in `focused-review.json` → agent-assisted exploration (reads candidates and filters to code review guidance)
 - **Review agents default to Haiku** (fast, cheap); **generation agents use Sonnet** (better at structured extraction)
 - **Windows path compatibility required** — primary dev environment is Windows
 
