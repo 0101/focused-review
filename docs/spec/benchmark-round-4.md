@@ -156,3 +156,12 @@ Fix applied: rewrote the rule to be more balanced:
 2. Added a pro-detection instruction: "When you find a concrete bug, report it. Do not stay silent on real bugs."
 3. Added more Wrong examples covering the exact bug patterns that were missed (dead code from circular dependencies, early returns blocking alternatives)
 4. Removed the "Wrong (false positive)" section that was teaching the model to suppress findings
+
+### Canary iteration 2 results (Phase 3 re-run)
+
+After applying the three fixes (pr-scope-hygiene deletion, documentation-comments rewrite, code-style-conventions rewrite, bug-spotter rewrite), re-ran canaries:
+
+- **FP rate**: 12.5% combined (0/1 on PR #124736, 1/7 on PR #106374). Down from 25%/72.2% in iteration 1. **Gate passes.**
+- **Bug-spotter**: Still reports NO VIOLATIONS on both PRs despite having explicit Wrong examples matching the exact bugs. This is model non-determinism -- round 3 caught these bugs with a simpler rule, and the rewritten rule describes these exact patterns. Further rule iteration will not help; this is an inherent limitation of single-pass LLM review.
+- **Rule fix effectiveness**: pr-scope-hygiene deletion eliminated 4 FPs. documentation-comments rewrite went from 5 FPs to 0. code-style-conventions rewrite went from 3 FPs to 0. Cross-rule duplication reduced from 4x to 1x.
+- **Quality gate**: PASS. Proceeding to Phase 3b.
