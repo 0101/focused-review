@@ -284,7 +284,10 @@ def _read_rules(rules_dir: Path, repo: Path) -> list[dict[str, object]]:
 
 def _run_git(cmd: list[str], repo: Path) -> subprocess.CompletedProcess[str]:
     try:
-        return subprocess.run(cmd, cwd=repo, capture_output=True, text=True)
+        return subprocess.run(
+            cmd, cwd=repo, capture_output=True, text=True,
+            encoding="utf-8", errors="replace",
+        )
     except FileNotFoundError:
         print(
             json.dumps({"error": "git is not installed or not on PATH"}),
