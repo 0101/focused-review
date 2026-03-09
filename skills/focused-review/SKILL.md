@@ -257,12 +257,10 @@ Analyze the instruction files against the existing rules. Produce a categorized 
 
 - **New rules**: Instructions contain guidance that has no matching committed rule. For each, draft the full rule content in the standard format (YAML frontmatter with `autofix: false`, `model: haiku|sonnet|inherit`, `source: {instruction file}`, optional `applies-to` glob, then Markdown body with `# Rule Name`, `## Rule`, `## Why`, `## Requirements`, `## Wrong`, `## Correct` sections).
 
-  **Choosing `model`** — pick the model that matches the rule's cognitive demand AND the project's complexity:
-  - **haiku**: simple pattern matching — keyword presence/absence, operator usage, structural patterns (e.g. "no `mutable`", "no `break`/`continue`", "use `|>` operator", "no `null`"). The rule can be checked by looking at syntax alone.
-  - **sonnet**: rules requiring semantic understanding — API design review, code duplication detection, design pattern evaluation, "prefer expressions over statements", simplicity judgments. The rule requires understanding what the code means, not just what it looks like.
-  - **inherit**: rules requiring deep reasoning about correctness — bug finding, concurrency analysis, race condition detection, security review, subtle logic errors, architectural trade-offs. The rule requires reasoning about runtime behavior, state transitions, or cross-cutting concerns.
-
-  **Project complexity adjustment:** For large or complex codebases (runtime libraries, frameworks, systems code with concurrency/interop/security concerns), bias upward — rules that might be `haiku` in a simple CRUD app should be `sonnet` or `inherit` here. If the discovered instruction files contain guidance on thread safety, native interop, security, or complex API design, the codebase is complex enough that most rules need `sonnet` or `inherit`.
+  **Choosing `model`** — default to `inherit` (uses whatever model the user runs with) and only downgrade for purely mechanical checks:
+  - **inherit** (default): any rule that requires understanding context, reasoning about behavior, or making judgment calls. This includes: bug finding, correctness, concurrency, security, API design, code duplication, design patterns, architectural patterns, performance analysis, platform-specific concerns, interop, error handling, and convention enforcement that requires understanding intent. When in doubt, use `inherit`.
+  - **sonnet**: rules requiring semantic understanding but not deep reasoning — style preferences, naming conventions with semantic meaning, documentation completeness checks. Use only when the rule clearly does not need the strongest available model.
+  - **haiku**: purely mechanical/syntactic pattern matching — keyword presence/absence, operator usage, literal string matching (e.g. "no `mutable` keyword", "no `break`/`continue`", "use `|>` operator"). The rule can be checked by looking at tokens alone with no surrounding context needed. Very few rules qualify.
 
 - **Updated rules**: A committed rule exists but the source instruction has changed in a way that affects the rule's requirements. Include the updated content.
 
@@ -278,8 +276,8 @@ Analyze the instruction files against the existing rules. Produce a categorized 
 
 **Quality guidance for drafted rules:**
 - **Scope rules tightly.** If a rule only applies to specific file types (test files, native code, scripts, etc.), add an `applies-to` glob. For example: `applies-to: "**/*Test*.cs"` for test-only rules, `applies-to: "**/*.{cpp,h,c}"` for native code. Broad scope produces more noise.
-- **Favor stronger models for judgment calls.** Rules about thread safety, API design, interop correctness, and architectural patterns need `sonnet` or `inherit` — not `haiku`. Reserve `haiku` for mechanical/syntactic checks only.
-- **Check model assignments before presenting.** After drafting all rules, review the model assignments as a batch. If more than half the rules are `haiku` in a complex codebase, something is wrong — re-evaluate. Rules that require reading surrounding code for context (not just the changed lines) should never be `haiku`.
+- **Default to `inherit`.** Most rules benefit from the strongest available model. Only downgrade to `sonnet` or `haiku` when the rule is clearly mechanical enough that a weaker model handles it equally well. Rules that require reading surrounding code for context (not just the changed lines) must be `inherit`.
+- **Check model assignments before presenting.** After drafting all rules, review the model assignments as a batch. The majority of rules should be `inherit`. If more than a few rules are `haiku` or `sonnet`, re-evaluate whether those rules are truly mechanical enough to downgrade.
 
 ### Step 3b: Built-in rules
 
@@ -342,7 +340,7 @@ Each rule file must follow the standard format:
 ```yaml
 ---
 autofix: false
-model: haiku                   # haiku | sonnet | inherit (mechanical → semantic → deep)
+model: inherit                 # inherit (default) | sonnet | haiku (deep → semantic → mechanical)
 applies-to: "glob/pattern"    # optional — omit if rule applies to all files
 source: "CLAUDE.md"            # which instruction file this came from
 ---

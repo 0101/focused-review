@@ -273,7 +273,7 @@ def _read_rules(rules_dir: Path, repo: Path) -> list[dict[str, object]]:
             {
                 "path": _posix(rule_file, relative_to=repo),
                 "name": name,
-                "model": meta.get("model", "haiku"),
+                "model": meta.get("model", "inherit"),
                 "autofix": meta.get("autofix", False),
                 "applies_to": meta.get("applies-to"),
                 "source": meta.get("source"),

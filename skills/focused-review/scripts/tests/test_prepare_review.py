@@ -203,15 +203,15 @@ class TestReadRules:
         rules = fr._read_rules(rules_dir, tmp_path)
         assert rules[0]["name"] == "My Custom Rule Name"
 
-    def test_default_model_is_haiku(self, tmp_path: Path) -> None:
-        """When a rule omits the 'model' field, it defaults to 'haiku'."""
+    def test_default_model_is_inherit(self, tmp_path: Path) -> None:
+        """When a rule omits the 'model' field, it defaults to 'inherit'."""
         rules_dir = tmp_path / "review"
         rules_dir.mkdir()
         content = "---\nautofix: false\n---\n# No Model Rule\nBody."
         create_file(rules_dir, "no-model.md", content)
 
         rules = fr._read_rules(rules_dir, tmp_path)
-        assert rules[0]["model"] == "haiku"
+        assert rules[0]["model"] == "inherit"
 
     def test_rule_name_fallback_to_stem(self, tmp_path: Path) -> None:
         rules_dir = tmp_path / "review"
