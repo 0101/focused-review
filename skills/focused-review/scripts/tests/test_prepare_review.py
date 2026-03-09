@@ -144,6 +144,16 @@ class TestGlobMatching:
         assert fr._file_matches_glob("src/deep/SomeTestsFile.cs", pattern)
         assert not fr._file_matches_glob("src/MyHelper.cs", pattern)
 
+    def test_negation_excludes_matching_files(self) -> None:
+        pattern = "!**/*Tests*.cs"
+        assert not fr._file_matches_glob("src/MyTests.cs", pattern)
+        assert not fr._file_matches_glob("src/deep/SomeTestsFile.cs", pattern)
+        assert fr._file_matches_glob("src/MyHelper.cs", pattern)
+
+    def test_negation_with_simple_pattern(self) -> None:
+        assert not fr._file_matches_glob("src/Foo.py", "!**/*.py")
+        assert fr._file_matches_glob("src/Foo.cs", "!**/*.py")
+
 
 # ---------------------------------------------------------------------------
 # Rule reader
@@ -423,6 +433,31 @@ class TestBuildDispatch:
         assert "c1.patch" in dispatch[0]["chunk_path"]
         assert dispatch[0]["chunk_index"] == 1
         assert dispatch[0]["total_chunks"] == 2
+
+    def test_negation_applies_to_excludes_test_files(self, tmp_path: Path) -> None:
+        """Rule with negation applies-to skips chunks that only contain test files."""
+        rules = [self._rule("no-tests", applies_to="!**/*Tests*.cs")]
+        c1 = tmp_path / "c1.patch"
+        c2 = tmp_path / "c2.patch"
+        c1.write_text(_make_diff(("src/Main.cs", 10)), encoding="utf-8")
+        c2.write_text(_make_diff(("src/MainTests.cs", 10)), encoding="utf-8")
+
+        dispatch = fr._build_dispatch(
+            rules, [c1, c2], ["src/Main.cs", "src/MainTests.cs"], "branch", tmp_path
+        )
+        assert len(dispatch) == 1
+        assert "c1.patch" in dispatch[0]["chunk_path"]
+
+    def test_negation_applies_to_skips_rule_when_all_files_match(self, tmp_path: Path) -> None:
+        """Rule with negation applies-to is skipped entirely when all changed files are tests."""
+        rules = [self._rule("no-tests", applies_to="!**/*Tests*.cs")]
+        c1 = tmp_path / "c1.patch"
+        c1.write_text(_make_diff(("src/FooTests.cs", 10)), encoding="utf-8")
+
+        dispatch = fr._build_dispatch(
+            rules, [c1], ["src/FooTests.cs"], "branch", tmp_path
+        )
+        assert len(dispatch) == 0
 
     def test_multiple_chunks_have_correct_indices(self, tmp_path: Path) -> None:
         """Each dispatch entry gets 1-based chunk_index and total_chunks."""

@@ -233,7 +233,12 @@ def _file_matches_glob(filepath: str, glob_pattern: str) -> bool:
     Handles the common case where ``**/*.ext`` should also match files
     at the repository root (``PurePosixPath.match`` requires at least
     one directory segment for ``**/``).
+
+    Negation patterns (``!**/*Tests*.cs``) invert the match: returns
+    True for files that do NOT match the inner pattern.
     """
+    if glob_pattern.startswith("!"):
+        return not _file_matches_glob(filepath, glob_pattern[1:])
     path = PurePosixPath(filepath.replace("\\", "/"))
     if path.match(glob_pattern):
         return True
