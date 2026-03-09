@@ -188,6 +188,15 @@ After writing the report, tell the user:
 - How many rules were checked
 - How many violations were found (count `VIOLATION:` blocks)
 - How many fixes were applied (count `FIXED:` blocks)
+- If there are violations or fixes, show a numbered summary table:
+
+```
+| #  | Rule              | File                  | Issue                          |
+|----|-------------------|-----------------------|--------------------------------|
+| 1  | cancellation-token| SomeFile.cs:42        | CancellationToken.None used... |
+| 2  | sealed-classes    | OtherFile.cs:10       | Record missing sealed modifier |
+```
+
 - The path to the full report file
 
 ---
