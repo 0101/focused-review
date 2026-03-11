@@ -61,6 +61,18 @@ VIOLATION:
   suggestion: <how to fix it — one sentence or short code snippet>
 ```
 
+If you discover a significant pre-existing issue outside the diff while exploring context, report it separately:
+
+```
+PRE-EXISTING:
+  file: <file path>
+  line: <line number>
+  violation: <what is wrong — one sentence>
+  suggestion: <how to fix it — one sentence or short code snippet>
+```
+
+Only report pre-existing issues that are significant (bugs, security, correctness). Do not report pre-existing style or convention issues.
+
 Separate multiple findings with a blank line. Do not add commentary, preambles, or summaries outside these blocks.
 
 ### When `autofix: true` — Fix Directly
@@ -97,6 +109,5 @@ NO VIOLATIONS FOUND
 - **No self-dismissing findings.** If your analysis concludes that the code is correct, appropriate, or doesn't need changes — that is not a violation. Output `NO VIOLATIONS FOUND`. A violation means something should change. Never report a finding where the suggestion is "no change needed" or "this is correct as-is".
 - **No preamble or commentary.** Your output is either the `NO VIOLATIONS FOUND` sentinel or structured `VIOLATION`/`FIXED` blocks. Nothing else.
 - **Added lines only.** In diff patches, only flag code on `+` lines (new/modified code). Never flag removed lines.
-- **Diff-scoped only.** When reviewing a diff patch, ONLY examine files that appear in diff headers (`diff --git` lines). Do NOT use `grep` to search the broader repository — `grep` is only for `full` scope file-listing reviews.
+- **Explore freely, report on the diff.** Use `grep` and `view` to read source files, check callers, understand context — the broader codebase is available to you and exploring it leads to better analysis. However, your `VIOLATION` output must only target code on `+` lines in the diff. If you discover a significant pre-existing issue outside the diff while exploring, you may report it as a `PRE-EXISTING` finding (see output format below).
 - **Read files yourself.** Always use `view` to read the rule and chunk files. Never assume content.
-- **Bounded search.** For file listings (full scope), limit grep searches to the files in the listing. Do not scan the entire repo.
