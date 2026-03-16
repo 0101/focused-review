@@ -9,6 +9,7 @@ import os
 import re
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path, PurePosixPath
 
 # ---------------------------------------------------------------------------
@@ -45,6 +46,37 @@ CONFIG_USER_LOCATIONS: list[str] = [
 ]
 
 DEFAULT_RULES_DIR = "review/"
+DEFAULT_CONCERNS_DIR = "review/concerns/"
+DEFAULT_SCALING = "standard"
+BUILTIN_CONCERNS_DIR = Path(__file__).resolve().parent.parent / "defaults" / "concerns"
+
+COPILOT_CMD = os.environ.get("COPILOT_CMD", "copilot")
+CONCERN_TIMEOUT_SECS = int(os.environ.get("CONCERN_TIMEOUT", "1200"))
+CONCERN_RETRIES = int(os.environ.get("CONCERN_RETRIES", "2"))
+CONCERN_MAX_WORKERS = int(os.environ.get("CONCERN_MAX_WORKERS", "4"))
+
+# Shorthand model names used in concern files → full CLI model identifiers.
+# Unknown names pass through unchanged so users can specify full names directly.
+MODEL_MAP: dict[str, str] = {
+    "opus": "claude-opus-4.6",
+    "sonnet": "claude-sonnet-4.6",
+    "haiku": "claude-haiku-4.5",
+    "codex": "gpt-5.1-codex",
+    "gemini": "gemini-3-pro-preview",
+}
+
+
+def _resolve_model(shorthand: str) -> str:
+    """Map a shorthand model name to the full CLI identifier.
+
+    Lookup is case-insensitive so that concern files using ``Opus`` or ``OPUS``
+    resolve identically to ``opus``.
+
+    Returns the full name from :data:`MODEL_MAP` if the shorthand is a known
+    alias, otherwise returns *shorthand* unchanged (passthrough for full names
+    or any future model identifiers the user specifies directly).
+    """
+    return MODEL_MAP.get(shorthand.lower(), shorthand)
 
 
 # ---------------------------------------------------------------------------
@@ -62,7 +94,8 @@ def _resolve_config(repo: str = ".") -> dict[str, object]:
       4. ~/.claude/focused-review.json (user-wide, Claude Code)
       5. ~/.copilot/focused-review.json (user-wide, Copilot CLI)
 
-    Returns a dict with ``rules_dir`` (str) and ``sources`` (list[str]).
+    Returns a dict with ``rules_dir`` (str), ``sources`` (list[str]),
+    ``concerns_dir`` (str), and ``scaling`` (str).
     Falls back to defaults if no config file is found.
     """
     repo_path = Path(repo).resolve()
@@ -78,11 +111,24 @@ def _resolve_config(repo: str = ".") -> dict[str, object]:
                 raw = data.get("rules_dir", DEFAULT_RULES_DIR)
                 rules_dir = raw.replace("\\", "/")
                 sources: list[str] = data.get("sources", [])
-                return {"rules_dir": rules_dir, "sources": sources}
+                concerns_raw = data.get("concerns_dir", DEFAULT_CONCERNS_DIR)
+                concerns_dir = str(concerns_raw).replace("\\", "/")
+                scaling = data.get("scaling", DEFAULT_SCALING)
+                return {
+                    "rules_dir": rules_dir,
+                    "sources": sources,
+                    "concerns_dir": concerns_dir,
+                    "scaling": scaling,
+                }
             except (json.JSONDecodeError, AttributeError):
                 pass
 
-    return {"rules_dir": DEFAULT_RULES_DIR, "sources": []}
+    return {
+        "rules_dir": DEFAULT_RULES_DIR,
+        "sources": [],
+        "concerns_dir": DEFAULT_CONCERNS_DIR,
+        "scaling": DEFAULT_SCALING,
+    }
 
 
 def _resolve_rules_dir(repo: str = ".") -> str:
@@ -160,6 +206,10 @@ def resolve_config(args: argparse.Namespace) -> None:
     if not rules_dir.endswith("/"):
         rules_dir += "/"
     config["rules_dir"] = rules_dir
+    concerns_dir = str(config["concerns_dir"])
+    if not concerns_dir.endswith("/"):
+        concerns_dir += "/"
+    config["concerns_dir"] = concerns_dir
     print(json.dumps(config))
 
 
@@ -186,11 +236,33 @@ def discover(args: argparse.Namespace) -> None:
 _FRONTMATTER_RE = re.compile(r"\A---[ \t]*\r?\n(.*?\r?\n)---[ \t]*(?:\r?\n|\Z)", re.DOTALL)
 
 
+def _split_yaml_list(s: str) -> list[str]:
+    """Split a YAML inline list body on commas, respecting ``{}`` brace groups.
+
+    ``"opus, codex"``         → ``["opus", "codex"]``
+    ``"**/*.{cs,fs}, !Tests"`` → ``["**/*.{cs,fs}", "!Tests"]``
+    """
+    parts: list[str] = []
+    depth = 0
+    start = 0
+    for i, ch in enumerate(s):
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth = max(depth - 1, 0)
+        elif ch == "," and depth == 0:
+            parts.append(s[start:i])
+            start = i + 1
+    parts.append(s[start:])
+    return parts
+
+
 def _parse_frontmatter(content: str) -> tuple[dict[str, object], str]:
     """Parse simple YAML-like ``key: value`` frontmatter.
 
     Returns ``(metadata, body)`` where *body* is everything after the
-    closing ``---``.  Only flat scalars are supported (string, bool).
+    closing ``---``.  Supports flat scalars (string, bool) and inline
+    YAML lists (``[item1, item2]``).
     """
     metadata: dict[str, object] = {}
     body = content
@@ -212,8 +284,12 @@ def _parse_frontmatter(content: str) -> tuple[dict[str, object], str]:
         # strip surrounding quotes
         if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
             value = value[1:-1]
+        # detect inline YAML list [item1, item2]
+        if value.startswith("[") and value.endswith("]"):
+            inner = value[1:-1]
+            metadata[key] = [v.strip().strip("'\"") for v in _split_yaml_list(inner) if v.strip()]
         # coerce booleans
-        if value.lower() == "true":
+        elif value.lower() == "true":
             metadata[key] = True
         elif value.lower() == "false":
             metadata[key] = False
@@ -283,6 +359,52 @@ def _read_rules(rules_dir: Path, repo: Path) -> list[dict[str, object]]:
 
 
 # ---------------------------------------------------------------------------
+# Concern reader
+# ---------------------------------------------------------------------------
+
+
+def _read_concerns(concerns_dir: Path, repo: Path) -> list[dict[str, object]]:
+    """Read ``*.md`` concern files from *concerns_dir* and parse frontmatter.
+
+    Only files with ``type: concern`` in frontmatter are included.
+    Returns a list of dicts with keys: ``path``, ``name``, ``display_name``,
+    ``models``, ``priority``, ``applies_to``, ``body``.
+    """
+    concerns: list[dict[str, object]] = []
+    if not concerns_dir.is_dir():
+        return concerns
+
+    for concern_file in sorted(concerns_dir.glob("*.md")):
+        if not concern_file.is_file():
+            continue
+        content = concern_file.read_text(encoding="utf-8")
+        meta, body = _parse_frontmatter(content)
+
+        if meta.get("type") != "concern":
+            continue
+
+        heading = re.search(r"^#\s+(.+)$", body, re.MULTILINE)
+        display_name = heading.group(1).strip() if heading else concern_file.stem
+
+        models = meta.get("models", ["opus"])
+        if isinstance(models, str):
+            models = [models]
+
+        concerns.append(
+            {
+                "path": _posix(concern_file, relative_to=repo),
+                "name": concern_file.stem,
+                "display_name": display_name,
+                "models": models,
+                "priority": meta.get("priority", "standard"),
+                "applies_to": meta.get("applies-to"),
+                "body": body,
+            }
+        )
+    return concerns
+
+
+# ---------------------------------------------------------------------------
 # Diff helpers
 # ---------------------------------------------------------------------------
 
@@ -347,6 +469,18 @@ def _all_tracked_files(repo: Path) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# Directory helpers
+# ---------------------------------------------------------------------------
+
+
+def _clean_dir(directory: Path) -> None:
+    """Remove all files from *directory*, leaving subdirectories intact."""
+    for old in directory.iterdir():
+        if old.is_file():
+            old.unlink()
+
+
+# ---------------------------------------------------------------------------
 # Diff chunking
 # ---------------------------------------------------------------------------
 
@@ -392,9 +526,7 @@ def _write_chunks(
     chunks_dir = work_dir / "chunks"
     chunks_dir.mkdir(parents=True, exist_ok=True)
     # clean old chunks
-    for old in chunks_dir.iterdir():
-        if old.is_file():
-            old.unlink()
+    _clean_dir(chunks_dir)
 
     chunk_paths: list[Path] = []
     current_parts: list[str] = []
@@ -424,8 +556,136 @@ def _write_chunks(
 
 
 # ---------------------------------------------------------------------------
+# Per-file diffs and concern prompts
+# ---------------------------------------------------------------------------
+
+
+def _write_per_file_diffs(diff_text: str, work_dir: Path) -> dict[str, Path]:
+    """Split a unified diff into per-file patches under ``work_dir/diffs/``.
+
+    Returns a mapping from original file path to the written patch path.
+    Filenames are sanitised by replacing ``/`` with ``--``.
+    """
+    diffs_dir = work_dir / "diffs"
+    diffs_dir.mkdir(parents=True, exist_ok=True)
+
+    # clean previous run
+    _clean_dir(diffs_dir)
+
+    file_diffs = _split_diff_by_file(diff_text)
+    result: dict[str, Path] = {}
+    for filename, section in file_diffs:
+        safe_name = filename.replace("/", "--").replace("\\", "--")
+        patch_path = diffs_dir / f"{safe_name}.patch"
+        patch_path.write_text(section, encoding="utf-8")
+        result[filename] = patch_path
+    return result
+
+
+def _generate_concern_prompts(
+    concerns: list[dict[str, object]],
+    changed_files: list[str],
+    work_dir: Path,
+    repo: Path,
+    *,
+    scope: str = "branch",
+) -> list[dict[str, str]]:
+    """Generate one prompt file per ``(concern × model)`` pair.
+
+    Each prompt combines the concern body with the review context
+    (changed files list + diff locations).  Writes files to
+    ``work_dir/prompts/{concern}--{model}.md``.
+
+    Returns a list of dispatch entries suitable for ``concern-dispatch.json``.
+    """
+    prompts_dir = work_dir / "prompts"
+    prompts_dir.mkdir(parents=True, exist_ok=True)
+
+    # clean previous run
+    _clean_dir(prompts_dir)
+
+    prompt_entries: list[dict[str, str]] = []
+
+    for concern in concerns:
+        applies_to = concern.get("applies_to")
+        patterns = _normalize_patterns(applies_to)
+        if patterns:
+            relevant_files = [
+                f for f in changed_files
+                if any(_file_matches_glob(f, p) for p in patterns)
+            ]
+        else:
+            relevant_files = list(changed_files)
+
+        if not relevant_files:
+            continue
+
+        body: str = str(concern.get("body", ""))
+        models: list[str] = list(concern.get("models", ["opus"]))  # type: ignore[arg-type]
+
+        for model in models:
+            prompt_name = f"{concern['name']}--{model}"
+            prompt_path = prompts_dir / f"{prompt_name}.md"
+
+            lines = [
+                body.strip(),
+                "",
+                "---",
+                "",
+                "## Review Context",
+                "",
+                "### Changed Files",
+                "",
+            ]
+            for f in relevant_files:
+                lines.append(f"- `{f}`")
+
+            if scope == "full":
+                lines.extend([
+                    "",
+                    "### Scope",
+                    "",
+                    "This is a **full-repository review** (no diff). Examine the listed files in their entirety.",
+                ])
+            else:
+                diffs_rel = _posix(work_dir / "diffs", relative_to=repo)
+                diff_patch_rel = _posix(work_dir / "diff.patch", relative_to=repo)
+                lines.extend([
+                    "",
+                    "### Diffs",
+                    "",
+                    f"Per-file diffs are available in `{diffs_rel}/`.",
+                    f"Full diff: `{diff_patch_rel}`.",
+                ])
+
+            prompt_path.write_text("\n".join(lines), encoding="utf-8")
+
+            prompt_entries.append({
+                "concern": str(concern["name"]),
+                "model": model,
+                "priority": str(concern.get("priority", "standard")),
+                "prompt_path": _posix(prompt_path, relative_to=repo),
+            })
+
+    return prompt_entries
+
+
+# ---------------------------------------------------------------------------
 # Dispatch planning
 # ---------------------------------------------------------------------------
+
+
+def _normalize_patterns(pattern: object) -> list[str]:
+    """Normalize an ``applies_to`` value into a list of glob strings.
+
+    Handles both single string values (``"**/*.cs"``) and inline YAML
+    list values (``["**/*.cs", "**/*.fs"]``).
+    """
+    if pattern is None:
+        return []
+    if isinstance(pattern, str):
+        return [pattern]
+    return [str(p) for p in pattern]
 
 
 def _rule_matches_files(rule: dict[str, object], files: list[str]) -> bool:
@@ -433,9 +693,8 @@ def _rule_matches_files(rule: dict[str, object], files: list[str]) -> bool:
     pattern = rule.get("applies_to")
     if pattern is None:
         return True  # no constraint → matches everything
-    if not isinstance(pattern, str):
-        return False
-    return any(_file_matches_glob(f, pattern) for f in files)
+    patterns = _normalize_patterns(pattern)
+    return any(_file_matches_glob(f, p) for f in files for p in patterns)
 
 
 def _chunk_files(chunk_path: Path) -> list[str]:
@@ -477,12 +736,10 @@ def _build_dispatch(
     for rule in rules:
         if not _rule_matches_files(rule, changed_files):
             continue
-        pattern = rule.get("applies_to")
         for i, cp in enumerate(chunk_paths):
-            if pattern is not None and isinstance(pattern, str):
-                cf = chunk_file_cache[str(cp)]
-                if not any(_file_matches_glob(f, pattern) for f in cf):
-                    continue
+            cf = chunk_file_cache[str(cp)]
+            if not _rule_matches_files(rule, cf):
+                continue
             dispatch.append(
                 {
                     "rule_path": rule["path"],
@@ -503,9 +760,14 @@ def _build_dispatch(
 
 
 def prepare_review(args: argparse.Namespace) -> None:
-    """Read committed rules, generate diff, filter, chunk, produce dispatch plan."""
+    """Read committed rules, generate diff, filter, chunk, produce dispatch plan.
+
+    Also reads concern files and generates per-file diffs and concern
+    prompt files for the concern pipeline.
+    """
     repo = Path(args.repo).resolve()
-    raw_rules_dir = args.rules_dir if args.rules_dir is not None else _resolve_rules_dir(str(repo))
+    config = _resolve_config(str(repo))
+    raw_rules_dir = args.rules_dir if args.rules_dir is not None else str(config["rules_dir"])
     rules_dir = repo / Path(raw_rules_dir.replace("\\", "/"))
     scope: str = args.scope
 
@@ -524,12 +786,17 @@ def prepare_review(args: argparse.Namespace) -> None:
 
     # -- determine changed files & chunks --------------------------------
 
+    diff_text = ""
     if scope == "full":
         changed_files = _all_tracked_files(repo)
         chunk_paths: list[Path] = []
     else:
         diff_text, changed_files = _get_diff(scope, repo)
         if not diff_text.strip():
+            # Write empty concern-dispatch so downstream run-concerns
+            # doesn't crash with FileNotFoundError.
+            concern_dispatch_path = work_dir / "concern-dispatch.json"
+            concern_dispatch_path.write_text("[]", encoding="utf-8")
             summary = {
                 "dispatch_path": None,
                 "agents": 0,
@@ -538,6 +805,8 @@ def prepare_review(args: argparse.Namespace) -> None:
                 "rules_matched": 0,
                 "changed_files": 0,
                 "chunks": 0,
+                "concerns_total": 0,
+                "concern_prompts": 0,
             }
             print(json.dumps(summary))
             return
@@ -546,6 +815,31 @@ def prepare_review(args: argparse.Namespace) -> None:
     # write changed-files list
     (work_dir / "changed-files.txt").write_text(
         "\n".join(changed_files), encoding="utf-8"
+    )
+
+    # -- per-file diffs --------------------------------------------------
+
+    if diff_text.strip():
+        _write_per_file_diffs(diff_text, work_dir)
+
+    # -- concerns --------------------------------------------------------
+
+    raw_concerns_dir = str(config["concerns_dir"]).replace("\\", "/")
+    project_concerns_dir = repo / Path(raw_concerns_dir)
+    concerns = _read_concerns(project_concerns_dir, repo)
+    if not concerns:
+        concerns = _read_concerns(BUILTIN_CONCERNS_DIR, repo)
+
+    concern_prompts: list[dict[str, str]] = []
+    if concerns and changed_files:
+        concern_prompts = _generate_concern_prompts(
+            concerns, changed_files, work_dir, repo, scope=scope
+        )
+
+    # write concern dispatch
+    concern_dispatch_path = work_dir / "concern-dispatch.json"
+    concern_dispatch_path.write_text(
+        json.dumps(concern_prompts, indent=2), encoding="utf-8"
     )
 
     # -- dispatch plan ---------------------------------------------------
@@ -565,11 +859,317 @@ def prepare_review(args: argparse.Namespace) -> None:
         "rules_total": len(rules),
         "rules_matched": len({d["rule_path"] for d in dispatch}),
         "changed_files": len(changed_files),
+        "concerns_total": len(concerns),
+        "concern_prompts": len(concern_prompts),
     }
     if scope != "full":
         summary["chunks"] = len(chunk_paths)
 
     print(json.dumps(summary))
+
+
+# ---------------------------------------------------------------------------
+# Subcommand: run-concerns
+# ---------------------------------------------------------------------------
+
+
+def _run_single_concern(
+    entry: dict[str, str],
+    repo: Path,
+    work_dir: Path,
+    *,
+    timeout: int = CONCERN_TIMEOUT_SECS,
+    retries: int = CONCERN_RETRIES,
+) -> dict[str, object]:
+    """Launch one ``copilot -p`` session for a (concern × model) pair.
+
+    Reads the prompt file from *entry["prompt_path"]*, invokes the copilot
+    CLI, captures stdout, and writes findings to
+    ``work_dir/findings/concern--{name}--{model}.md``.
+
+    Retries on non-zero exit or timeout up to *retries* times.
+
+    Returns a result dict with keys: ``concern``, ``model``, ``status``,
+    ``finding_path`` (on success), ``error`` (on failure), ``attempt``.
+    """
+    concern = entry["concern"]
+    model = entry["model"]
+    prompt_rel = entry["prompt_path"]
+    prompt_abs = repo / prompt_rel
+
+    finding_name = f"concern--{concern}--{model}"
+    findings_dir = work_dir / "findings"
+    findings_dir.mkdir(parents=True, exist_ok=True)
+    finding_path = findings_dir / f"{finding_name}.md"
+
+    if not prompt_abs.is_file():
+        return {
+            "concern": concern,
+            "model": model,
+            "status": "error",
+            "error": f"Prompt file not found: {prompt_rel}",
+            "attempt": 0,
+        }
+
+    prompt_content = prompt_abs.read_text(encoding="utf-8")
+
+    # Prompt passed as direct CLI argument — copilot CLI does not support
+    # stdin piping via ``-p -``.
+    cmd = [COPILOT_CMD, "-p", prompt_content]
+    if model != "inherit":
+        cmd.extend(["--model", _resolve_model(model)])
+
+    last_error = ""
+    total_attempts = retries + 1
+    for attempt in range(1, total_attempts + 1):
+        try:
+            result = subprocess.run(
+                cmd,
+                cwd=repo,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                encoding="utf-8",
+                errors="replace",
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                finding_path.write_text(result.stdout, encoding="utf-8")
+                return {
+                    "concern": concern,
+                    "model": model,
+                    "status": "success",
+                    "finding_path": _posix(finding_path, relative_to=repo),
+                    "attempt": attempt,
+                }
+            last_error = result.stderr.strip() or f"Exit code {result.returncode}"
+            if result.returncode == 0 and not result.stdout.strip():
+                last_error = "Empty output"
+        except subprocess.TimeoutExpired:
+            last_error = f"Timed out after {timeout}s"
+        except FileNotFoundError:
+            return {
+                "concern": concern,
+                "model": model,
+                "status": "error",
+                "error": f"{COPILOT_CMD} is not installed or not on PATH",
+                "attempt": attempt,
+            }
+        except OSError as exc:
+            # On Windows, CreateProcess has a 32 766-char command-line limit.
+            # When the prompt exceeds this, subprocess.run raises OSError.
+            # Not retryable — the prompt won't shrink between attempts.
+            return {
+                "concern": concern,
+                "model": model,
+                "status": "error",
+                "error": f"OS error (prompt may exceed CLI argument limit): {exc}",
+                "attempt": attempt,
+            }
+
+    return {
+        "concern": concern,
+        "model": model,
+        "status": "failed",
+        "error": last_error,
+        "attempt": total_attempts,
+    }
+
+
+def run_concerns(args: argparse.Namespace) -> None:
+    """Read concern-dispatch.json and launch ``copilot -p`` per entry.
+
+    Uses :class:`~concurrent.futures.ThreadPoolExecutor` for parallel
+    execution.  Each worker invokes :func:`_run_single_concern` with
+    retry and timeout logic.
+
+    Prints a JSON summary on stdout with per-entry results and counts.
+    """
+    repo = Path(args.repo).resolve()
+    work_dir = repo / ".agents" / "focused-review"
+    dispatch_path = work_dir / "concern-dispatch.json"
+
+    if not dispatch_path.is_file():
+        print(
+            json.dumps({"error": f"Dispatch file not found: {_posix(dispatch_path, relative_to=repo)}"}),
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    entries: list[dict[str, str]] = json.loads(
+        dispatch_path.read_text(encoding="utf-8")
+    )
+
+    if not entries:
+        print(json.dumps({
+            "total": 0,
+            "success": 0,
+            "failed": 0,
+            "results": [],
+        }))
+        return
+
+    max_workers = args.max_workers
+    timeout = args.timeout
+    retries = args.retries
+
+    results: list[dict[str, object]] = []
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_entry = {
+            executor.submit(
+                _run_single_concern,
+                entry,
+                repo,
+                work_dir,
+                timeout=timeout,
+                retries=retries,
+            ): entry
+            for entry in entries
+        }
+
+        for future in as_completed(future_to_entry):
+            try:
+                result = future.result()
+            except Exception as exc:
+                entry = future_to_entry[future]
+                result = {
+                    "concern": entry.get("concern", "unknown"),
+                    "model": entry.get("model", "unknown"),
+                    "status": "error",
+                    "error": f"Unexpected: {exc}",
+                    "attempt": 0,
+                }
+            results.append(result)
+            status = result["status"]
+            concern = result["concern"]
+            model = result["model"]
+            if status == "success":
+                print(
+                    f"  ✓ {concern} ({model}): {result.get('finding_path', '')}",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    f"  ✗ {concern} ({model}): {result.get('error', status)}",
+                    file=sys.stderr,
+                )
+
+    success_count = sum(1 for r in results if r["status"] == "success")
+    failed_count = len(results) - success_count
+
+    summary = {
+        "total": len(results),
+        "success": success_count,
+        "failed": failed_count,
+        "results": results,
+    }
+    print(json.dumps(summary))
+
+
+# ---------------------------------------------------------------------------
+# Subcommand: scale-concerns
+# ---------------------------------------------------------------------------
+
+
+def _count_diff_lines(diff_path: Path) -> int:
+    """Count changed lines in a unified diff (lines starting with +/- but not +++/---)."""
+    if not diff_path.is_file():
+        return 0
+    return sum(
+        1
+        for line in diff_path.read_text(encoding="utf-8").splitlines()
+        if line.startswith(("+", "-")) and not line.startswith(("+++", "---"))
+    )
+
+
+def _diff_lines_to_tier(diff_lines: int) -> str:
+    """Map a diff line count to the scaling tier label."""
+    if diff_lines <= 10:
+        return "1-10"
+    if diff_lines <= 100:
+        return "11-100"
+    if diff_lines <= 500:
+        return "101-500"
+    return "501+"
+
+
+def _dedup_concerns(entries: list[dict[str, str]]) -> list[dict[str, str]]:
+    """Keep the first entry per concern name, preserving original order."""
+    seen: dict[str, dict[str, str]] = {}
+    for entry in entries:
+        name = entry["concern"]
+        if name not in seen:
+            seen[name] = entry
+    return list(seen.values())
+
+
+def _filter_concerns_by_tier(
+    diff_lines: int, entries: list[dict[str, str]]
+) -> list[dict[str, str]]:
+    """Apply tier-based filtering and deduplication to concern dispatch entries.
+
+    Tiers:
+        1-10 lines   → general concern only (first match)
+        11-100 lines  → bugs + security only (deduped by concern)
+        101-500 lines → all concerns (deduped by concern)
+        501+ lines    → all concerns (no filtering)
+    """
+    if diff_lines > 500:
+        return entries
+    if diff_lines <= 10:
+        return [e for e in entries if e["concern"] == "general"][:1]
+    if diff_lines <= 100:
+        return _dedup_concerns(
+            [e for e in entries if e["concern"] in ("bugs", "security")]
+        )
+    # 101-500
+    return _dedup_concerns(entries)
+
+
+def scale_concerns(args: argparse.Namespace) -> None:
+    """Apply adaptive scaling to concern dispatch based on diff size."""
+    dispatch_path = Path(args.dispatch_path)
+
+    if not dispatch_path.is_file():
+        print(
+            json.dumps({"error": f"Dispatch file not found: {dispatch_path}"}),
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    entries: list[dict[str, str]] = json.loads(
+        dispatch_path.read_text(encoding="utf-8")
+    )
+
+    # Resolve diff_lines: explicit flag wins, otherwise count from diff_path.
+    diff_lines: int
+    if args.diff_lines is not None:
+        diff_lines = args.diff_lines
+    elif args.diff_path is not None:
+        diff_lines = _count_diff_lines(Path(args.diff_path))
+    else:
+        print(
+            json.dumps({"error": "Either --diff-lines or --diff-path is required"}),
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    original_count = len(entries)
+    filtered = _filter_concerns_by_tier(diff_lines, entries)
+    tier = _diff_lines_to_tier(diff_lines)
+
+    dispatch_path.write_text(json.dumps(filtered, indent=2), encoding="utf-8")
+
+    print(
+        json.dumps(
+            {
+                "diff_lines": diff_lines,
+                "tier": tier,
+                "concerns_before": original_count,
+                "concerns_after": len(filtered),
+            }
+        )
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -636,6 +1236,59 @@ def main() -> int:
         help="Force all rules to report-only mode, ignoring per-rule autofix settings",
     )
     prepare_parser.set_defaults(func=prepare_review)
+
+    # run-concerns subcommand
+    concerns_parser = subparsers.add_parser(
+        "run-concerns",
+        help="Launch copilot -p sessions for each concern in concern-dispatch.json",
+    )
+    concerns_parser.add_argument(
+        "--repo",
+        default=".",
+        help="Path to the repository root (default: current directory)",
+    )
+    concerns_parser.add_argument(
+        "--max-workers",
+        type=int,
+        default=CONCERN_MAX_WORKERS,
+        help=f"Maximum parallel copilot sessions (default: {CONCERN_MAX_WORKERS})",
+    )
+    concerns_parser.add_argument(
+        "--timeout",
+        type=int,
+        default=CONCERN_TIMEOUT_SECS,
+        help=f"Timeout per copilot session in seconds (default: {CONCERN_TIMEOUT_SECS})",
+    )
+    concerns_parser.add_argument(
+        "--retries",
+        type=int,
+        default=CONCERN_RETRIES,
+        help=f"Number of retries per failed session (default: {CONCERN_RETRIES})",
+    )
+    concerns_parser.set_defaults(func=run_concerns)
+
+    # scale-concerns subcommand
+    scale_parser = subparsers.add_parser(
+        "scale-concerns",
+        help="Apply adaptive scaling to concern dispatch based on diff size",
+    )
+    scale_parser.add_argument(
+        "--diff-lines",
+        type=int,
+        default=None,
+        help="Number of changed lines (takes priority over --diff-path when both given)",
+    )
+    scale_parser.add_argument(
+        "--diff-path",
+        default=None,
+        help="Path to diff.patch file to count changed lines from (used if --diff-lines not given)",
+    )
+    scale_parser.add_argument(
+        "--dispatch-path",
+        required=True,
+        help="Path to concern-dispatch.json file to filter in-place",
+    )
+    scale_parser.set_defaults(func=scale_concerns)
 
     args = parser.parse_args()
     args.func(args)

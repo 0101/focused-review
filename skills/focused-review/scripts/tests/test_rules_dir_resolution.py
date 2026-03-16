@@ -300,7 +300,12 @@ class TestResolveConfig:
         with patch.object(fr, "CONFIG_SCAN_LOCATIONS", ["nonexistent.json"]), \
              patch.object(fr, "CONFIG_USER_LOCATIONS", []):
             result = fr._resolve_config(str(repo))
-        assert result == {"rules_dir": "review/", "sources": []}
+        assert result == {
+            "rules_dir": "review/",
+            "sources": [],
+            "concerns_dir": "review/concerns/",
+            "scaling": "standard",
+        }
 
     def test_returns_rules_dir_from_config(self, tmp_path: Path) -> None:
         """Config with only rules_dir returns it with empty sources."""
@@ -367,7 +372,12 @@ class TestResolveConfigSubcommand:
 
         captured = capsys.readouterr()
         result = json.loads(captured.out)
-        assert result == {"rules_dir": "review/", "sources": []}
+        assert result == {
+            "rules_dir": "review/",
+            "sources": [],
+            "concerns_dir": "review/concerns/",
+            "scaling": "standard",
+        }
 
     def test_outputs_config_values(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
@@ -385,7 +395,10 @@ class TestResolveConfigSubcommand:
 
         captured = capsys.readouterr()
         result = json.loads(captured.out)
-        assert result == {"rules_dir": "my-rules/", "sources": ["docs/guide.md"]}
+        assert result["rules_dir"] == "my-rules/"
+        assert result["sources"] == ["docs/guide.md"]
+        assert result["concerns_dir"] == "review/concerns/"
+        assert result["scaling"] == "standard"
 
     def test_rules_dir_gets_trailing_slash(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]

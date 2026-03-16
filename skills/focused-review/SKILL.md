@@ -1,7 +1,7 @@
 ---
 name: focused-review
-description: Run parallel focused code reviews using committed review rules
-argument-hint: "[branch|commit|staged|unstaged|full|refresh|configure] [--no-autofix]"
+description: Run unified code reviews through a 5-phase discovery-consolidation-assessment pipeline
+argument-hint: "[branch|commit|staged|unstaged|full|refresh|configure|post-mortem] [--no-autofix]"
 ---
 
 <!-- Resolve the Python helper path at load time. Works for plugin installs (CLAUDE_PLUGIN_ROOT), user/project skill dirs, and direct repo use. -->
@@ -16,74 +16,35 @@ argument-hint: "[branch|commit|staged|unstaged|full|refresh|configure] [--no-aut
 <!-- Resolve explicit source files from config. Uses the Python script's resolve-config subcommand (single source of truth for config scan locations). -->
 **Configured sources:** !`python -c "import subprocess,json,os; from pathlib import Path; pr=os.environ.get('CLAUDE_PLUGIN_ROOT',''); candidates=[Path(pr)/'skills/focused-review/scripts/focused-review.py'] if pr else []; candidates+=[Path.home()/'.claude/skills/focused-review/scripts/focused-review.py',Path('.claude/skills/focused-review/scripts/focused-review.py'),Path('skills/focused-review/scripts/focused-review.py')]; p=next((c.resolve() for c in candidates if c.exists()),None); r=subprocess.run(['python',str(p),'resolve-config','--repo','.'],capture_output=True,text=True) if p else None; s=json.loads(r.stdout).get('sources',[]) if r and r.returncode==0 else []; print(json.dumps(s))"`
 
-You are the orchestrator for the focused-review plugin. You have three modes based on the argument.
+<!-- Resolve the concerns directory from config file. Uses the Python script's resolve-config subcommand. -->
+**Concerns directory:** !`python -c "import subprocess,json,os; from pathlib import Path; pr=os.environ.get('CLAUDE_PLUGIN_ROOT',''); candidates=[Path(pr)/'skills/focused-review/scripts/focused-review.py'] if pr else []; candidates+=[Path.home()/'.claude/skills/focused-review/scripts/focused-review.py',Path('.claude/skills/focused-review/scripts/focused-review.py'),Path('skills/focused-review/scripts/focused-review.py')]; p=next((c.resolve() for c in candidates if c.exists()),None); r=subprocess.run(['python',str(p),'resolve-config','--repo','.'],capture_output=True,text=True) if p else None; d=json.loads(r.stdout).get('concerns_dir','review/concerns/') if r and r.returncode==0 else 'review/concerns/'; print(d)"`
+
+<!-- Resolve the scaling mode from config file. Values: "standard" (default) or "thorough". -->
+**Scaling:** !`python -c "import subprocess,json,os; from pathlib import Path; pr=os.environ.get('CLAUDE_PLUGIN_ROOT',''); candidates=[Path(pr)/'skills/focused-review/scripts/focused-review.py'] if pr else []; candidates+=[Path.home()/'.claude/skills/focused-review/scripts/focused-review.py',Path('.claude/skills/focused-review/scripts/focused-review.py'),Path('skills/focused-review/scripts/focused-review.py')]; p=next((c.resolve() for c in candidates if c.exists()),None); r=subprocess.run(['python',str(p),'resolve-config','--repo','.'],capture_output=True,text=True) if p else None; d=json.loads(r.stdout).get('scaling','standard') if r and r.returncode==0 else 'standard'; print(d)"`
+
+You are the orchestrator for the focused-review plugin. Your mode depends on the argument.
 
 ## Mode Selection
 
 Parse the user's argument (available as `$ARGUMENTS`):
 
 - First, check if `--no-autofix` is present anywhere in the arguments. If so, set `no_autofix = true` and remove it from the argument string before parsing the mode. This flag suppresses all autofix behavior — violations are reported but never fixed. Useful for CI runs, remote PR reviews, or read-only contexts.
-- `configure` → **Configure Mode** (below)
-- `refresh` → **Refresh Mode** (below)
+- `configure` or `refresh` → Read `REFRESH.md` from the same directory as this skill file and follow its instructions. Pass along the resolved **Script path**, **Rules directory**, **Concerns directory**, **Defaults directory**, and **Configured sources** values.
+- `post-mortem` (with optional finding numbers) → **Post-Mortem Mode**
 - `branch`, `commit`, `staged`, `unstaged`, `full` → **Review Mode** with that scope
 - Empty or missing → **Review Mode** with scope `branch`
 
 ---
 
-## Configure Mode
+## Review Mode — Unified Pipeline
 
-Interactive flow to create or update a `focused-review.json` config file that controls where rules are stored.
+Five-phase pipeline: Discovery → Consolidation → Assessment → (Rebuttal) → Presentation.
 
-### Step 1: Detect platform
-
-Check if `CLAUDE_PLUGIN_ROOT` is set:
-- **Set** → running under Copilot CLI
-- **Not set** → running under Claude Code
-
-### Step 2: Ask for rules directory
-
-Tell the user the current resolved rules directory (from **Rules directory** above) and ask what it should be. If the user presses Enter or says "keep", use the current value.
-
-### Step 3: Ask where to save
-
-Present numbered options based on platform:
-
-**Claude Code:**
-1. `.claude/focused-review.json` — project shared (version-controlled)
-2. `focused-review.json` — repo root (platform-agnostic)
-3. `.github/focused-review.json` — GitHub convention
-4. `~/.claude/focused-review.json` — user-wide
-
-**Copilot CLI:**
-1. `focused-review.json` — repo root (platform-agnostic)
-2. `.github/focused-review.json` — GitHub convention
-3. `~/.copilot/focused-review.json` — user-wide
-
-### Step 4: Write the config file
-
-Write the config file using a Python one-liner (using the **Script path** resolved above for consistency):
-
-```bash
-python -c "import json,os; from pathlib import Path; p=Path('{chosen_path}'); p.parent.mkdir(parents=True,exist_ok=True); d=json.loads(p.read_text()) if p.is_file() else {}; d['rules_dir']='{rules_dir_value}'; p.write_text(json.dumps(d,indent=2)+'\n')"
-```
-
-Where `{chosen_path}` is the path selected in Step 3 (expand `~` for user-wide paths) and `{rules_dir_value}` is the directory from Step 2.
-
-### Step 5: Confirm
-
-Tell the user:
-- What was written and where
-- If a project-shared location was chosen (`.claude/`, `focused-review.json`, `.github/`), remind them to commit the file
-
----
-
-## Review Mode
-
-Run a parallel code review using committed rules from the repo's `{rules_dir}` directory (using the **Rules directory** resolved above).
+Rules and concerns run in parallel during Phase 1. Subsequent phases validate and refine findings.
 
 ### Step 1: Prepare dispatch
 
-Determine the scope from the argument (default `branch`), then run the Python helper using the **Script path** and **Rules directory** resolved above:
+Determine the scope from the argument (default `branch`), then run the Python helper:
 
 ```bash
 python {script_path} prepare-review --repo . --scope {scope} --rules-dir {rules_dir} {no_autofix_flag}
@@ -92,42 +53,49 @@ python {script_path} prepare-review --repo . --scope {scope} --rules-dir {rules_
 Where `{no_autofix_flag}` is `--no-autofix` if `no_autofix` was set during mode selection, or omitted entirely otherwise.
 
 The script will:
-- Read all rule files from `{rules_dir}`
-- Generate the diff for the requested scope
-- Chunk large diffs at file boundaries
-- Filter rules by `applies-to` globs
-- Write `dispatch.json` to `.agents/focused-review/`
-- Print a JSON summary to stdout on success
+- Read all rule files from `{rules_dir}` and write `dispatch.json`
+- Read concern files from `{concerns_dir}` (or built-in defaults) and write `concern-dispatch.json`
+- Generate per-file diffs to `.agents/focused-review/diffs/`
+- Generate concern prompt files to `.agents/focused-review/prompts/`
+- Print a JSON summary to stdout with `agents`, `concern_prompts`, `concerns_total`, `scope`, etc.
 
 **Error handling:**
-- **No rules found**: If the script reports no rules in `{rules_dir}`, this is likely the user's first run. Do NOT ask — tell the user "No review rules found — collecting rules from instruction files" and automatically proceed with **Refresh Mode** below. After refresh completes, re-run this prepare-review step with the same scope.
-- **Other errors**: If the script prints nothing to stdout, or prints an error to stderr, or exits non-zero for any other reason, report the error to the user and stop.
+- **No rules found**: Tell the user "No review rules found — collecting rules from instruction files" and automatically proceed with Refresh Mode in `REFRESH.md` (same directory as this skill file). After refresh completes, re-run this prepare-review step with the same scope.
+- **Other errors**: Report the error to the user and stop.
 
-### Step 2: Read dispatch plan
+Parse the JSON summary. If `agents` is 0 and `concern_prompts` is 0, tell the user no rules matched and no concerns apply, and stop.
 
-Read `.agents/focused-review/dispatch.json`. It contains an array of dispatch entries:
+### Step 2: Apply adaptive scaling
 
-```json
-[
-  {
-    "rule_path": "{rules_dir}sealed-classes.md",
-    "model": "haiku",
-    "autofix": false,
-    "chunk_path": ".agents/focused-review/diff.patch",
-    "chunk_index": 1,
-    "total_chunks": 3,
-    "scope": "branch"
-  }
-]
+For `full` scope, skip this step — run all concerns as-is. Also skip Phases 3–4 later (no diff to assess against).
+
+If the **Scaling** value is `"thorough"`, skip filtering — run all concerns regardless of diff size. This also enables Phase 4 (Rebuttal). Jump to Step 3.
+
+For diff-based scopes with standard scaling, count changed lines and filter the concern dispatch to keep costs proportional:
+
+```bash
+python skills/focused-review/scripts/focused-review.py scale-concerns \
+  --diff-path .agents/focused-review/diff.patch \
+  --dispatch-path .agents/focused-review/concern-dispatch.json
 ```
 
-If the dispatch array is empty, tell the user no rules matched the changed files and stop.
+**Scaling tiers:**
+- **1–10 lines**: Rules + `general` concern only — lightweight review for small fixes
+- **11–100 lines**: Rules + `bugs` + `security` concerns — catches critical issues without over-spending
+- **101–500 lines**: Rules + all concerns (primary model per concern) — full analysis
+- **501+ lines**: Rules + all concerns (all models, including multi-model for high-priority) — maximum coverage
 
-**IMPORTANT: Do NOT read the rule files or diff/chunk files yourself.** The subagents will read them. You only need the paths and metadata from dispatch.json.
+Record the `diff_lines` and `tier` from the output for use in the final report.
 
-### Step 3: Launch parallel review agents
+### Step 3: Phase 1 — Discovery (parallel)
 
-For **each** entry in the dispatch array, launch a `review-runner` agent **in parallel**. Each agent's prompt must contain exactly:
+Read `.agents/focused-review/dispatch.json` (rule dispatch) and `.agents/focused-review/concern-dispatch.json` (concern dispatch).
+
+**IMPORTANT: Do NOT read the rule files, diff/chunk files, or concern prompt files yourself.** The subagents and concern runner read their own files.
+
+**In a single response**, launch all of the following in parallel:
+
+**Rule agents** — For each entry in `dispatch.json`, launch a `review-runner` Task agent. Each agent's prompt must contain exactly:
 
 ```
 rule_path: {entry.rule_path}
@@ -139,232 +107,298 @@ autofix: {entry.autofix}
 
 Where:
 - `chunk_path_value` is `entry.chunk_path` when not null, or `.agents/focused-review/changed-files.txt` when null (for `full` scope)
-- `chunk` line: include as `{chunk_index} of {total_chunks}` when both are present (e.g. "2 of 5"). Omit the line entirely when `chunk_index` is null (single chunk or full scope).
+- `chunk` line: include as `{chunk_index} of {total_chunks}` when both are present. Omit the line entirely when `chunk_index` is null.
 - `autofix` line: include as `true` or `false` from the dispatch entry.
 
-Use the model specified in each dispatch entry's `model` field (typically `haiku`). If the model is `"inherit"`, do NOT pass a model parameter to the Task tool (this inherits the parent model).
+Use the model specified in each entry's `model` field. If `"inherit"`, do NOT pass a model parameter to the Task tool.
 
-**Do NOT use `run_in_background`.** Launch agents as inline Task calls — multiple calls in one message run in parallel automatically.
+**Concern runner** — If `concern-dispatch.json` has entries, start the Python concern runner **in the same response** as the rule agent launches. Use the `powershell` tool with `mode="sync"` and `initial_wait: 300` (concern sessions can take several minutes):
 
-**Batch size: max 12 agents per message.** If the dispatch has more than 12 entries, launch the first 12, wait for their results, then launch the next batch. Continue until all entries are dispatched.
+```bash
+python {script_path} run-concerns --repo .
+```
 
-**Keep agent prompts minimal.** The prompt must contain ONLY the fields above. Do NOT inline rule content, diff content, or review instructions into the prompt — the agent reads its own files and has its own instructions.
+This launches `copilot -p` sessions in parallel via ThreadPoolExecutor. It reads `concern-dispatch.json` internally and writes findings to `.agents/focused-review/findings/concern--{name}--{model}.md`.
 
-### Step 4: Compile report
+**Batching**: Max 12 Task agents per message. Include the `run-concerns` bash command in the same response as the first batch of rule agents. If rules need multiple batches (>12 entries), the concern runner is already running from the first batch — subsequent batches only contain rule agents.
 
-Once all agents have completed, compile their results into a single report file at:
+Wait for all rule agents and the concern runner to complete before proceeding.
+
+If `dispatch.json` is empty (no rules matched), only run concerns. If `concern-dispatch.json` is empty (no concerns after scaling), only run rules.
+
+**Save rule findings to disk** — After all rule agents complete, save each agent's output to `.agents/focused-review/findings/rule--{rule-name}.md` (where `{rule-name}` is the rule filename without extension from `rule_path`). Create the `findings/` directory if needed. If a rule ran against multiple chunks, concatenate all chunk outputs into one file. The concern runner already writes its findings to disk — this step ensures rule findings are also available for Phase 2.
+
+### Step 4: Phase 2 — Consolidation
+
+Launch a `general-purpose` Task agent with this prompt:
+
+```
+Read and follow the agent profile at agents/review-consolidator.agent.md
+
+findings_dir: .agents/focused-review/findings
+```
+
+This agent reads all finding files from Phase 1 (`rule--*.md` and `concern--*.md`), deduplicates semantically (same location + same issue = one finding), merges provenance, and writes `.agents/focused-review/consolidated.md` with up to 30 prioritized findings.
+
+Wait for completion. If the agent fails, report the error and skip to Step 7 with whatever findings are available. If the consolidated report shows 0 findings, skip to Step 7 and report "no findings".
+
+### Step 5: Phase 3 — Assessment
+
+**Skip this step for `full` scope** (no diff to assess against). Proceed directly to Step 7 using the consolidated report.
+
+Launch a `general-purpose` Task agent with this prompt:
+
+```
+Read and follow the agent profile at agents/review-assessor.agent.md
+
+consolidated_path: .agents/focused-review/consolidated.md
+diff_path: .agents/focused-review/diff.patch
+```
+
+This agent validates each finding: checks if truly introduced by the diff, constructs adversarial counter-arguments, and assigns verdicts (Confirmed / Questionable / Invalid). Writes `.agents/focused-review/assessed.md`.
+
+Wait for completion. If the agent fails, report the error and skip to Step 7 using the consolidated report as the data source.
+
+### Step 6: Phase 4 — Rebuttal (optional)
+
+**Only run if the Scaling value is `"thorough"` AND scope is not `full`.**
+
+Read `.agents/focused-review/assessed.md`. Find any findings with **Severity Critical or High** that received a verdict of **Invalid**.
+
+If none exist, skip to Step 7.
+
+For each such finding, launch a `general-purpose` Task agent (launch all rebuttals in parallel in a single response):
+
+```
+You are a rebuttal agent. A high-priority finding was assessed as Invalid. Challenge this assessment.
+
+Read the assessed finding and the diff. Construct arguments for why this finding IS valid despite the assessor's counter-arguments. Consider edge cases, race conditions, subtle interactions, and error paths the assessor may have missed.
+
+Finding ID: {A-XX}
+File: {file path from finding}
+Title: {title from finding}
+Description: {description from finding}
+Assessment reasoning: {assessment reasoning from finding}
+Counter-arguments: {counter-arguments from finding}
+
+Diff path: .agents/focused-review/diff.patch
+
+Write your rebuttal to .agents/focused-review/rebuttals/{A-XX}.md with:
+- Your counter-counter-arguments
+- Whether the assessor's dismissal holds up under scrutiny
+- Final recommendation: Reinstate (with what severity) or Uphold Invalid
+```
+
+After all rebuttals complete, read each rebuttal file. For any finding where the rebuttal recommends "Reinstate", note the finding ID and reinstated severity — you will apply these overrides when compiling the report in Step 7.
+
+### Step 7: Phase 5 — Presentation
+
+Determine the data source (check in order, use the first that exists):
+- If `assessed.md` exists (Phases 3+ ran): read `.agents/focused-review/assessed.md`, applying any rebuttal overrides from Step 6. For each overridden finding (rebuttal recommends "Reinstate"), replace its verdict with Confirmed at the reinstated severity and append the rebuttal reasoning to the assessment section.
+- If only `consolidated.md` exists (`full` scope or Phase 3 failed): read `.agents/focused-review/consolidated.md`. Treat all findings as Confirmed (no assessment was performed).
+- If neither exists (Phase 2 also failed): read raw Phase 1 findings from `.agents/focused-review/findings/` directly. List all `rule--*.md` and `concern--*.md` files, read each, and include their findings as-is. Treat all as Confirmed with provenance derived from filenames (e.g. `rule--sealed-classes.md` → provenance "rule:sealed-classes", `concern--bugs--opus.md` → provenance "concern:bugs (opus)"). Deduplicate by file path + line number, keeping the entry with the highest severity.
+
+Compile the final report to:
 
 ```
 .agents/focused-review/review-{timestamp}.md
 ```
 
-Where `{timestamp}` is the current date-time in `YYYYMMDD-HHmmss` format.
+Where `{timestamp}` is `YYYYMMDD-HHmmss`.
 
-Report format:
+**Report format:**
+
+Use these values from earlier steps:
+- `{rule_count}`: number of unique rules dispatched (from `dispatch.json` length or prepare-review summary `rules_matched`)
+- `{concern_count}`: number of concerns dispatched (from Step 2 output `concerns_after`, or prepare-review summary `concern_prompts`)
+- `{consolidated_count}`: total findings in consolidated report (from Phase 2 output header)
+- `{diff_lines}` and `{tier}`: from Step 2 output. For `full` scope (where Step 2 is skipped), use `**Scaling:** full scope (all files)` instead of the tier format
 
 ```markdown
-# Focused Review Report
+# Unified Review Report
 
 **Scope:** {scope}
 **Date:** {ISO timestamp}
-**Rules checked:** {count of dispatch entries}
+**Pipeline:** Discovery ({rule_count} rules, {concern_count} concerns) → Consolidation → Assessment
+**Scaling:** {tier} ({diff_lines} lines changed)
+
+## Summary
+
+| Verdict | Count |
+|---------|-------|
+| ✅ Confirmed | {n} |
+| ❓ Questionable | {n} |
+| ❌ Invalid (filtered) | {n} |
 
 ---
 
-## {rule name from rule_path filename, e.g. "sealed-classes"}
+## Confirmed Findings
 
-{agent output verbatim — either "NO VIOLATIONS FOUND" or VIOLATION/FIXED blocks}
+{For each Confirmed finding, grouped by file path, ordered by line number within each file:}
+
+### {n}. [{severity}] {title}
+
+**File:** `{path}:{line}`
+**Fix complexity:** {quickfix|moderate|complex}
+**Provenance:** {sources, e.g. "rule:sealed-classes, concern:bugs (opus)"}
+
+{description}
+
+> **Assessment:** {assessment reasoning — why this was confirmed}
+
+**Suggestion:** {suggestion}
 
 ---
 
-## {next rule name}
+## Questionable Findings
 
-{next agent output}
+{Same format as Confirmed. Include counter-arguments in the Assessment line.}
+
+---
+
+<details>
+<summary>{invalid_count} findings filtered as invalid</summary>
+
+| ID | Severity | File | Title | Reason |
+|----|----------|------|-------|--------|
+| {A-XX} | {sev} | `{path}` | {title} | {one-line assessment reason} |
+
+</details>
 ```
 
-Group results by rule (if a rule ran against multiple chunks, combine the agent outputs under one heading). Preserve the exact `VIOLATION`, `FIXED`, and `NO VIOLATIONS FOUND` output from agents — do not reformat or summarize.
+**Grouping rules:**
+- Within each verdict section (Confirmed, Questionable), group findings by file path.
+- Within each file group, order findings by line number.
+- If a verdict section has no findings, omit it entirely.
 
 After writing the report, tell the user:
-- How many rules were checked
-- How many violations were found (count `VIOLATION:` blocks)
-- How many fixes were applied (count `FIXED:` blocks)
-- If there are violations or fixes, show a numbered summary table:
+
+1. Pipeline summary: `{rule_count} rules + {concern_count} concerns → {consolidated_count} unique findings → {confirmed + questionable} actionable`
+2. A numbered summary table of confirmed and questionable findings:
 
 ```
-| #  | Rule              | File                  | Issue                          |
-|----|-------------------|-----------------------|--------------------------------|
-| 1  | cancellation-token| SomeFile.cs:42        | CancellationToken.None used... |
-| 2  | sealed-classes    | OtherFile.cs:10       | Record missing sealed modifier |
+| # | Verdict | Severity | File | Issue |
+|---|---------|----------|------|-------|
+| 1 | ✅ | High | path:42 | Brief description... |
+| 2 | ❓ | Medium | path:88 | Brief description... |
 ```
 
-- The path to the full report file
+3. The path to the full report file
 
 ---
 
-## Refresh Mode
+## Post-Mortem Mode — Trace Invalid Findings
 
-Re-scan instruction files and update review rules in `{rules_dir}` (using the **Rules directory** resolved above).
+User-triggered analysis after reviewing a report. The user marks findings they consider invalid. The system traces each back to its source rule or concern via provenance, analyzes the false-positive pattern, and suggests specific adjustments. **Suggest-only** — does not edit rule or concern files.
 
-### Step 1: Discover instruction files
+### Step 1: Locate latest report
 
-**1a. Fast scan (Python globs)**
-
-Run the Python helper using the **Script path** resolved above:
+Find the most recent `review-*.md` file in `.agents/focused-review/`:
 
 ```bash
-python {script_path} discover --repo .
+python -c "from pathlib import Path; files=sorted(Path('.agents/focused-review').glob('review-*.md')); print(str(files[-1]).replace(chr(92),'/') if files else 'NONE')"
 ```
 
-This outputs a JSON array of instruction file paths (relative to repo root). Start building the discovered-files list from this output.
+If NONE, tell the user no review report exists and stop.
 
-**1b. Configured sources**
+Read the report file.
 
-Check **Configured sources** (resolved above). If the array is non-empty, add each path to the discovered-files list (skip any that do not exist on disk). These are user-specified source files from the `"sources"` array in `focused-review.json`.
+### Step 2: Identify invalid findings
 
-**1c. Agent-assisted exploration**
+Parse the arguments after `post-mortem` for finding numbers. Accept comma-separated, space-separated, or mixed (e.g., `1,3,5` or `1 3 5` or `1, 3, 5`).
 
-Search the repo for additional files that contain **code review guidance** but are not covered by the Python glob patterns. The Python discover step catches standard locations (CLAUDE.md, copilot-instructions.md, .cursor/rules, etc.) but misses project-specific locations like `.github/skills/` directories, `docs/review/`, or custom guideline files.
+If no numbers provided, present the numbered summary table from the report and ask the user which findings they consider invalid. Wait for their response before continuing.
 
-Search strategy:
-1. Look for candidate files in these locations (glob for `.md` files):
-   - `.github/skills/**/*.md`
-   - `.github/review*/**/*.md`
-   - `docs/review*/**/*.md`
-   - `docs/coding*/**/*.md`
-   - `docs/style*/**/*.md`
-   - Any `*review*guide*.md` or `*coding*standard*.md` at the repo root
-2. For each candidate, **read the file** (or at least the first ~100 lines) and determine whether it contains substantive code review guidance — rules about correctness, style, conventions, patterns, security, concurrency, API design, etc.
-3. **Include** files that contain actionable code review rules or guidelines that a reviewer should enforce.
-4. **Exclude** files that are about: deployment, CI/CD pipelines, workflow automation, testing infrastructure setup, project management, release processes, or general documentation that does not prescribe code quality standards.
-5. Add any relevant files to the discovered-files list, deduplicating against what the Python discover step already found.
+For each specified number, locate the corresponding finding in the report (match the `### {n}.` heading in the Confirmed or Questionable sections). Extract:
+- **Title** and **severity**
+- **File** path
+- **Provenance** line (e.g., `rule:sealed-classes, concern:bugs (opus)`)
+- **Description** and **assessment reasoning**
 
-After this step, tell the user what was discovered:
-- List all discovered instruction files (from all three sub-steps)
-- Indicate which files came from Python discovery, which from configured sources, and which from agent exploration
-- If agent exploration found no additional files, say so — this is normal for repos that keep all instructions in standard locations.
+If a number doesn't match any finding, warn the user and skip it.
 
-If the combined discovered-files list is empty after all three sub-steps, tell the user no instruction files were found and stop.
+### Step 3: Trace provenance to sources
 
-### Step 2: Read all sources
+Parse each finding's **Provenance** field into individual sources. Each source follows one of these formats:
+- `rule:{name}` → source file is `{rules_dir}/{name}.md`
+- `concern:{name} ({model})` → source file is `{concerns_dir}/{name}.md`, falling back to `{defaults_dir}/concerns/{name}.md`
 
-Read **every** instruction file returned by discover. Also read **all** existing rule files from `{rules_dir}*.md` (if any exist).
+Build a map: **source → list of findings** traced to it.
 
-You need both sets of content to compare what instructions say vs. what rules currently enforce.
+For each unique source, read the source file. If the file doesn't exist, note it as "source removed or renamed" and still include it in the analysis (the finding provenance itself is sufficient context).
 
-### Step 3: Compare and categorize
+### Step 4: Analyze patterns and generate recommendations
 
-Analyze the instruction files against the existing rules. Produce a categorized action plan:
+For each source that produced one or more invalid findings, analyze the false-positive pattern:
 
-- **New rules**: Instructions contain guidance that has no matching committed rule. For each, draft the full rule content in the standard format (YAML frontmatter with `autofix: false`, `model: haiku|sonnet|inherit`, `source: {instruction file}`, optional `applies-to` glob, then Markdown body with `# Rule Name`, `## Rule`, `## Why`, `## Requirements`, `## Wrong`, `## Correct` sections).
+**For rule sources:**
+- Read the rule's `## Rule`, `## Requirements`, and `## Wrong` / `## Correct` sections
+- Compare the invalid findings against the rule definition: what did the rule flag that shouldn't have been flagged?
+- Classify the root cause:
+  - **Scope too broad**: rule's `applies-to` glob matches files where the rule doesn't apply → suggest narrowing the glob
+  - **Missing exclusion**: rule is generally valid but misses a legitimate exception pattern → suggest adding to Requirements section (e.g., "Exclude factory methods" or "Skip when X pattern is present")
+  - **Vague criteria**: rule definition is ambiguous, causing the agent to over-flag → suggest tightening the rule description with concrete boundaries
+  - **Model mismatch**: rule requires deep semantic understanding but runs on a fast model → suggest changing model to `sonnet` or `inherit`
+  - **Fundamentally noisy**: rule produces multiple false positives in this review, suggesting it is fundamentally noisy → suggest removal
 
-  **Choosing `model`** — default to `inherit` (uses whatever model the user runs with) and only downgrade for purely mechanical checks:
-  - **inherit** (default): any rule that requires understanding context, reasoning about behavior, or making judgment calls. This includes: bug finding, correctness, concurrency, security, API design, code duplication, design patterns, architectural patterns, performance analysis, platform-specific concerns, interop, error handling, and convention enforcement that requires understanding intent. When in doubt, use `inherit`.
-  - **sonnet**: rules requiring semantic understanding but not deep reasoning — style preferences, naming conventions with semantic meaning, documentation completeness checks. Use only when the rule clearly does not need the strongest available model.
-  - **haiku**: purely mechanical/syntactic pattern matching — keyword presence/absence, operator usage, literal string matching (e.g. "no `mutable` keyword", "no `break`/`continue`", "use `|>` operator"). The rule can be checked by looking at tokens alone with no surrounding context needed. Very few rules qualify.
+**For concern sources:**
+- Read the concern's `## What to Check` and `## Evidence Standards` (including its Anti-patterns to avoid list)
+- Compare the invalid findings against the concern prompt: what was flagged without sufficient evidence?
+- Classify the root cause:
+  - **Missing anti-pattern**: concern doesn't warn against this class of false positive → suggest adding a specific anti-pattern entry
+  - **Evidence standards too loose**: concern accepted weak evidence for this type of finding → suggest strengthening the evidence requirement
+  - **Scope too broad**: concern checks an area that doesn't apply to this codebase → suggest adding `applies-to` restriction
+  - **Prompt too aggressive**: concern's role description encourages over-flagging → suggest softening language (e.g., "prove it's broken" instead of "find potential issues")
 
-- **Updated rules**: A committed rule exists but the source instruction has changed in a way that affects the rule's requirements. Include the updated content.
+### Step 5: Write recommendation report
 
-- **Orphaned rules**: A committed rule whose `source` instruction file no longer exists or no longer contains the relevant guidance. These may be intentionally kept — flag but default to keeping them.
+Write to `.agents/focused-review/post-mortem-{timestamp}.md` where `{timestamp}` is `YYYYMMDD-HHmmss`:
 
-- **Unchanged rules**: A committed rule that still accurately reflects its source instruction. No action needed.
+```markdown
+# Post-Mortem: Invalid Finding Analysis
 
-**IMPORTANT — extract ALL substantive rules.** Do NOT skip rules because they seem "subjective", "design-level", or "hard to check mechanically". Review agents are LLMs — they can evaluate style, design patterns, idiomatic usage, and architectural guidance just as well as mechanical checks. If an instruction file says to prefer a certain pattern, that becomes a rule. Skip only these categories:
-- **Tooling/workflow** instructions (e.g. "run tests with pytest") — not code quality.
-- **Cosmetic-only** rules — if the ONLY substance is whitespace, indentation, brace style, brace placement, blank line counts, or line length, skip it. These are enforced by formatters, not reviewers. If a rule mixes cosmetic checks with behavioral checks (e.g. "use consistent indentation AND prefer early returns"), drop the cosmetic parts and keep the behavioral ones.
-- **Rules without substantive examples** — if you cannot write Wrong/Correct examples that differ in behavior or semantic meaning (not just formatting or whitespace), the rule is too vague to produce actionable findings. Skip it.
-- **Purely subjective rules** — if every requirement in the rule is subjective ("ensure quality", "keep it clean", "write good code") with no concrete, testable checkpoint, skip it. A rule must have at least one requirement that a reviewer could unambiguously check against a code sample.
+**Date:** {ISO timestamp}
+**Review report:** {report filename}
+**Findings analyzed:** {count}
 
-**Quality guidance for drafted rules:**
-- **Scope rules tightly.** If a rule only applies to specific file types (test files, native code, scripts, etc.), add an `applies-to` glob. For example: `applies-to: "**/*Test*.cs"` for test-only rules, `applies-to: "**/*.{cpp,h,c}"` for native code. Broad scope produces more noise.
-- **Default to `inherit`.** Most rules benefit from the strongest available model. Only downgrade to `sonnet` or `haiku` when the rule is clearly mechanical enough that a weaker model handles it equally well. Rules that require reading surrounding code for context (not just the changed lines) must be `inherit`.
-- **Check model assignments before presenting.** After drafting all rules, review the model assignments as a batch. The majority of rules should be `inherit`. If more than a few rules are `haiku` or `sonnet`, re-evaluate whether those rules are truly mechanical enough to downgrade.
-
-### Step 3b: Built-in rules
-
-Read all `.md` files from the **Defaults directory** resolved above. Each file is a complete rule in standard format (YAML frontmatter + Markdown body). Compare each built-in (by filename) against the existing rules in `{rules_dir}`:
-
-- **Missing**: no matching file in `{rules_dir}` → include as a "Built-in" new rule in the proposal
-- **Already present**: a file with the same name exists in `{rules_dir}` → skip (do not propose)
-
-If `{rules_dir}` was empty (no existing rules found in Step 2), also tell the user before presenting the summary:
-
-> "Rules will be stored in `{rules_dir}`. Run `/focused-review configure` to change the rules directory."
-
-### Step 4: Present summary to user
-
-Show the user a **numbered** summary of proposed changes. Each entry shows the rule name, description, autofix status, and model. Default action is to apply everything.
-
-```
-## Refresh Summary
-
-### New rules (will be added):
-1. rule-name-here — one-line description [autofix: no, model: haiku] (source: CLAUDE.md)
-2. another-rule — one-line description [autofix: yes, model: sonnet] (source: .claude/CLAUDE.md)
-
-### Built-in rules (will be added):
-3. code-duplication — flag new code that duplicates existing codebase patterns [autofix: no, model: sonnet] (built-in)
-4. bug-spotter — find bugs, logic errors, and correctness issues [autofix: no, model: inherit] (built-in)
-
-### Updated rules (will be updated):
-5. existing-rule — what changed [autofix: no, model: haiku] (source: CLAUDE.md)
-
-### Orphaned rules (will be kept, no source match):
-6. old-rule — source file removed/changed
-
-### Unchanged rules (no action):
-- good-rule — still matches source
-
-Enter numbers to INCLUDE (e.g. "1, 3, 4"), "all", or "all but 3, 5":
-```
-
-**Quality flags** — append these inline warnings to flagged rules in the summary above:
-- `[! missing applies-to]` — rule text references specific file types (e.g. "test files", "*.cpp") but has no `applies-to` glob. Broad scope will produce noise.
-- `[! formatting-only examples]` — Wrong and Correct examples differ only in whitespace, formatting, or cosmetic layout, not in behavior or semantic meaning. Rule will likely produce false positives.
-- `[! no concrete checkpoints]` — every requirement in the rule is subjective ("ensure quality", "keep it clean") with no concrete, testable checkpoint. Rule cannot be checked unambiguously.
-
-These flags help the user decide which rules to exclude. Do not auto-exclude flagged rules — the user decides.
-
-Do NOT use AskUserQuestion — just output the numbered list and let the user reply freely. Interpret their response naturally (e.g. "all", "1-5", "all but 3", "1, 2, 4"). Only apply the rules the user selected.
-
-### Step 5: Apply changes
-
-Based on the user's decisions, directly create, edit, or delete rule files in `{rules_dir}`:
-
-- **New rules**: Create `{rules_dir}{rule-name}.md` with the drafted content
-- **Updated rules**: Edit `{rules_dir}{rule-name}.md` with the updated content
-- **Removed rules** (if user chose to remove orphaned ones): Delete the file
-- **Unchanged/Kept**: Do nothing
-
-Each rule file must follow the standard format:
-
-```yaml
 ---
-autofix: false
-model: inherit                 # inherit (default) | sonnet | haiku (deep → semantic → mechanical)
-applies-to: "glob/pattern"    # optional — omit if rule applies to all files
-source: "CLAUDE.md"            # which instruction file this came from
+
+## Source Analysis
+
+### {Rule|Concern}: {source name}
+
+**Invalid findings traced here:** {count}
+{for each finding:}
+- Finding #{n}: [{severity}] {title} (`{file}`)
+
+**Pattern:** {what these false positives have in common — 1-2 sentences}
+
+**Root cause:** {category from Step 4}
+
+**Recommendation:** {specific, actionable suggestion — 1-3 sentences describing what to change}
+
+**Suggested edit:**
+> In `{source file path}`, {section to modify}:
+> ```
+> {show the specific text to add or change}
+> ```
+
 ---
-# Rule Name
 
-## Rule
-One-sentence summary of what this rule checks.
+{repeat for each source}
 
-## Why
-Why this rule matters.
+## Summary
 
-## Requirements
-- Concrete, checkable requirement 1
-- Concrete, checkable requirement 2
-
-## Wrong
-\`\`\`
-Code example showing a violation.
-\`\`\`
-
-## Correct
-\`\`\`
-Code example showing compliant code.
-\`\`\`
+| Source | Type | Invalid Findings | Root Cause | Action |
+|--------|------|-----------------|------------|--------|
+| {name} | rule/concern | {count} | {root cause} | {one-line action} |
 ```
 
-After applying changes, tell the user what was done (files created, updated, deleted) and remind them to review and commit the changes in `{rules_dir}`.
+### Step 6: Present results
+
+Tell the user:
+
+1. How many findings were traced and how many unique sources identified
+2. The summary table from the recommendation report
+3. The path to the full post-mortem report
+4. Remind: "These are suggestions only. To apply changes, use `/focused-review refresh` and incorporate the recommendations, or edit the rule/concern files directly."
