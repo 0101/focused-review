@@ -29,7 +29,7 @@ Evolve the focused-review plugin into a single-command review system that combin
 
 **Phase 3 — Assessment**: Sequential agent validates each finding. Checks if really introduced by diff. Adds counter-arguments. Verdict: Confirmed / Questionable / Invalid. For rule violations: evaluates rule applicability. Output: `.agents/focused-review/assessed.md`.
 
-**Phase 4 — Rebuttal** (optional, `scaling=thorough`): High-priority findings marked Invalid get sent back for adversarial challenge.
+**Phase 4 — Rebuttal** (optional): High-priority findings marked Invalid get sent back for adversarial challenge.
 
 **Phase 5 — Presentation**: Final report groups connected findings, presents Confirmed + Questionable, shows provenance and assessment reasoning. Output: `.agents/focused-review/review-{timestamp}.md`.
 
@@ -48,16 +48,6 @@ applies-to: "**/*.cs"   # optional
 ## Evidence Standards
 ## Output Format
 ```
-
-### Adaptive Scaling
-
-Diff size drives dispatch intensity:
-- 1-10 lines: Rules only — lightweight review for small fixes
-- 11-100 lines: Rules + bugs + security concerns (single model each) — architecture omitted to keep cost proportional
-- 101-500 lines: Rules + all concerns (primary model)
-- 501+ lines: Rules + all concerns (multi-model for high-priority concerns)
-
-"Key concerns" at the 11-100 tier = bugs + security only. Architecture is omitted to keep cost proportional to diff size. General review is now a built-in rule (not a concern).
 
 ### Finding Format
 
@@ -107,8 +97,7 @@ Per-project config in `focused-review.json`:
 ```json
 {
     "rules_dir": "review/",
-    "concerns_dir": "review/concerns/",
-    "scaling": "standard"
+    "concerns_dir": "review/concerns/"
 }
 ```
 
@@ -123,11 +112,10 @@ Per-project config in `focused-review.json`:
 - **Post-mortem invoked as a mode** — `/focused-review post-mortem [numbers]` is a separate SKILL.md mode alongside review/refresh/configure. Finding numbers reference the `### {n}.` headings in the review report. If omitted, presents the table interactively
 - **Built-in concerns shipped in defaults/** — bugs, security, architecture (general review is now a built-in rule)
 - **Rule findings saved to disk by orchestrator** — review-runner agents return output as text; SKILL.md saves to `findings/rule--{name}.md` so Phase 2 consolidator can read them alongside concern findings
-- **Scaling moved to Python `scale-concerns` subcommand** — tier logic extracted from SKILL.md one-liner into `focused-review.py scale-concerns` with `--diff-path`/`--diff-lines` and `--dispatch-path`. Pure functions `_filter_concerns_by_tier`, `_dedup_concerns`, `_diff_lines_to_tier` are unit-tested
+- **No scaling** — all rules and concerns always run regardless of diff size. A one-line change can introduce critical vulnerabilities or break production.
 - **`full` scope skips assessment** — no diff.patch exists for `full` scope, so Phases 3–4 are skipped; consolidated findings are treated as Confirmed
-- **Scaling dedup across all tiers** — all non-501+ tiers deduplicate multi-model concern entries to keep one model per concern. The 1-10 tier caps at one entry via `[:1]`, the 11-100 and 101-500 tiers use dict-dedup by concern name (keeping the first/primary model entry)
-- **Phase 2 failure fallback** — Step 7 has three data source tiers: assessed.md → consolidated.md → raw findings/. The third case ensures the pipeline degrades gracefully when consolidation crashes
-- **Model name mapping** — Concern files use shorthand names (opus, codex, gemini); `_resolve_model()` maps these to full CLI identifiers (claude-opus-4.6, gpt-5.1-codex, gemini-3-pro-preview). Unknown names pass through unchanged so users can specify full names directly. `MODEL_MAP` dict lives in constants section of focused-review.py
+- **Phase 2 failure fallback** — Step 6 has three data source tiers: assessed.md → consolidated.md → raw findings/. The third case ensures the pipeline degrades gracefully when consolidation crashes
+- **Model name mapping** — Concern files use shorthand names (opus, codex, gemini); `_resolve_model()` maps these to full CLI identifiers (claude-opus-4.6, gpt-5.3-codex, gemini-3-pro-preview). Unknown names pass through unchanged so users can specify full names directly. `MODEL_MAP` dict lives in constants section of focused-review.py
 - **Prompt as direct CLI argument** — `copilot -p <prompt>` passes the prompt text as a direct argument, not via stdin (`-p -` does not work in copilot CLI). This means prompts are subject to OS argument length limits but avoids stdin piping issues
 - **OSError handling for oversized prompts** — `_run_single_concern` catches `OSError` (raised when the prompt exceeds OS argument limits like Windows 32K CreateProcess) and returns a structured error dict immediately without retrying. `_resolve_model()` uses case-insensitive lookup so concern files can use `Opus`, `OPUS`, etc.
 

@@ -520,20 +520,19 @@ class TestGenerateConcernPrompts:
 
 
 # ---------------------------------------------------------------------------
-# _resolve_config: concerns_dir and scaling
+# _resolve_config: concerns_dir
 # ---------------------------------------------------------------------------
 
 
 class TestResolveConfigConcerns:
 
-    def test_defaults_include_concerns_dir_and_scaling(self, tmp_path: Path) -> None:
+    def test_defaults_include_concerns_dir(self, tmp_path: Path) -> None:
         repo = tmp_path / "repo"
         repo.mkdir()
         with patch.object(fr, "CONFIG_SCAN_LOCATIONS", ["nonexistent.json"]), \
              patch.object(fr, "CONFIG_USER_LOCATIONS", []):
             config = fr._resolve_config(str(repo))
         assert config["concerns_dir"] == "review/concerns/"
-        assert config["scaling"] == "standard"
 
     def test_reads_concerns_dir_from_config(self, tmp_path: Path) -> None:
         repo = tmp_path / "repo"
@@ -550,22 +549,6 @@ class TestResolveConfigConcerns:
 
         config = fr._resolve_config(str(repo))
         assert config["concerns_dir"] == "my-concerns/"
-
-    def test_reads_scaling_from_config(self, tmp_path: Path) -> None:
-        repo = tmp_path / "repo"
-        repo.mkdir()
-        config_path = repo / ".claude" / "focused-review.json"
-        config_path.parent.mkdir(parents=True)
-        config_path.write_text(
-            json.dumps({
-                "rules_dir": "review/",
-                "scaling": "thorough",
-            }),
-            encoding="utf-8",
-        )
-
-        config = fr._resolve_config(str(repo))
-        assert config["scaling"] == "thorough"
 
     def test_backslash_in_concerns_dir_normalised(self, tmp_path: Path) -> None:
         repo = tmp_path / "repo"
@@ -591,7 +574,7 @@ class TestResolveConfigConcerns:
 
 class TestResolveConfigSubcommandConcerns:
 
-    def test_outputs_concerns_dir_and_scaling(
+    def test_outputs_concerns_dir(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         repo = tmp_path / "repo"
@@ -609,7 +592,7 @@ class TestResolveConfigSubcommandConcerns:
         captured = capsys.readouterr()
         result = json.loads(captured.out)
         assert result["concerns_dir"] == "review/concerns/"
-        assert result["scaling"] == "standard"
+        assert "scaling" not in result
 
     def test_concerns_dir_gets_trailing_slash(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]

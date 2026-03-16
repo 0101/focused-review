@@ -47,7 +47,6 @@ CONFIG_USER_LOCATIONS: list[str] = [
 
 DEFAULT_RULES_DIR = "review/"
 DEFAULT_CONCERNS_DIR = "review/concerns/"
-DEFAULT_SCALING = "standard"
 BUILTIN_CONCERNS_DIR = Path(__file__).resolve().parent.parent / "defaults" / "concerns"
 
 COPILOT_CMD = os.environ.get("COPILOT_CMD", "copilot")
@@ -95,7 +94,7 @@ def _resolve_config(repo: str = ".") -> dict[str, object]:
       5. ~/.copilot/focused-review.json (user-wide, Copilot CLI)
 
     Returns a dict with ``rules_dir`` (str), ``sources`` (list[str]),
-    ``concerns_dir`` (str), ``scaling`` (str), and
+    ``concerns_dir`` (str), and
     ``config_file`` (str | None, the path that was loaded).
     Falls back to defaults if no config file is found.
     """
@@ -114,13 +113,11 @@ def _resolve_config(repo: str = ".") -> dict[str, object]:
                 sources: list[str] = data.get("sources", [])
                 concerns_raw = data.get("concerns_dir", DEFAULT_CONCERNS_DIR)
                 concerns_dir = str(concerns_raw).replace("\\", "/")
-                scaling = data.get("scaling", DEFAULT_SCALING)
                 config_path = str(candidate).replace("\\", "/")
                 return {
                     "rules_dir": rules_dir,
                     "sources": sources,
                     "concerns_dir": concerns_dir,
-                    "scaling": scaling,
                     "config_file": config_path,
                 }
             except (json.JSONDecodeError, AttributeError):
@@ -130,7 +127,6 @@ def _resolve_config(repo: str = ".") -> dict[str, object]:
         "rules_dir": DEFAULT_RULES_DIR,
         "sources": [],
         "concerns_dir": DEFAULT_CONCERNS_DIR,
-        "scaling": DEFAULT_SCALING,
         "config_file": None,
     }
 
@@ -199,7 +195,7 @@ def resolve_config(args: argparse.Namespace) -> None:
     """Print resolved config values as JSON.
 
     Output includes ``rules_dir``, ``sources``, ``concerns_dir``,
-    ``scaling``, ``script_path``, and ``defaults_dir`` so that the
+    ``script_path``, and ``defaults_dir`` so that the
     orchestrator (SKILL.md) can resolve all paths in a single call
     without platform-specific features.
     """
@@ -1085,112 +1081,6 @@ def run_concerns(args: argparse.Namespace) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Subcommand: scale-concerns
-# ---------------------------------------------------------------------------
-
-
-def _count_diff_lines(diff_path: Path) -> int:
-    """Count changed lines in a unified diff (lines starting with +/- but not +++/---)."""
-    if not diff_path.is_file():
-        return 0
-    return sum(
-        1
-        for line in diff_path.read_text(encoding="utf-8").splitlines()
-        if line.startswith(("+", "-")) and not line.startswith(("+++", "---"))
-    )
-
-
-def _diff_lines_to_tier(diff_lines: int) -> str:
-    """Map a diff line count to the scaling tier label."""
-    if diff_lines <= 10:
-        return "1-10"
-    if diff_lines <= 100:
-        return "11-100"
-    if diff_lines <= 500:
-        return "101-500"
-    return "501+"
-
-
-def _dedup_concerns(entries: list[dict[str, str]]) -> list[dict[str, str]]:
-    """Keep the first entry per concern name, preserving original order."""
-    seen: dict[str, dict[str, str]] = {}
-    for entry in entries:
-        name = entry["concern"]
-        if name not in seen:
-            seen[name] = entry
-    return list(seen.values())
-
-
-def _filter_concerns_by_tier(
-    diff_lines: int, entries: list[dict[str, str]]
-) -> list[dict[str, str]]:
-    """Apply tier-based filtering and deduplication to concern dispatch entries.
-
-    Tiers:
-        1-10 lines   → rules only (no concerns)
-        11-100 lines  → bugs + security only (deduped by concern)
-        101-500 lines → all concerns (deduped by concern)
-        501+ lines    → all concerns (no filtering)
-    """
-    if diff_lines > 500:
-        return entries
-    if diff_lines <= 10:
-        return []
-    if diff_lines <= 100:
-        return _dedup_concerns(
-            [e for e in entries if e["concern"] in ("bugs", "security")]
-        )
-    # 101-500
-    return _dedup_concerns(entries)
-
-
-def scale_concerns(args: argparse.Namespace) -> None:
-    """Apply adaptive scaling to concern dispatch based on diff size."""
-    dispatch_path = Path(args.dispatch_path)
-
-    if not dispatch_path.is_file():
-        print(
-            json.dumps({"error": f"Dispatch file not found: {dispatch_path}"}),
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
-    entries: list[dict[str, str]] = json.loads(
-        dispatch_path.read_text(encoding="utf-8")
-    )
-
-    # Resolve diff_lines: explicit flag wins, otherwise count from diff_path.
-    diff_lines: int
-    if args.diff_lines is not None:
-        diff_lines = args.diff_lines
-    elif args.diff_path is not None:
-        diff_lines = _count_diff_lines(Path(args.diff_path))
-    else:
-        print(
-            json.dumps({"error": "Either --diff-lines or --diff-path is required"}),
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
-    original_count = len(entries)
-    filtered = _filter_concerns_by_tier(diff_lines, entries)
-    tier = _diff_lines_to_tier(diff_lines)
-
-    dispatch_path.write_text(json.dumps(filtered, indent=2), encoding="utf-8")
-
-    print(
-        json.dumps(
-            {
-                "diff_lines": diff_lines,
-                "tier": tier,
-                "concerns_before": original_count,
-                "concerns_after": len(filtered),
-            }
-        )
-    )
-
-
-# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -1284,29 +1174,6 @@ def main() -> int:
         help=f"Number of retries per failed session (default: {CONCERN_RETRIES})",
     )
     concerns_parser.set_defaults(func=run_concerns)
-
-    # scale-concerns subcommand
-    scale_parser = subparsers.add_parser(
-        "scale-concerns",
-        help="Apply adaptive scaling to concern dispatch based on diff size",
-    )
-    scale_parser.add_argument(
-        "--diff-lines",
-        type=int,
-        default=None,
-        help="Number of changed lines (takes priority over --diff-path when both given)",
-    )
-    scale_parser.add_argument(
-        "--diff-path",
-        default=None,
-        help="Path to diff.patch file to count changed lines from (used if --diff-lines not given)",
-    )
-    scale_parser.add_argument(
-        "--dispatch-path",
-        required=True,
-        help="Path to concern-dispatch.json file to filter in-place",
-    )
-    scale_parser.set_defaults(func=scale_concerns)
 
     args = parser.parse_args()
     args.func(args)

@@ -25,7 +25,6 @@ Parse the JSON output and store these values for use throughout:
 - `concerns_dir` — directory containing concern files (e.g. `review/concerns/`)
 - `defaults_dir` — built-in defaults shipped with the plugin
 - `sources` — explicit source files from `focused-review.json` (may be empty)
-- `scaling` — scaling mode (`standard` or `thorough`)
 
 ## Mode Selection
 
@@ -68,29 +67,7 @@ The script will:
 
 Parse the JSON summary. If `agents` is 0 and `concern_prompts` is 0, tell the user no rules matched and no concerns apply, and stop.
 
-### Step 2: Apply adaptive scaling
-
-For `full` scope, skip this step — run all concerns as-is. Also skip Phases 3–4 later (no diff to assess against).
-
-If the **Scaling** value is `"thorough"`, skip filtering — run all concerns regardless of diff size. This also enables Phase 4 (Rebuttal). Jump to Step 3.
-
-For diff-based scopes with standard scaling, count changed lines and filter the concern dispatch to keep costs proportional:
-
-```bash
-python {script_path} scale-concerns \
-  --diff-path .agents/focused-review/diff.patch \
-  --dispatch-path .agents/focused-review/concern-dispatch.json
-```
-
-**Scaling tiers:**
-- **1–10 lines**: Rules only — lightweight review for small fixes, no concerns dispatched
-- **11–100 lines**: Rules + `bugs` + `security` concerns — catches critical issues without over-spending
-- **101–500 lines**: Rules + all concerns (primary model per concern) — full analysis
-- **501+ lines**: Rules + all concerns (all models, including multi-model for high-priority) — maximum coverage
-
-Record the `diff_lines` and `tier` from the output for use in the final report.
-
-### Step 3: Phase 1 — Discovery (parallel)
+### Step 2: Phase 1 — Discovery (parallel)
 
 Read `.agents/focused-review/dispatch.json` (rule dispatch) and `.agents/focused-review/concern-dispatch.json` (concern dispatch).
 
@@ -127,11 +104,11 @@ This launches `copilot -p` sessions in parallel via ThreadPoolExecutor. It reads
 
 Wait for all rule agents and the concern runner to complete before proceeding.
 
-If `dispatch.json` is empty (no rules matched), only run concerns. If `concern-dispatch.json` is empty (no concerns after scaling), only run rules.
+If `dispatch.json` is empty (no rules matched), only run concerns. If `concern-dispatch.json` is empty (no concerns), only run rules.
 
 **Save rule findings to disk** — After all rule agents complete, save each agent's output to `.agents/focused-review/findings/rule--{rule-name}.md` (where `{rule-name}` is the rule filename without extension from `rule_path`). Create the `findings/` directory if needed. If a rule ran against multiple chunks, concatenate all chunk outputs into one file. The concern runner already writes its findings to disk — this step ensures rule findings are also available for Phase 2.
 
-### Step 4: Phase 2 — Consolidation
+### Step 3: Phase 2 — Consolidation
 
 Launch a `general-purpose` Task agent with this prompt:
 
@@ -143,11 +120,11 @@ findings_dir: .agents/focused-review/findings
 
 This agent reads all finding files from Phase 1 (`rule--*.md` and `concern--*.md`), deduplicates semantically (same location + same issue = one finding), merges provenance, and writes `.agents/focused-review/consolidated.md` with up to 30 prioritized findings.
 
-Wait for completion. If the agent fails, report the error and skip to Step 7 with whatever findings are available. If the consolidated report shows 0 findings, skip to Step 7 and report "no findings".
+Wait for completion. If the agent fails, report the error and skip to Step 6 with whatever findings are available. If the consolidated report shows 0 findings, skip to Step 6 and report "no findings".
 
-### Step 5: Phase 3 — Assessment
+### Step 4: Phase 3 — Assessment
 
-**Skip this step for `full` scope** (no diff to assess against). Proceed directly to Step 7 using the consolidated report.
+**Skip this step for `full` scope** (no diff to assess against). Proceed directly to Step 6 using the consolidated report.
 
 Launch a `general-purpose` Task agent with this prompt:
 
@@ -160,15 +137,15 @@ diff_path: .agents/focused-review/diff.patch
 
 This agent validates each finding: checks if truly introduced by the diff, constructs adversarial counter-arguments, and assigns verdicts (Confirmed / Questionable / Invalid). Writes `.agents/focused-review/assessed.md`.
 
-Wait for completion. If the agent fails, report the error and skip to Step 7 using the consolidated report as the data source.
+Wait for completion. If the agent fails, report the error and skip to Step 6 using the consolidated report as the data source.
 
-### Step 6: Phase 4 — Rebuttal (optional)
+### Step 5: Phase 4 — Rebuttal (optional)
 
-**Only run if the Scaling value is `"thorough"` AND scope is not `full`.**
+**Skip this step for `full` scope** (no diff to assess against).
 
 Read `.agents/focused-review/assessed.md`. Find any findings with **Severity Critical or High** that received a verdict of **Invalid**.
 
-If none exist, skip to Step 7.
+If none exist, skip to Step 6.
 
 For each such finding, launch a `general-purpose` Task agent (launch all rebuttals in parallel in a single response):
 
@@ -192,12 +169,12 @@ Write your rebuttal to .agents/focused-review/rebuttals/{A-XX}.md with:
 - Final recommendation: Reinstate (with what severity) or Uphold Invalid
 ```
 
-After all rebuttals complete, read each rebuttal file. For any finding where the rebuttal recommends "Reinstate", note the finding ID and reinstated severity — you will apply these overrides when compiling the report in Step 7.
+After all rebuttals complete, read each rebuttal file. For any finding where the rebuttal recommends "Reinstate", note the finding ID and reinstated severity — you will apply these overrides when compiling the report in Step 6.
 
-### Step 7: Phase 5 — Presentation
+### Step 6: Phase 5 — Presentation
 
 Determine the data source (check in order, use the first that exists):
-- If `assessed.md` exists (Phases 3+ ran): read `.agents/focused-review/assessed.md`, applying any rebuttal overrides from Step 6. For each overridden finding (rebuttal recommends "Reinstate"), replace its verdict with Confirmed at the reinstated severity and append the rebuttal reasoning to the assessment section.
+- If `assessed.md` exists (Phases 3+ ran): read `.agents/focused-review/assessed.md`, applying any rebuttal overrides from Step 5. For each overridden finding (rebuttal recommends "Reinstate"), replace its verdict with Confirmed at the reinstated severity and append the rebuttal reasoning to the assessment section.
 - If only `consolidated.md` exists (`full` scope or Phase 3 failed): read `.agents/focused-review/consolidated.md`. Treat all findings as Confirmed (no assessment was performed).
 - If neither exists (Phase 2 also failed): read raw Phase 1 findings from `.agents/focused-review/findings/` directly. List all `rule--*.md` and `concern--*.md` files, read each, and include their findings as-is. Treat all as Confirmed with provenance derived from filenames (e.g. `rule--sealed-classes.md` → provenance "rule:sealed-classes", `concern--bugs--opus.md` → provenance "concern:bugs (opus)"). Deduplicate by file path + line number, keeping the entry with the highest severity.
 
@@ -213,9 +190,8 @@ Where `{timestamp}` is `YYYYMMDD-HHmmss`. Do NOT use a Python subcommand — wri
 
 Use these values from earlier steps:
 - `{rule_count}`: number of unique rules dispatched (from `dispatch.json` length or prepare-review summary `rules_matched`)
-- `{concern_count}`: number of concerns dispatched (from Step 2 output `concerns_after`, or prepare-review summary `concern_prompts`)
+- `{concern_count}`: number of concerns dispatched (from prepare-review summary `concern_prompts`)
 - `{consolidated_count}`: total findings in consolidated report (from Phase 2 output header)
-- `{diff_lines}` and `{tier}`: from Step 2 output. For `full` scope (where Step 2 is skipped), use `**Scaling:** full scope (all files)` instead of the tier format
 
 ```markdown
 # Unified Review Report
@@ -223,7 +199,6 @@ Use these values from earlier steps:
 **Scope:** {scope}
 **Date:** {ISO timestamp}
 **Pipeline:** Discovery ({rule_count} rules, {concern_count} concerns) → Consolidation → Assessment
-**Scaling:** {tier} ({diff_lines} lines changed)
 
 ## Summary
 

@@ -303,7 +303,6 @@ class TestResolveConfig:
         assert result["rules_dir"] == "review/"
         assert result["sources"] == []
         assert result["concerns_dir"] == "review/concerns/"
-        assert result["scaling"] == "standard"
         assert result["config_file"] is None
 
     def test_returns_rules_dir_from_config(self, tmp_path: Path) -> None:
@@ -376,7 +375,6 @@ class TestResolveConfigSubcommand:
         assert result["rules_dir"] == "review/"
         assert result["sources"] == []
         assert result["concerns_dir"] == "review/concerns/"
-        assert result["scaling"] == "standard"
         # script_path and defaults_dir are always present
         assert result["script_path"].endswith("focused-review.py")
         assert result["defaults_dir"].endswith("defaults/")
@@ -400,7 +398,6 @@ class TestResolveConfigSubcommand:
         assert result["rules_dir"] == "my-rules/"
         assert result["sources"] == ["docs/guide.md"]
         assert result["concerns_dir"] == "review/concerns/"
-        assert result["scaling"] == "standard"
 
     def test_rules_dir_gets_trailing_slash(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
