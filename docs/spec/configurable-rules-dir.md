@@ -55,7 +55,7 @@ The `--rules-dir` argument's default calls a `_resolve_rules_dir()` function tha
 
 `/focused-review configure` runs an interactive flow:
 
-1. **Detect platform**: `CLAUDE_PLUGIN_ROOT` present → Copilot CLI, otherwise → Claude Code
+1. **Detect platform**: `COPILOT_CLI` env var present → Copilot CLI, otherwise → Claude Code
 2. **Ask for rules directory**: Show current resolved value, ask for new value (Enter = keep)
 3. **Ask where to save**: Present location options based on platform:
    - Claude Code: `.claude/focused-review.json`, `focused-review.json`, `.github/focused-review.json`, `~/.claude/focused-review.json`
@@ -95,4 +95,4 @@ The `--rules-dir` argument's default calls a `_resolve_rules_dir()` function tha
 - **Multiple scan locations**: project-scoped (3 options for team preference) + user-scoped (platform-aware)
 - **Default stays `review/`**: backward compatible, no migration needed
 - **SKILL.md resolves once**: avoids repeated config file reads throughout the prompt
-- **Platform detection via `CLAUDE_PLUGIN_ROOT`**: already used in SKILL.md line 8 for script path resolution
+- **Platform detection via `COPILOT_CLI` env var**: set by Copilot CLI runtime, absent in Claude Code

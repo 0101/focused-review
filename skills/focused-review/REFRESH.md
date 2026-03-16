@@ -17,7 +17,7 @@ Interactive flow to create or update a `focused-review.json` config file that co
 
 ### Step 1: Detect platform
 
-Check if `CLAUDE_PLUGIN_ROOT` is set:
+Check if the `COPILOT_CLI` environment variable is set:
 - **Set** → running under Copilot CLI
 - **Not set** → running under Claude Code
 
