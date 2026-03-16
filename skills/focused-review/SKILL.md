@@ -201,13 +201,13 @@ Determine the data source (check in order, use the first that exists):
 - If only `consolidated.md` exists (`full` scope or Phase 3 failed): read `.agents/focused-review/consolidated.md`. Treat all findings as Confirmed (no assessment was performed).
 - If neither exists (Phase 2 also failed): read raw Phase 1 findings from `.agents/focused-review/findings/` directly. List all `rule--*.md` and `concern--*.md` files, read each, and include their findings as-is. Treat all as Confirmed with provenance derived from filenames (e.g. `rule--sealed-classes.md` → provenance "rule:sealed-classes", `concern--bugs--opus.md` → provenance "concern:bugs (opus)"). Deduplicate by file path + line number, keeping the entry with the highest severity.
 
-Compile the final report to:
+Use the `create` tool to write the final report directly to:
 
 ```
 .agents/focused-review/review-{timestamp}.md
 ```
 
-Where `{timestamp}` is `YYYYMMDD-HHmmss`.
+Where `{timestamp}` is `YYYYMMDD-HHmmss`. Do NOT use a Python subcommand — write the file yourself.
 
 **Report format:**
 

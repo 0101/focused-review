@@ -300,12 +300,11 @@ class TestResolveConfig:
         with patch.object(fr, "CONFIG_SCAN_LOCATIONS", ["nonexistent.json"]), \
              patch.object(fr, "CONFIG_USER_LOCATIONS", []):
             result = fr._resolve_config(str(repo))
-        assert result == {
-            "rules_dir": "review/",
-            "sources": [],
-            "concerns_dir": "review/concerns/",
-            "scaling": "standard",
-        }
+        assert result["rules_dir"] == "review/"
+        assert result["sources"] == []
+        assert result["concerns_dir"] == "review/concerns/"
+        assert result["scaling"] == "standard"
+        assert result["config_file"] is None
 
     def test_returns_rules_dir_from_config(self, tmp_path: Path) -> None:
         """Config with only rules_dir returns it with empty sources."""
@@ -314,6 +313,8 @@ class TestResolveConfig:
         result = fr._resolve_config(str(repo))
         assert result["rules_dir"] == "custom-rules/"
         assert result["sources"] == []
+        assert result["config_file"] is not None
+        assert result["config_file"].endswith(".claude/focused-review.json")
 
     def test_returns_sources_from_config(self, tmp_path: Path) -> None:
         """Config with sources returns them."""

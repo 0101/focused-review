@@ -95,7 +95,8 @@ def _resolve_config(repo: str = ".") -> dict[str, object]:
       5. ~/.copilot/focused-review.json (user-wide, Copilot CLI)
 
     Returns a dict with ``rules_dir`` (str), ``sources`` (list[str]),
-    ``concerns_dir`` (str), and ``scaling`` (str).
+    ``concerns_dir`` (str), ``scaling`` (str), and
+    ``config_file`` (str | None, the path that was loaded).
     Falls back to defaults if no config file is found.
     """
     repo_path = Path(repo).resolve()
@@ -114,11 +115,13 @@ def _resolve_config(repo: str = ".") -> dict[str, object]:
                 concerns_raw = data.get("concerns_dir", DEFAULT_CONCERNS_DIR)
                 concerns_dir = str(concerns_raw).replace("\\", "/")
                 scaling = data.get("scaling", DEFAULT_SCALING)
+                config_path = str(candidate).replace("\\", "/")
                 return {
                     "rules_dir": rules_dir,
                     "sources": sources,
                     "concerns_dir": concerns_dir,
                     "scaling": scaling,
+                    "config_file": config_path,
                 }
             except (json.JSONDecodeError, AttributeError):
                 pass
@@ -128,6 +131,7 @@ def _resolve_config(repo: str = ".") -> dict[str, object]:
         "sources": [],
         "concerns_dir": DEFAULT_CONCERNS_DIR,
         "scaling": DEFAULT_SCALING,
+        "config_file": None,
     }
 
 
