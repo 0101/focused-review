@@ -30,12 +30,11 @@ def _entry(concern: str, model: str = "opus") -> dict[str, str]:
 
 
 def _full_dispatch() -> list[dict[str, str]]:
-    """Standard dispatch with all 4 concerns, some multi-model."""
+    """Standard dispatch with all 3 concerns, some multi-model."""
     return [
         _entry("bugs", "opus"),
         _entry("security", "opus"),
         _entry("architecture", "opus"),
-        _entry("general", "opus"),
         _entry("bugs", "gemini"),       # multi-model duplicate
         _entry("security", "gemini"),   # multi-model duplicate
     ]
@@ -94,11 +93,10 @@ class TestDedupConcerns:
         entries = [
             _entry("security", "opus"),
             _entry("bugs", "opus"),
-            _entry("general", "opus"),
             _entry("bugs", "gemini"),
         ]
         result = fr._dedup_concerns(entries)
-        assert [e["concern"] for e in result] == ["security", "bugs", "general"]
+        assert [e["concern"] for e in result] == ["security", "bugs"]
 
     def test_empty_list(self) -> None:
         assert fr._dedup_concerns([]) == []
@@ -110,33 +108,19 @@ class TestDedupConcerns:
 
 
 class TestTier1To10:
-    """1-10 lines: keep only 'general' concern (first match)."""
+    """1-10 lines: no concerns (rules only)."""
 
-    def test_keeps_only_general(self) -> None:
+    def test_returns_empty(self) -> None:
         result = fr._filter_concerns_by_tier(5, _full_dispatch())
-        assert len(result) == 1
-        assert result[0]["concern"] == "general"
+        assert result == []
 
     def test_boundary_at_10(self) -> None:
         result = fr._filter_concerns_by_tier(10, _full_dispatch())
-        assert len(result) == 1
-        assert result[0]["concern"] == "general"
-
-    def test_no_general_returns_empty(self) -> None:
-        entries = [_entry("bugs"), _entry("security")]
-        result = fr._filter_concerns_by_tier(3, entries)
         assert result == []
-
-    def test_multiple_general_keeps_first(self) -> None:
-        entries = [_entry("general", "opus"), _entry("general", "gemini")]
-        result = fr._filter_concerns_by_tier(1, entries)
-        assert len(result) == 1
-        assert result[0]["model"] == "opus"
 
     def test_zero_lines(self) -> None:
         result = fr._filter_concerns_by_tier(0, _full_dispatch())
-        assert len(result) == 1
-        assert result[0]["concern"] == "general"
+        assert result == []
 
 
 # ---------------------------------------------------------------------------
@@ -171,14 +155,13 @@ class TestTier11To100:
         bugs = [e for e in result if e["concern"] == "bugs"][0]
         assert bugs["model"] == "opus"  # first entry, not gemini
 
-    def test_excludes_architecture_and_general(self) -> None:
+    def test_excludes_architecture(self) -> None:
         result = fr._filter_concerns_by_tier(50, _full_dispatch())
         concerns = {e["concern"] for e in result}
         assert "architecture" not in concerns
-        assert "general" not in concerns
 
     def test_no_bugs_or_security_returns_empty(self) -> None:
-        entries = [_entry("architecture"), _entry("general")]
+        entries = [_entry("architecture")]
         result = fr._filter_concerns_by_tier(50, entries)
         assert result == []
 
@@ -194,21 +177,21 @@ class TestTier101To500:
     def test_keeps_all_concern_types(self) -> None:
         result = fr._filter_concerns_by_tier(200, _full_dispatch())
         concerns = {e["concern"] for e in result}
-        assert concerns == {"bugs", "security", "architecture", "general"}
+        assert concerns == {"bugs", "security", "architecture"}
 
     def test_boundary_at_101(self) -> None:
         result = fr._filter_concerns_by_tier(101, _full_dispatch())
         concerns = {e["concern"] for e in result}
-        assert concerns == {"bugs", "security", "architecture", "general"}
+        assert concerns == {"bugs", "security", "architecture"}
 
     def test_boundary_at_500(self) -> None:
         result = fr._filter_concerns_by_tier(500, _full_dispatch())
         concerns = {e["concern"] for e in result}
-        assert concerns == {"bugs", "security", "architecture", "general"}
+        assert concerns == {"bugs", "security", "architecture"}
 
     def test_deduplicates_multi_model(self) -> None:
         result = fr._filter_concerns_by_tier(300, _full_dispatch())
-        assert len(result) == 4  # 4 unique concerns, not 6 entries
+        assert len(result) == 3  # 3 unique concerns, not 5 entries
 
     def test_keeps_first_model_entry(self) -> None:
         result = fr._filter_concerns_by_tier(300, _full_dispatch())
@@ -227,12 +210,12 @@ class TestTier501Plus:
     def test_returns_all_entries(self) -> None:
         dispatch = _full_dispatch()
         result = fr._filter_concerns_by_tier(600, dispatch)
-        assert len(result) == 6  # all entries including duplicates
+        assert len(result) == 5  # all entries including duplicates
 
     def test_boundary_at_501(self) -> None:
         dispatch = _full_dispatch()
         result = fr._filter_concerns_by_tier(501, dispatch)
-        assert len(result) == 6
+        assert len(result) == 5
 
     def test_preserves_multi_model_entries(self) -> None:
         dispatch = _full_dispatch()
@@ -328,8 +311,8 @@ class TestScaleConcernsSubcommand:
     def test_tier_1_10_via_diff_lines(self, tmp_path: Path) -> None:
         result = self._run(tmp_path, _full_dispatch(), diff_lines=5)
         assert result["tier"] == "1-10"
-        assert result["concerns_after"] == 1
-        assert result["_written"][0]["concern"] == "general"
+        assert result["concerns_after"] == 0
+        assert result["_written"] == []
 
     def test_tier_11_100_via_diff_lines(self, tmp_path: Path) -> None:
         result = self._run(tmp_path, _full_dispatch(), diff_lines=50)
@@ -339,12 +322,12 @@ class TestScaleConcernsSubcommand:
     def test_tier_101_500_via_diff_lines(self, tmp_path: Path) -> None:
         result = self._run(tmp_path, _full_dispatch(), diff_lines=200)
         assert result["tier"] == "101-500"
-        assert result["concerns_after"] == 4
+        assert result["concerns_after"] == 3
 
     def test_tier_501_via_diff_lines(self, tmp_path: Path) -> None:
         result = self._run(tmp_path, _full_dispatch(), diff_lines=600)
         assert result["tier"] == "501+"
-        assert result["concerns_after"] == 6
+        assert result["concerns_after"] == 5
 
     def test_uses_diff_path_when_no_diff_lines(self, tmp_path: Path) -> None:
         # Create a patch with 15 changed lines (11-100 tier)
@@ -370,7 +353,7 @@ class TestScaleConcernsSubcommand:
 
     def test_output_includes_before_and_after_counts(self, tmp_path: Path) -> None:
         result = self._run(tmp_path, _full_dispatch(), diff_lines=50)
-        assert result["concerns_before"] == 6
+        assert result["concerns_before"] == 5
         assert result["concerns_after"] == 2
 
     def test_empty_dispatch(self, tmp_path: Path) -> None:

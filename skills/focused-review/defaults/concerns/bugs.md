@@ -1,6 +1,6 @@
 ---
 type: concern
-models: [opus]
+models: [opus, codex, gemini]
 priority: high
 ---
 # Bug Finder

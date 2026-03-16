@@ -83,7 +83,7 @@ python {script_path} scale-concerns \
 ```
 
 **Scaling tiers:**
-- **1–10 lines**: Rules + `general` concern only — lightweight review for small fixes
+- **1–10 lines**: Rules only — lightweight review for small fixes, no concerns dispatched
 - **11–100 lines**: Rules + `bugs` + `security` concerns — catches critical issues without over-spending
 - **101–500 lines**: Rules + all concerns (primary model per concern) — full analysis
 - **501+ lines**: Rules + all concerns (all models, including multi-model for high-priority) — maximum coverage

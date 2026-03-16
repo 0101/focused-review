@@ -202,7 +202,7 @@ class TestReadConcerns:
     def test_no_applies_to_is_none(self, tmp_path: Path) -> None:
         concerns_dir = tmp_path / "concerns"
         concerns_dir.mkdir()
-        create_file(concerns_dir, "general.md", _make_concern("General"))
+        create_file(concerns_dir, "review.md", _make_concern("General"))
 
         concerns = fr._read_concerns(concerns_dir, tmp_path)
         assert concerns[0]["applies_to"] is None
@@ -446,14 +446,14 @@ class TestGenerateConcernPrompts:
         concerns = [
             self._concern("bugs", priority="high"),
             self._concern("security", priority="high"),
-            self._concern("general"),
+            self._concern("architecture"),
         ]
         changed = ["src/Foo.cs"]
 
         entries = fr._generate_concern_prompts(concerns, changed, work_dir, repo)
         assert len(entries) == 3
         concern_names = {e["concern"] for e in entries}
-        assert concern_names == {"bugs", "security", "general"}
+        assert concern_names == {"bugs", "security", "architecture"}
 
     def test_prompt_contains_diff_references(self, tmp_path: Path) -> None:
         repo = tmp_path / "repo"
@@ -661,7 +661,6 @@ class TestPrepareReviewWithConcerns:
             concerns_dir.mkdir()
             create_file(concerns_dir, "bugs.md", _make_concern("Bug Finder", priority="high"))
             create_file(concerns_dir, "security.md", _make_concern("Security Scanner", priority="high"))
-            create_file(concerns_dir, "general.md", _make_concern("General Reviewer"))
 
         return repo
 
@@ -678,8 +677,8 @@ class TestPrepareReviewWithConcerns:
 
         captured = capsys.readouterr()
         summary = json.loads(captured.out)
-        assert summary["concerns_total"] == 3
-        assert summary["concern_prompts"] == 3
+        assert summary["concerns_total"] == 2
+        assert summary["concern_prompts"] == 2
 
     def test_per_file_diffs_created(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
@@ -713,7 +712,6 @@ class TestPrepareReviewWithConcerns:
         prompt_files = sorted(f.name for f in prompts_dir.glob("*.md"))
         assert "bugs--opus.md" in prompt_files
         assert "security--opus.md" in prompt_files
-        assert "general--opus.md" in prompt_files
 
     def test_concern_dispatch_json_created(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
@@ -729,9 +727,9 @@ class TestPrepareReviewWithConcerns:
         dispatch_path = repo / ".agents" / "focused-review" / "concern-dispatch.json"
         assert dispatch_path.exists()
         dispatch = json.loads(dispatch_path.read_text(encoding="utf-8"))
-        assert len(dispatch) == 3
+        assert len(dispatch) == 2
         concern_names = {d["concern"] for d in dispatch}
-        assert concern_names == {"bugs", "security", "general"}
+        assert concern_names == {"bugs", "security"}
 
     def test_empty_diff_includes_concern_fields(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
@@ -762,9 +760,9 @@ class TestPrepareReviewWithConcerns:
 
         captured = capsys.readouterr()
         summary = json.loads(captured.out)
-        # Built-in concerns: bugs, security, architecture, general
-        assert summary["concerns_total"] == 4
-        assert summary["concern_prompts"] == 4
+        # Built-in concerns: bugs, security, architecture
+        assert summary["concerns_total"] == 3
+        assert summary["concern_prompts"] == 9
 
     def test_builtin_concern_prompts_contain_body(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
@@ -806,8 +804,8 @@ class TestPrepareReviewWithConcerns:
         # But concerns should still be processed
         captured = capsys.readouterr()
         summary = json.loads(captured.out)
-        assert summary["concerns_total"] == 3
-        assert summary["concern_prompts"] == 3
+        assert summary["concerns_total"] == 2
+        assert summary["concern_prompts"] == 2
 
 
 # ---------------------------------------------------------------------------
@@ -824,12 +822,11 @@ class TestBuiltinConcerns:
     def test_builtin_concerns_readable(self) -> None:
         """All built-in concerns can be read and parsed."""
         concerns = fr._read_concerns(fr.BUILTIN_CONCERNS_DIR, fr.BUILTIN_CONCERNS_DIR.parent)
-        assert len(concerns) >= 4
+        assert len(concerns) >= 3
         names = {c["name"] for c in concerns}
         assert "bugs" in names
         assert "security" in names
         assert "architecture" in names
-        assert "general" in names
 
     def test_builtin_concerns_have_valid_metadata(self) -> None:
         """Each built-in concern has required metadata fields."""

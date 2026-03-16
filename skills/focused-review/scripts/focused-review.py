@@ -61,7 +61,7 @@ MODEL_MAP: dict[str, str] = {
     "opus": "claude-opus-4.6",
     "sonnet": "claude-sonnet-4.6",
     "haiku": "claude-haiku-4.5",
-    "codex": "gpt-5.1-codex",
+    "codex": "gpt-5.3-codex",
     "gemini": "gemini-3-pro-preview",
 }
 
@@ -1127,7 +1127,7 @@ def _filter_concerns_by_tier(
     """Apply tier-based filtering and deduplication to concern dispatch entries.
 
     Tiers:
-        1-10 lines   → general concern only (first match)
+        1-10 lines   → rules only (no concerns)
         11-100 lines  → bugs + security only (deduped by concern)
         101-500 lines → all concerns (deduped by concern)
         501+ lines    → all concerns (no filtering)
@@ -1135,7 +1135,7 @@ def _filter_concerns_by_tier(
     if diff_lines > 500:
         return entries
     if diff_lines <= 10:
-        return [e for e in entries if e["concern"] == "general"][:1]
+        return []
     if diff_lines <= 100:
         return _dedup_concerns(
             [e for e in entries if e["concern"] in ("bugs", "security")]

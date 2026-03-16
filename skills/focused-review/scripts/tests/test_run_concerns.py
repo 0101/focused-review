@@ -108,7 +108,7 @@ class TestResolveModel:
         assert fr._resolve_model("haiku") == "claude-haiku-4.5"
 
     def test_codex_maps_to_full_name(self) -> None:
-        assert fr._resolve_model("codex") == "gpt-5.1-codex"
+        assert fr._resolve_model("codex") == "gpt-5.3-codex"
 
     def test_gemini_maps_to_full_name(self) -> None:
         assert fr._resolve_model("gemini") == "gemini-3-pro-preview"
@@ -130,7 +130,7 @@ class TestResolveModel:
         assert fr._resolve_model("OPUS") == "claude-opus-4.6"
 
     def test_case_insensitive_codex(self) -> None:
-        assert fr._resolve_model("Codex") == "gpt-5.1-codex"
+        assert fr._resolve_model("Codex") == "gpt-5.3-codex"
 
 
 # ---------------------------------------------------------------------------
@@ -752,12 +752,6 @@ class TestConcernParallelism:
                 "priority": "high",
                 "prompt_path": ".agents/focused-review/prompts/security--opus.md",
             },
-            {
-                "concern": "general",
-                "model": "opus",
-                "priority": "standard",
-                "prompt_path": ".agents/focused-review/prompts/general--opus.md",
-            },
         ]
         _setup_work_dir(repo, entries)
 
@@ -772,14 +766,13 @@ class TestConcernParallelism:
 
         captured = capsys.readouterr()
         summary = json.loads(captured.out)
-        assert summary["total"] == 3
-        assert summary["success"] == 3
+        assert summary["total"] == 2
+        assert summary["success"] == 2
 
-        # All three finding files created
+        # Both finding files created
         findings_dir = repo / ".agents" / "focused-review" / "findings"
         assert (findings_dir / "concern--bugs--opus.md").exists()
         assert (findings_dir / "concern--security--opus.md").exists()
-        assert (findings_dir / "concern--general--opus.md").exists()
 
     def test_multi_model_concerns(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]

@@ -52,12 +52,12 @@ applies-to: "**/*.cs"   # optional
 ### Adaptive Scaling
 
 Diff size drives dispatch intensity:
-- 1-10 lines: Rules + 1 general concern (single model) — lightweight but catches convention issues
-- 11-100 lines: Rules + bugs + security concerns (single model each) — architecture/general omitted to keep cost proportional
+- 1-10 lines: Rules only — lightweight review for small fixes
+- 11-100 lines: Rules + bugs + security concerns (single model each) — architecture omitted to keep cost proportional
 - 101-500 lines: Rules + all concerns (primary model)
 - 501+ lines: Rules + all concerns (multi-model for high-priority concerns)
 
-"Key concerns" at the 11-100 tier = bugs + security only. Architecture and general are omitted to keep cost proportional to diff size.
+"Key concerns" at the 11-100 tier = bugs + security only. Architecture is omitted to keep cost proportional to diff size. General review is now a built-in rule (not a concern).
 
 ### Finding Format
 
@@ -121,7 +121,7 @@ Per-project config in `focused-review.json`:
 - **SKILL.md / REFRESH.md split** — progressive disclosure keeps review pipeline context-lean
 - **Post-mortem is suggest-only** — after review, user marks invalids → system traces cause and produces recommendation report (does not edit rule/concern files directly)
 - **Post-mortem invoked as a mode** — `/focused-review post-mortem [numbers]` is a separate SKILL.md mode alongside review/refresh/configure. Finding numbers reference the `### {n}.` headings in the review report. If omitted, presents the table interactively
-- **Built-in concerns shipped in defaults/** — bugs, security, architecture, general
+- **Built-in concerns shipped in defaults/** — bugs, security, architecture (general review is now a built-in rule)
 - **Rule findings saved to disk by orchestrator** — review-runner agents return output as text; SKILL.md saves to `findings/rule--{name}.md` so Phase 2 consolidator can read them alongside concern findings
 - **Scaling moved to Python `scale-concerns` subcommand** — tier logic extracted from SKILL.md one-liner into `focused-review.py scale-concerns` with `--diff-path`/`--diff-lines` and `--dispatch-path`. Pure functions `_filter_concerns_by_tier`, `_dedup_concerns`, `_diff_lines_to_tier` are unit-tested
 - **`full` scope skips assessment** — no diff.patch exists for `full` scope, so Phases 3–4 are skipped; consolidated findings are treated as Confirmed
