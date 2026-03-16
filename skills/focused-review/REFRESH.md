@@ -2,12 +2,12 @@
 
 This file handles bootstrap and refresh for both **rules** AND **concerns**. It is invoked by SKILL.md when the user runs `refresh` or `configure`.
 
-You need these values from the calling skill (SKILL.md resolves them at load time and passes them to you):
-- **Script path** — path to `focused-review.py`
-- **Rules directory** — where rule files live (e.g. `review/`)
-- **Concerns directory** — where concern files live (e.g. `review/concerns/`)
-- **Defaults directory** — built-in rules and concerns shipped with the plugin
-- **Configured sources** — explicit source files from `focused-review.json`
+You need these values from the calling skill (SKILL.md resolves them via `resolve-config` in Step 0 and passes them to you):
+- **Script path** (`script_path`) — full path to `focused-review.py`
+- **Rules directory** (`rules_dir`) — where rule files live (e.g. `review/rules/`)
+- **Concerns directory** (`concerns_dir`) — where concern files live (e.g. `review/concerns/`)
+- **Defaults directory** (`defaults_dir`) — built-in rules and concerns shipped with the plugin
+- **Configured sources** (`sources`) — explicit source files from `focused-review.json`
 
 ---
 

@@ -4,25 +4,28 @@ description: Run unified code reviews through a 5-phase discovery-consolidation-
 argument-hint: "[branch|commit|staged|unstaged|full|refresh|configure|post-mortem] [--no-autofix]"
 ---
 
-<!-- Resolve the Python helper path at load time. Works for plugin installs (CLAUDE_PLUGIN_ROOT, ~/.copilot/plugins/), user/project skill dirs, and direct repo use. -->
-**Script path:** !`python -c "import os; from pathlib import Path; pr=os.environ.get('CLAUDE_PLUGIN_ROOT',''); candidates=[Path(pr)/'skills/focused-review/scripts/focused-review.py'] if pr else []; candidates+=[Path.home()/'.copilot/plugins/focused-review/skills/focused-review/scripts/focused-review.py',Path.home()/'.claude/skills/focused-review/scripts/focused-review.py',Path('.claude/skills/focused-review/scripts/focused-review.py'),Path('skills/focused-review/scripts/focused-review.py')]; p=next((c.resolve() for c in candidates if c.exists()),None); print(p or 'ERROR_SCRIPT_NOT_FOUND')"`
-
-<!-- Resolve the rules directory from config file. Uses the Python script's resolve-config subcommand (single source of truth for config scan locations). -->
-**Rules directory:** !`python -c "import subprocess,json,os; from pathlib import Path; pr=os.environ.get('CLAUDE_PLUGIN_ROOT',''); candidates=[Path(pr)/'skills/focused-review/scripts/focused-review.py'] if pr else []; candidates+=[Path.home()/'.copilot/plugins/focused-review/skills/focused-review/scripts/focused-review.py',Path.home()/'.claude/skills/focused-review/scripts/focused-review.py',Path('.claude/skills/focused-review/scripts/focused-review.py'),Path('skills/focused-review/scripts/focused-review.py')]; p=next((c.resolve() for c in candidates if c.exists()),None); r=subprocess.run(['python',str(p),'resolve-config','--repo','.'],capture_output=True,text=True) if p else None; d=json.loads(r.stdout).get('rules_dir','review/') if r and r.returncode==0 else 'review/'; print(d)"`
-
-<!-- Resolve the defaults directory (built-in bootstrap rules). Same candidate logic as Script path. -->
-**Defaults directory:** !`python -c "import os; from pathlib import Path; pr=os.environ.get('CLAUDE_PLUGIN_ROOT',''); candidates=[Path(pr)/'skills/focused-review/defaults/'] if pr else []; candidates+=[Path.home()/'.copilot/plugins/focused-review/skills/focused-review/defaults/',Path.home()/'.claude/skills/focused-review/defaults/',Path('.claude/skills/focused-review/defaults/'),Path('skills/focused-review/defaults/')]; p=next((c.resolve() for c in candidates if c.is_dir()),None); print(str(p).replace(chr(92),'/')+'/' if p else 'ERROR_DEFAULTS_NOT_FOUND')"`
-
-<!-- Resolve explicit source files from config. Uses the Python script's resolve-config subcommand (single source of truth for config scan locations). -->
-**Configured sources:** !`python -c "import subprocess,json,os; from pathlib import Path; pr=os.environ.get('CLAUDE_PLUGIN_ROOT',''); candidates=[Path(pr)/'skills/focused-review/scripts/focused-review.py'] if pr else []; candidates+=[Path.home()/'.copilot/plugins/focused-review/skills/focused-review/scripts/focused-review.py',Path.home()/'.claude/skills/focused-review/scripts/focused-review.py',Path('.claude/skills/focused-review/scripts/focused-review.py'),Path('skills/focused-review/scripts/focused-review.py')]; p=next((c.resolve() for c in candidates if c.exists()),None); r=subprocess.run(['python',str(p),'resolve-config','--repo','.'],capture_output=True,text=True) if p else None; s=json.loads(r.stdout).get('sources',[]) if r and r.returncode==0 else []; print(json.dumps(s))"`
-
-<!-- Resolve the concerns directory from config file. Uses the Python script's resolve-config subcommand. -->
-**Concerns directory:** !`python -c "import subprocess,json,os; from pathlib import Path; pr=os.environ.get('CLAUDE_PLUGIN_ROOT',''); candidates=[Path(pr)/'skills/focused-review/scripts/focused-review.py'] if pr else []; candidates+=[Path.home()/'.copilot/plugins/focused-review/skills/focused-review/scripts/focused-review.py',Path.home()/'.claude/skills/focused-review/scripts/focused-review.py',Path('.claude/skills/focused-review/scripts/focused-review.py'),Path('skills/focused-review/scripts/focused-review.py')]; p=next((c.resolve() for c in candidates if c.exists()),None); r=subprocess.run(['python',str(p),'resolve-config','--repo','.'],capture_output=True,text=True) if p else None; d=json.loads(r.stdout).get('concerns_dir','review/concerns/') if r and r.returncode==0 else 'review/concerns/'; print(d)"`
-
-<!-- Resolve the scaling mode from config file. Values: "standard" (default) or "thorough". -->
-**Scaling:** !`python -c "import subprocess,json,os; from pathlib import Path; pr=os.environ.get('CLAUDE_PLUGIN_ROOT',''); candidates=[Path(pr)/'skills/focused-review/scripts/focused-review.py'] if pr else []; candidates+=[Path.home()/'.copilot/plugins/focused-review/skills/focused-review/scripts/focused-review.py',Path.home()/'.claude/skills/focused-review/scripts/focused-review.py',Path('.claude/skills/focused-review/scripts/focused-review.py'),Path('skills/focused-review/scripts/focused-review.py')]; p=next((c.resolve() for c in candidates if c.exists()),None); r=subprocess.run(['python',str(p),'resolve-config','--repo','.'],capture_output=True,text=True) if p else None; d=json.loads(r.stdout).get('scaling','standard') if r and r.returncode==0 else 'standard'; print(d)"`
-
 You are the orchestrator for the focused-review plugin. Your mode depends on the argument.
+
+## Step 0: Resolve Configuration
+
+Before any mode-specific logic, locate the Python helper and resolve all configuration.
+
+The Python helper script is at `scripts/focused-review.py` within this skill file's directory. Construct the full path from this skill file's location.
+
+Run:
+
+```bash
+python {script_path} resolve-config --repo .
+```
+
+Parse the JSON output and store these values for use throughout:
+
+- `script_path` — confirmed full path to the Python helper
+- `rules_dir` — directory containing review rule files (e.g. `review/rules/`)
+- `concerns_dir` — directory containing concern files (e.g. `review/concerns/`)
+- `defaults_dir` — built-in defaults shipped with the plugin
+- `sources` — explicit source files from `focused-review.json` (may be empty)
+- `scaling` — scaling mode (`standard` or `thorough`)
 
 ## Mode Selection
 
@@ -47,7 +50,7 @@ Rules and concerns run in parallel during Phase 1. Subsequent phases validate an
 Determine the scope from the argument (default `branch`), then run the Python helper:
 
 ```bash
-python {script_path} prepare-review --repo . --scope {scope} --rules-dir {rules_dir} {no_autofix_flag}
+python {script_path} prepare-review --repo . --scope {scope} {no_autofix_flag}
 ```
 
 Where `{no_autofix_flag}` is `--no-autofix` if `no_autofix` was set during mode selection, or omitted entirely otherwise.
@@ -74,7 +77,7 @@ If the **Scaling** value is `"thorough"`, skip filtering — run all concerns re
 For diff-based scopes with standard scaling, count changed lines and filter the concern dispatch to keep costs proportional:
 
 ```bash
-python skills/focused-review/scripts/focused-review.py scale-concerns \
+python {script_path} scale-concerns \
   --diff-path .agents/focused-review/diff.patch \
   --dispatch-path .agents/focused-review/concern-dispatch.json
 ```

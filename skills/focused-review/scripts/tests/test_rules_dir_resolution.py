@@ -372,12 +372,13 @@ class TestResolveConfigSubcommand:
 
         captured = capsys.readouterr()
         result = json.loads(captured.out)
-        assert result == {
-            "rules_dir": "review/",
-            "sources": [],
-            "concerns_dir": "review/concerns/",
-            "scaling": "standard",
-        }
+        assert result["rules_dir"] == "review/"
+        assert result["sources"] == []
+        assert result["concerns_dir"] == "review/concerns/"
+        assert result["scaling"] == "standard"
+        # script_path and defaults_dir are always present
+        assert result["script_path"].endswith("focused-review.py")
+        assert result["defaults_dir"].endswith("defaults/")
 
     def test_outputs_config_values(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]

@@ -192,7 +192,13 @@ def _resolve_and_deduplicate(paths: list[Path]) -> list[Path]:
 
 
 def resolve_config(args: argparse.Namespace) -> None:
-    """Print resolved config values as JSON (rules_dir and sources)."""
+    """Print resolved config values as JSON.
+
+    Output includes ``rules_dir``, ``sources``, ``concerns_dir``,
+    ``scaling``, ``script_path``, and ``defaults_dir`` so that the
+    orchestrator (SKILL.md) can resolve all paths in a single call
+    without platform-specific features.
+    """
     repo = Path(args.repo).resolve()
     if not repo.is_dir():
         print(
@@ -210,6 +216,14 @@ def resolve_config(args: argparse.Namespace) -> None:
     if not concerns_dir.endswith("/"):
         concerns_dir += "/"
     config["concerns_dir"] = concerns_dir
+
+    script_file = Path(__file__).resolve()
+    config["script_path"] = str(script_file).replace("\\", "/")
+    defaults_dir = str(script_file.parent.parent / "defaults").replace("\\", "/")
+    if not defaults_dir.endswith("/"):
+        defaults_dir += "/"
+    config["defaults_dir"] = defaults_dir
+
     print(json.dumps(config))
 
 
