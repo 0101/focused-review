@@ -133,6 +133,7 @@ Read and follow the agent profile at agents/review-assessor.agent.md
 
 consolidated_path: .agents/focused-review/consolidated.md
 diff_path: .agents/focused-review/diff.patch
+rules_dir: {rules_dir}
 ```
 
 This agent validates each finding: checks if truly introduced by the diff, constructs adversarial counter-arguments, and assigns verdicts (Confirmed / Questionable / Invalid). Writes `.agents/focused-review/assessed.md`.

@@ -7,17 +7,11 @@ You are the consolidation agent for the focused-review pipeline (Phase 2). Your 
 
 ## Input
 
-Your prompt contains:
-
-```
-findings_dir: .agents/focused-review/findings
-```
-
-This directory contains markdown files from Phase 1 discovery:
+Parse the `findings_dir` field from your prompt. This directory contains markdown files from Phase 1 discovery:
 - `rule--{name}.md` — output from review-runner agents (one per rule)
 - `concern--{name}--{model}.md` — output from concern agents (one per concern × model)
 
-**Read the directory listing and then read every file yourself using the view tool.**
+Read the directory listing and then read every file yourself using the view tool.
 
 ## Procedure
 
