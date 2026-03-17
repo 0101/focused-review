@@ -51,6 +51,7 @@ BUILTIN_CONCERNS_DIR = Path(__file__).resolve().parent.parent / "defaults" / "co
 
 COPILOT_CMD = os.environ.get("COPILOT_CMD", "copilot")
 CONCERN_HARD_TIMEOUT_SECS = int(os.environ.get("CONCERN_HARD_TIMEOUT", "900"))
+CONCERN_SOFT_TIMEOUT_SECS = int(os.environ.get("CONCERN_SOFT_TIMEOUT", "600"))
 CONCERN_MAX_WORKERS = int(os.environ.get("CONCERN_MAX_WORKERS", "4"))
 
 # Shorthand model names used in concern files → full CLI model identifiers.
@@ -677,6 +678,10 @@ def _generate_concern_prompts(
                 work_dir / "findings" / f"concern--{concern['name']}--{model}.md",
                 relative_to=repo,
             )
+            plan_rel = _posix(
+                work_dir / "scratchpad" / f"{concern['name']}--{model}--plan.md",
+                relative_to=repo,
+            )
             lines.extend([
                 "",
                 "---",
@@ -687,6 +692,75 @@ def _generate_concern_prompts(
                 "Follow the Output Format above exactly.",
                 "If no findings, write a single line: `NO FINDINGS`.",
                 "Do NOT print your findings to stdout — write them to the file.",
+            ])
+
+            # Inject the Working Protocol so agents write incrementally
+            # and can be continued across multiple invocations.
+            soft_timeout = CONCERN_SOFT_TIMEOUT_SECS
+            lines.extend([
+                "",
+                "---",
+                "",
+                "## Working Protocol",
+                "",
+                "Follow this protocol exactly for every review invocation.",
+                "",
+                "### 1. Start a Background Timer",
+                "",
+                f"Run this command as an **async, non-detached** shell task:",
+                "",
+                f'```bash\npython -c "import time; time.sleep({soft_timeout})"\n```',
+                "",
+                'The system notification when this completes is your "time\'s up" signal.',
+                "",
+                "### 2. Continuation Detection",
+                "",
+                f"Check if your **report file** (`{finding_rel}`) and "
+                f"**plan file** (`{plan_rel}`) already exist.",
+                "",
+                "- **If neither exists** → this is a fresh review. Proceed to step 3.",
+                "- **If both exist** → this is a continuation. Read them both, then "
+                "skip to step 4 and continue reviewing only the unchecked file groups "
+                "from your plan.",
+                "",
+                "### 3. Plan Your Work",
+                "",
+                "Group the changed files into logical clusters (by feature, module, or "
+                "directory). Write your plan — a checklist of file groups — to:",
+                "",
+                f"  `{plan_rel}`",
+                "",
+                "Mark each group with `[ ]` (unchecked). You will check them off as "
+                "you complete each group.",
+                "",
+                "### 4. Review Incrementally",
+                "",
+                "Work through your plan one file group at a time:",
+                "",
+                "1. Review the group.",
+                "2. **Append** any findings to your report file immediately "
+                f"(`{finding_rel}`).",
+                "3. Update your plan file — mark the completed group with `[x]`.",
+                "4. Move to the next group.",
+                "",
+                "### 5. React to Timer / Finish",
+                "",
+                "- **Timer notification arrives** → finish writing the current finding, "
+                "then go to step 6.",
+                "- **All file groups reviewed before timer** → go to step 6.",
+                "",
+                "### 6. Write Review Status",
+                "",
+                "At the **very top** of your report file, include exactly one of these "
+                "sentinel lines:",
+                "",
+                "- If you reviewed everything:",
+                "  `Review Status: This review is complete.`",
+                "- If file groups remain unchecked in your plan:",
+                "  `Review Status: This review is incomplete, please invoke the agent "
+                "again to continue reviewing.`",
+                "",
+                "This line MUST be the first line of your report file.",
             ])
 
             prompt_path.write_text("\n".join(lines), encoding="utf-8")
@@ -1033,7 +1107,11 @@ def run_concerns(args: argparse.Namespace) -> None:
     """
     repo = Path(args.repo).resolve()
     work_dir = repo / ".agents" / "focused-review"
-    dispatch_path = work_dir / "concern-dispatch.json"
+    dispatch_path = (
+        Path(args.dispatch).resolve()
+        if getattr(args, "dispatch", None)
+        else work_dir / "concern-dispatch.json"
+    )
 
     if not dispatch_path.is_file():
         print(
@@ -1196,6 +1274,11 @@ def main() -> int:
         type=int,
         default=CONCERN_HARD_TIMEOUT_SECS,
         help=f"Hard timeout per copilot session in seconds (default: {CONCERN_HARD_TIMEOUT_SECS})",
+    )
+    concerns_parser.add_argument(
+        "--dispatch",
+        default=None,
+        help="Path to an alternate dispatch JSON file (default: .agents/focused-review/concern-dispatch.json)",
     )
     concerns_parser.set_defaults(func=run_concerns)
 

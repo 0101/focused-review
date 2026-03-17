@@ -847,3 +847,127 @@ class TestConcernParallelism:
         findings_dir = repo / ".agents" / "focused-review" / "findings"
         assert (findings_dir / "concern--bugs--opus.md").exists()
         assert (findings_dir / "concern--bugs--codex.md").exists()
+
+
+# ---------------------------------------------------------------------------
+# --dispatch alternate dispatch file
+# ---------------------------------------------------------------------------
+
+
+class TestDispatchArg:
+
+    def test_custom_dispatch_file_used(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """When --dispatch is provided, run_concerns reads that file."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        work_dir = repo / ".agents" / "focused-review"
+        work_dir.mkdir(parents=True)
+
+        # Write the alternate dispatch file in a non-default location
+        alt_dispatch = tmp_path / "continue-dispatch.json"
+        entries = [
+            {
+                "concern": "security",
+                "model": "opus",
+                "priority": "high",
+                "prompt_path": ".agents/focused-review/prompts/security--opus.md",
+            },
+        ]
+        alt_dispatch.write_text(json.dumps(entries), encoding="utf-8")
+
+        # Create prompt file so _run_single_concern can find it
+        prompts_dir = work_dir / "prompts"
+        prompts_dir.mkdir(parents=True, exist_ok=True)
+        (prompts_dir / "security--opus.md").write_text("Review security", encoding="utf-8")
+
+        args = argparse.Namespace(
+            repo=str(repo),
+            max_workers=2,
+            hard_timeout=60,
+            dispatch=str(alt_dispatch),
+        )
+        with patch("subprocess.run", return_value=_mock_subprocess_success()):
+            fr.run_concerns(args)
+
+        captured = capsys.readouterr()
+        summary = json.loads(captured.out)
+        assert summary["total"] == 1
+        assert summary["success"] == 1
+        assert summary["results"][0]["concern"] == "security"
+
+    def test_default_dispatch_when_arg_is_none(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """When dispatch is None, the default concern-dispatch.json is used."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        _setup_work_dir(repo, dispatch=[])
+
+        args = argparse.Namespace(
+            repo=str(repo),
+            max_workers=2,
+            hard_timeout=60,
+            dispatch=None,
+        )
+        fr.run_concerns(args)
+
+        captured = capsys.readouterr()
+        summary = json.loads(captured.out)
+        assert summary["total"] == 0
+
+    def test_missing_custom_dispatch_file_exits(self, tmp_path: Path) -> None:
+        """When --dispatch points to a nonexistent file, run_concerns exits."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+
+        args = argparse.Namespace(
+            repo=str(repo),
+            max_workers=2,
+            hard_timeout=60,
+            dispatch=str(tmp_path / "nonexistent.json"),
+        )
+        with pytest.raises(SystemExit, match="1"):
+            fr.run_concerns(args)
+
+    def test_dispatch_cli_arg_parsed(self, tmp_path: Path) -> None:
+        """The --dispatch CLI argument is captured by argparse."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        _setup_work_dir(repo, dispatch=[])
+
+        captured_args: dict[str, object] = {}
+
+        def spy_run_concerns(args: argparse.Namespace) -> None:
+            captured_args["dispatch"] = args.dispatch
+
+        alt_path = str(tmp_path / "my-dispatch.json")
+        with patch("sys.argv", [
+            "focused-review", "run-concerns",
+            "--repo", str(repo),
+            "--dispatch", alt_path,
+        ]):
+            with patch.object(fr, "run_concerns", spy_run_concerns):
+                fr.main()
+
+        assert captured_args["dispatch"] == alt_path
+
+    def test_dispatch_cli_default_is_none(self, tmp_path: Path) -> None:
+        """When --dispatch is not provided, the default is None."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        _setup_work_dir(repo, dispatch=[])
+
+        captured_args: dict[str, object] = {}
+
+        def spy_run_concerns(args: argparse.Namespace) -> None:
+            captured_args["dispatch"] = args.dispatch
+
+        with patch("sys.argv", [
+            "focused-review", "run-concerns", "--repo", str(repo),
+        ]):
+            with patch.object(fr, "run_concerns", spy_run_concerns):
+                fr.main()
+
+        assert captured_args["dispatch"] is None
