@@ -34,29 +34,29 @@ copilot plugin install focused-review@focused-review
 Run a focused review against the current branch diff (default):
 
 ```
-/focused-review
+/focused-review:review
 ```
 
 Specify a diff scope:
 
 ```
-/focused-review branch      # diff against origin/main (default)
-/focused-review commit      # diff of last commit
-/focused-review staged      # staged changes only
-/focused-review unstaged    # unstaged changes only
-/focused-review full        # scan entire codebase (no diff)
+/focused-review:review branch      # diff against origin/main (default)
+/focused-review:review commit      # diff of last commit
+/focused-review:review staged      # staged changes only
+/focused-review:review unstaged    # unstaged changes only
+/focused-review:review full        # scan entire codebase (no diff)
 ```
 
 Refresh review rules from instruction files:
 
 ```
-/focused-review refresh
+/focused-review:review refresh
 ```
 
 Configure rules directory:
 
 ```
-/focused-review configure
+/focused-review:review configure
 ```
 
 ## Configuration
