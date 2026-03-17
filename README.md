@@ -19,14 +19,14 @@ Focused Review fixes this by giving each rule to its own agent. One rule, one ag
 
 ```bash
 copilot plugin marketplace add 0101/focused-review
-copilot plugin install focused-review@focused-review
+copilot plugin install focused-review@0101
 ```
 
 ### Claude Code
 
 ```bash
 /plugin marketplace add 0101/focused-review
-/plugin install focused-review@focused-review
+/plugin install focused-review@0101
 ```
 
 ## Usage

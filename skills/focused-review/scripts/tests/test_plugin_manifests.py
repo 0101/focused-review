@@ -134,10 +134,10 @@ class TestCrossFileConsistency:
         claude = json.loads((REPO_ROOT / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
         marketplace = json.loads(MARKETPLACE_JSON_PATH.read_text(encoding="utf-8"))
 
-        names = {
+        plugin_names = {
             "plugin.json": root.get("name"),
             ".claude-plugin/plugin.json": claude.get("name"),
             "marketplace plugin": marketplace["plugins"][0].get("name"),
         }
-        unique = set(names.values())
-        assert len(unique) == 1, f"Name mismatch across manifests: {names}"
+        unique = set(plugin_names.values())
+        assert len(unique) == 1, f"Plugin name mismatch across manifests: {plugin_names}"
