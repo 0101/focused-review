@@ -108,6 +108,46 @@ If `dispatch.json` is empty (no rules matched), only run concerns. If `concern-d
 
 **Save rule findings to disk** — After all rule agents complete, save each agent's output to `.agents/focused-review/findings/rule--{rule-name}.md` (where `{rule-name}` is the rule filename without extension from `rule_path`). Create the `findings/` directory if needed. If a rule ran against multiple chunks, concatenate all chunk outputs into one file. The concern runner already writes its findings to disk — this step ensures rule findings are also available for Phase 2.
 
+**Concern continuation loop** — After the concern runner completes and rule findings are saved, check whether any concern agents need continuation. If `concern-dispatch.json` was empty (no concerns were dispatched), skip this loop entirely.
+
+1. **Classify each (concern, model) pair** — Read `concern-dispatch.json` to get the list of expected entries. For each entry:
+   - If the finding file at `{entry.finding_path}` does **not exist**: record as an **agent failure**. Note the concern name, model, and trace file path (`.agents/focused-review/traces/concern--{concern}--{model}.md` if it exists). Do NOT retry failures.
+   - If the finding file **exists**: read its **first line**.
+     - Starts with `Review Status: This review is complete.` → **complete**
+     - Starts with `Review Status: This review is incomplete` → **incomplete**
+     - Neither sentinel present → treat as **complete** (legacy format)
+
+2. **If no incomplete pairs remain**, proceed to Phase 2. Otherwise continue.
+
+3. **Build continuation dispatch** — From `concern-dispatch.json`, copy only the entries whose (concern, model) pairs are incomplete (exclude failures and complete pairs). Write this filtered list to `.agents/focused-review/concern-dispatch-continue.json` as a JSON array with the same entry structure. Overwrite the file each round.
+
+4. **Record file sizes** — For each incomplete finding file, note its current byte size (used to detect stuck agents in step 6).
+
+5. **Re-invoke** — Run the concern runner with the continuation dispatch:
+
+   ```bash
+   python {script_path} run-concerns --repo . --dispatch .agents/focused-review/concern-dispatch-continue.json
+   ```
+
+   Use `mode="sync"` with `initial_wait: 300`.
+
+6. **Re-classify** — After the runner completes, re-check only the entries from the continuation dispatch (step 3). For each entry:
+   - If the finding file still doesn't exist → agent failure (same handling as step 1)
+   - If the finding file exists, read its **first line** and check the sentinel as in step 1.
+     - If complete → **complete**
+     - If incomplete → check whether the file's byte size has **increased** since step 4. If it has not grown → **stuck** (agent made no progress). Treat as complete to avoid infinite loops. If it grew → remains **incomplete** (eligible for another round).
+
+7. **Repeat** — Go back to step 2. Run at most **3 continuation rounds** total (not counting the initial `run-concerns` invocation). Stop early if all pairs are complete or stuck.
+
+8. **Report failures** — Before proceeding to Phase 2, if any (concern, model) pairs were agent failures, tell the user:
+
+   ```
+   ⚠ {n} concern agent(s) failed to produce findings:
+   - {concern} ({model}): no output file. Trace: .agents/focused-review/traces/concern--{concern}--{model}.md
+   ```
+
+   If a trace file doesn't exist for a failure, omit the trace pointer for that entry. These failures are informational — they do not block the review.
+
 ### Step 3: Phase 2 — Consolidation
 
 Launch a `general-purpose` Task agent with this prompt:
