@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess as sp
 import sys
 from pathlib import Path
@@ -221,7 +222,7 @@ class TestRunSingleConcernSuccess:
         entry["finding_path"] = finding_rel
 
         # Pre-create the file as if the agent wrote it via the create tool
-        finding_path = repo / Path(finding_rel.replace("/", "\\"))
+        finding_path = repo / Path(finding_rel.replace("/", os.sep))
         finding_path.parent.mkdir(parents=True, exist_ok=True)
         finding_path.write_text("### [High] Clean finding\nNo noise.", encoding="utf-8")
 
