@@ -62,8 +62,9 @@ focused-review/
 ```
 
 - `plugin.json`: name, description, version, skill/agent paths
+- `.claude-plugin/`: marketplace manifest + Claude Code plugin descriptor for dual-target distribution
 - Copilot CLI: `copilot plugin install ./` or `copilot plugin install owner/repo`
-- Claude Code: symlink `skills/focused-review/` to `~/.claude/skills/focused-review/`
+- Claude Code: `copilot plugin marketplace add 0101/focused-review`
 
 ### Skill Arguments
 
