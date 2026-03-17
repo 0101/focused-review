@@ -219,7 +219,7 @@ Use these values from earlier steps:
 
 **File:** `{path}:{line}`
 **Fix complexity:** {quickfix|moderate|complex}
-**Provenance:** {sources, e.g. "rule:sealed-classes, concern:bugs (opus)"}
+**Found by:** {sources with agreement count, e.g. "3 sources: rule:sealed-classes, concern:bugs (opus), concern:bugs (gemini)" or "1 source: rule:null-handling"}
 
 {description}
 
@@ -256,10 +256,10 @@ After writing the report, tell the user:
 2. A numbered summary table of confirmed and questionable findings:
 
 ```
-| # | Verdict | Severity | File | Issue |
-|---|---------|----------|------|-------|
-| 1 | ✅ | High | path:42 | Brief description... |
-| 2 | ❓ | Medium | path:88 | Brief description... |
+| # | Verdict | Severity | Sources | File | Issue |
+|---|---------|----------|---------|------|-------|
+| 1 | ✅ | High | 3 | path:42 | Brief description... |
+| 2 | ❓ | Medium | 1 | path:88 | Brief description... |
 ```
 
 3. The path to the full report file

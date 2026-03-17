@@ -102,7 +102,7 @@ For each group of duplicates, merge into a single consolidated finding:
 - **Evidence**: Merge all evidence from all sources. Keep the best reasoning — do not simply concatenate. If multiple sources provide different evidence (e.g., a trigger scenario from bugs + an attack vector from security), include both as they add distinct value.
 - **Suggestion**: Use the most actionable suggestion.
 - **Introduced by**: If any source says `diff`, use `diff`. Only use `pre-existing` when all sources agree.
-- **Provenance**: List all sources that found this issue.
+- **Provenance**: List all sources that found this issue, using the format `{source-filename-without-extension}` (e.g., `rule--sealed-classes`, `concern--bugs--opus`). Include the count of independent sources.
 
 Standalone findings (not duplicated) keep their original data with a single-source provenance list.
 
@@ -147,7 +147,7 @@ Write the output to `.agents/focused-review/consolidated.md`:
 **Suggestion:**
 {best suggestion}
 
-**Provenance:**
+**Provenance:** ({source_count} source(s))
 - {source-1}: {original severity} — {one-line summary of what this source reported}
 - {source-2}: {original severity} — {one-line summary}
 

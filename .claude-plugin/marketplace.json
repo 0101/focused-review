@@ -1,4 +1,6 @@
 {
+  "name": "focused-review",
+  "owner": "0101",
   "plugins": [
     {
       "name": "focused-review",
