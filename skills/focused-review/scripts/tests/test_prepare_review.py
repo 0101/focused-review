@@ -525,6 +525,25 @@ class TestPrepareReviewEndToEnd:
         assert len(dispatch) == 1
         assert dispatch[0]["rule_path"] == "review/sealed.md"
 
+    def test_creates_scratchpad_directory(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """prepare_review creates .agents/focused-review/scratchpad/ directory."""
+        repo = self._setup_repo_with_rules(
+            tmp_path,
+            [("sealed.md", _make_rule("Sealed Classes"))],
+        )
+
+        diff = _make_diff(("src/Foo.cs", 50))
+
+        args = argparse.Namespace(repo=str(repo), scope="branch", rules_dir="review/")
+
+        with patch.object(fr, "_run_git", side_effect=_mock_git_results(diff, ["src/Foo.cs"])):
+            fr.prepare_review(args)
+
+        scratchpad_dir = repo / ".agents" / "focused-review" / "scratchpad"
+        assert scratchpad_dir.is_dir()
+
     def test_applies_to_filtering_in_full_flow(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:

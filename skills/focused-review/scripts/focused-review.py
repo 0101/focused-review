@@ -50,8 +50,7 @@ DEFAULT_CONCERNS_DIR = "review/concerns/"
 BUILTIN_CONCERNS_DIR = Path(__file__).resolve().parent.parent / "defaults" / "concerns"
 
 COPILOT_CMD = os.environ.get("COPILOT_CMD", "copilot")
-CONCERN_TIMEOUT_SECS = int(os.environ.get("CONCERN_TIMEOUT", "1200"))
-CONCERN_RETRIES = int(os.environ.get("CONCERN_RETRIES", "2"))
+CONCERN_HARD_TIMEOUT_SECS = int(os.environ.get("CONCERN_HARD_TIMEOUT", "900"))
 CONCERN_MAX_WORKERS = int(os.environ.get("CONCERN_MAX_WORKERS", "4"))
 
 # Shorthand model names used in concern files → full CLI model identifiers.
@@ -816,6 +815,7 @@ def prepare_review(args: argparse.Namespace) -> None:
 
     work_dir = repo / ".agents" / "focused-review"
     work_dir.mkdir(parents=True, exist_ok=True)
+    (work_dir / "scratchpad").mkdir(exist_ok=True)
 
     # -- determine changed files & chunks --------------------------------
 
@@ -911,8 +911,7 @@ def _run_single_concern(
     repo: Path,
     work_dir: Path,
     *,
-    timeout: int = CONCERN_TIMEOUT_SECS,
-    retries: int = CONCERN_RETRIES,
+    hard_timeout: int = CONCERN_HARD_TIMEOUT_SECS,
 ) -> dict[str, object]:
     """Launch one ``copilot -p`` session for a (concern × model) pair.
 
@@ -920,10 +919,12 @@ def _run_single_concern(
     CLI, captures stdout, and writes findings to
     ``work_dir/findings/concern--{name}--{model}.md``.
 
-    Retries on non-zero exit or timeout up to *retries* times.
+    No retries — a single subprocess invocation with *hard_timeout*.
+    Continuation of incomplete reviews is handled by the orchestrator.
 
-    Returns a result dict with keys: ``concern``, ``model``, ``status``,
-    ``finding_path`` (on success), ``error`` (on failure), ``attempt``.
+    Returns a result dict with keys: ``concern``, ``model``, ``status``
+    (``exited`` | ``timed_out`` | ``error``), and ``finding_path`` if the
+    finding file exists on disk after the process finishes.
     """
     concern = entry["concern"]
     model = entry["model"]
@@ -954,7 +955,6 @@ def _run_single_concern(
             "model": model,
             "status": "error",
             "error": f"Prompt file not found: {prompt_rel}",
-            "attempt": 0,
         }
 
     prompt_content = prompt_abs.read_text(encoding="utf-8")
@@ -965,69 +965,61 @@ def _run_single_concern(
     if model != "inherit":
         cmd.extend(["--model", _resolve_model(model)])
 
-    last_error = ""
-    total_attempts = retries + 1
-    for attempt in range(1, total_attempts + 1):
-        try:
-            result = subprocess.run(
-                cmd,
-                cwd=repo,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                encoding="utf-8",
-                errors="replace",
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                # Always save the raw session trace for debugging.
-                trace_path.write_text(result.stdout, encoding="utf-8")
+    try:
+        result = subprocess.run(
+            cmd,
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            timeout=hard_timeout,
+            encoding="utf-8",
+            errors="replace",
+        )
+        # Always save the raw session trace for debugging.
+        if result.stdout.strip():
+            trace_path.write_text(result.stdout, encoding="utf-8")
 
-                # The agent was instructed to write clean findings to
-                # finding_path via the create tool.  If it did, use that
-                # file.  Otherwise fall back to stdout (which contains
-                # tool-call noise but is better than nothing).
-                if not finding_path.is_file():
-                    finding_path.write_text(result.stdout, encoding="utf-8")
+            # The agent was instructed to write clean findings to
+            # finding_path via the create tool.  If it did, use that
+            # file.  Otherwise fall back to stdout (which contains
+            # tool-call noise but is better than nothing).
+            if not finding_path.is_file():
+                finding_path.write_text(result.stdout, encoding="utf-8")
 
-                return {
-                    "concern": concern,
-                    "model": model,
-                    "status": "success",
-                    "finding_path": _posix(finding_path, relative_to=repo),
-                    "attempt": attempt,
-                }
-            last_error = result.stderr.strip() or f"Exit code {result.returncode}"
-            if result.returncode == 0 and not result.stdout.strip():
-                last_error = "Empty output"
-        except subprocess.TimeoutExpired:
-            last_error = f"Timed out after {timeout}s"
-        except FileNotFoundError:
-            return {
-                "concern": concern,
-                "model": model,
-                "status": "error",
-                "error": f"{COPILOT_CMD} is not installed or not on PATH",
-                "attempt": attempt,
-            }
-        except OSError as exc:
-            # On Windows, CreateProcess has a 32 766-char command-line limit.
-            # When the prompt exceeds this, subprocess.run raises OSError.
-            # Not retryable — the prompt won't shrink between attempts.
-            return {
-                "concern": concern,
-                "model": model,
-                "status": "error",
-                "error": f"OS error (prompt may exceed CLI argument limit): {exc}",
-                "attempt": attempt,
-            }
+        out: dict[str, object] = {
+            "concern": concern,
+            "model": model,
+            "status": "exited",
+        }
+        if finding_path.is_file():
+            out["finding_path"] = _posix(finding_path, relative_to=repo)
+        return out
 
-    return {
-        "concern": concern,
-        "model": model,
-        "status": "failed",
-        "error": last_error,
-        "attempt": total_attempts,
-    }
+    except subprocess.TimeoutExpired:
+        out = {
+            "concern": concern,
+            "model": model,
+            "status": "timed_out",
+        }
+        if finding_path.is_file():
+            out["finding_path"] = _posix(finding_path, relative_to=repo)
+        return out
+    except FileNotFoundError:
+        return {
+            "concern": concern,
+            "model": model,
+            "status": "error",
+            "error": f"{COPILOT_CMD} is not installed or not on PATH",
+        }
+    except OSError as exc:
+        # On Windows, CreateProcess has a 32 766-char command-line limit.
+        # When the prompt exceeds this, subprocess.run raises OSError.
+        return {
+            "concern": concern,
+            "model": model,
+            "status": "error",
+            "error": f"OS error (prompt may exceed CLI argument limit): {exc}",
+        }
 
 
 def run_concerns(args: argparse.Namespace) -> None:
@@ -1035,7 +1027,7 @@ def run_concerns(args: argparse.Namespace) -> None:
 
     Uses :class:`~concurrent.futures.ThreadPoolExecutor` for parallel
     execution.  Each worker invokes :func:`_run_single_concern` with
-    retry and timeout logic.
+    a hard timeout.
 
     Prints a JSON summary on stdout with per-entry results and counts.
     """
@@ -1064,8 +1056,7 @@ def run_concerns(args: argparse.Namespace) -> None:
         return
 
     max_workers = args.max_workers
-    timeout = args.timeout
-    retries = args.retries
+    hard_timeout = args.hard_timeout
 
     results: list[dict[str, object]] = []
 
@@ -1076,8 +1067,7 @@ def run_concerns(args: argparse.Namespace) -> None:
                 entry,
                 repo,
                 work_dir,
-                timeout=timeout,
-                retries=retries,
+                hard_timeout=hard_timeout,
             ): entry
             for entry in entries
         }
@@ -1092,15 +1082,14 @@ def run_concerns(args: argparse.Namespace) -> None:
                     "model": entry.get("model", "unknown"),
                     "status": "error",
                     "error": f"Unexpected: {exc}",
-                    "attempt": 0,
                 }
             results.append(result)
             status = result["status"]
             concern = result["concern"]
             model = result["model"]
-            if status == "success":
+            if result.get("finding_path"):
                 print(
-                    f"  ✓ {concern} ({model}): {result.get('finding_path', '')}",
+                    f"  ✓ {concern} ({model}): {result['finding_path']}",
                     file=sys.stderr,
                 )
             else:
@@ -1109,7 +1098,7 @@ def run_concerns(args: argparse.Namespace) -> None:
                     file=sys.stderr,
                 )
 
-    success_count = sum(1 for r in results if r["status"] == "success")
+    success_count = sum(1 for r in results if r.get("finding_path"))
     failed_count = len(results) - success_count
 
     summary = {
@@ -1203,16 +1192,10 @@ def main() -> int:
         help=f"Maximum parallel copilot sessions (default: {CONCERN_MAX_WORKERS})",
     )
     concerns_parser.add_argument(
-        "--timeout",
+        "--hard-timeout",
         type=int,
-        default=CONCERN_TIMEOUT_SECS,
-        help=f"Timeout per copilot session in seconds (default: {CONCERN_TIMEOUT_SECS})",
-    )
-    concerns_parser.add_argument(
-        "--retries",
-        type=int,
-        default=CONCERN_RETRIES,
-        help=f"Number of retries per failed session (default: {CONCERN_RETRIES})",
+        default=CONCERN_HARD_TIMEOUT_SECS,
+        help=f"Hard timeout per copilot session in seconds (default: {CONCERN_HARD_TIMEOUT_SECS})",
     )
     concerns_parser.set_defaults(func=run_concerns)
 
