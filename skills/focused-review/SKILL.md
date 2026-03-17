@@ -256,11 +256,13 @@ After writing the report, tell the user:
 2. A numbered summary table of confirmed and questionable findings:
 
 ```
-| # | Verdict | Severity | Sources | File | Issue |
-|---|---------|----------|---------|------|-------|
-| 1 | ✅ | High | 3 | path:42 | Brief description... |
-| 2 | ❓ | Medium | 1 | path:88 | Brief description... |
+| # | Verdict | Severity | Found by | File | Issue |
+|---|---------|----------|----------|------|-------|
+| 1 | ✅ | High | bugs(opus,gemini), arch(opus) | path:42 | Brief description... |
+| 2 | ❓ | Medium | rule:null-handling | path:88 | Brief description... |
 ```
+
+The `Found by` column lists each source that discovered the finding. Use short labels: `bugs(opus,gemini)` for concern:bugs found by opus and gemini, `arch(codex)` for concern:architecture found by codex, `rule:name` for rules. Group models under the same concern name for readability.
 
 3. The path to the full report file
 
