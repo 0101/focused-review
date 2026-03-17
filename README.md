@@ -1,17 +1,26 @@
-# Focused Review Plugin
+# Focused Review
 
-Auto-generates review rules from instruction files and runs parallel code reviews.
+A Copilot CLI / Claude Code plugin that runs thorough, rule-driven code reviews — and catches what single-pass reviews miss.
 
-## Why
+**The problem:** AI reviewers scan your diff once and move on. They miss subtle issues, forget half your team's conventions, and can't tell a real bug from a style nit. Pile more rules into a single prompt and recall drops further.
 
-AI coding agents can follow a single instruction reliably — but give them a long list of rules and they start dropping things. The more instructions you pile into `CLAUDE.md`, `.cursorrules`, or `AGENTS.md`, the less consistently any one of them gets enforced.
+**Focused Review fixes this** with a multi-phase pipeline that mirrors how experienced reviewers actually work:
 
-Focused Review fixes this by giving each rule to its own agent. One rule, one agent, one job. The result is reliable enforcement even across dozens of rules.
+1. **Discovery** — Each rule and concern gets its own agent, reviewing your diff with full attention. No competition for context, no dropped instructions.
+2. **Consolidation** — Findings are deduplicated and prioritized. Same issue caught by three rules? You see it once.
+3. **Assessment** — Every finding is challenged against the actual diff. Counter-arguments are constructed. Weak findings are filtered out.
+4. **Rebuttal** — High-severity findings marked as invalid get a second look, catching edge cases the assessor missed.
 
-- **Rules from your instructions**: Extracts review criteria from the instruction files already in your repo
-- **One rule per agent**: Each rule gets full attention — no competition for context
-- **Version-controlled rules**: Rules live in `review/` as Markdown files, reviewed in PRs like code
-- **Works with your diff workflow**: Branch, commit, staged, unstaged, or full codebase scans
+The result: high-signal reviews with near-zero noise, enforcing your specific codebase standards across every PR.
+
+### Key features
+
+- **Rules from your instructions** — Extracts review criteria from `CLAUDE.md`, `AGENTS.md`, and other instruction files already in your repo
+- **One rule, one agent** — Each rule gets full context window attention. Dozens of rules, zero degradation
+- **Concern-driven discovery** — Beyond rules, the review probes for bugs, security issues, and architectural problems
+- **Version-controlled rules** — Rules live in `review/` as Markdown, reviewed in PRs like code
+- **Autofix support** — Rules can opt into automatic fixes, applied and verified in-place
+- **Any diff scope** — Branch, commit, staged, unstaged, or full codebase scans
 
 ## Installation
 
@@ -79,7 +88,7 @@ If no config file is found, defaults to `review/`.
 
 Resolution priority: explicit `--rules-dir` CLI flag > `focused-review.json` config file > `review/` default.
 
-Run `/focused-review configure` to create or update the config file interactively.
+Run `/focused-review:review configure` to create or update the config file interactively.
 
 ## Review Rules
 
