@@ -742,13 +742,50 @@ def _generate_concern_prompts(
                 "",
                 "### 4. Review Incrementally",
                 "",
-                "Work through your plan one file group at a time:",
+                "Work through your plan one file group at a time. **You MUST write "
+                "to the report file after EVERY group** — this is critical because "
+                "a hard timeout can kill your process at any moment, and anything "
+                "only in your context is lost forever.",
+                "",
+                "For each file group:",
                 "",
                 "1. Review the group.",
-                "2. **Append** any findings to your report file immediately "
-                f"(`{finding_rel}`).",
+                "2. **Immediately write to your report file** "
+                f"(`{finding_rel}`):",
+                "   - If you found issues → append the findings (using the Output "
+                "Format above).",
+                "   - If you found NO issues → append a group marker: "
+                "`<!-- no findings: [group name] -->`.",
+                "   **Never skip this step.** Every reviewed group must produce a "
+                "write to the report file.",
                 "3. Update your plan file — mark the completed group with `[x]`.",
                 "4. Move to the next group.",
+                "",
+                "**Example of correct incremental output** (what your report file "
+                "should look like after reviewing 3 groups):",
+                "",
+                "```markdown",
+                "### [High] Missing null check in UserService.GetById — returns "
+                "uninitialized object",
+                "",
+                "**File:** `src/Services/UserService.cs:42`",
+                "...(full finding)...",
+                "",
+                "---",
+                "",
+                "<!-- no findings: API Controllers group -->",
+                "",
+                "---",
+                "",
+                "### [Medium] Off-by-one in pagination logic",
+                "",
+                "**File:** `src/Repositories/PagedQuery.cs:87`",
+                "...(full finding)...",
+                "```",
+                "",
+                "**Anti-pattern — do NOT do this:** reviewing all groups first, "
+                "then writing all findings at the end. If the hard timeout fires "
+                "before you write, all your work is lost.",
                 "",
                 "### 5. React to Timer / Finish",
                 "",

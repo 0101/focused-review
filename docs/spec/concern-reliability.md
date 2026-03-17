@@ -85,6 +85,7 @@ Add continuation loop between Phase 1 and Phase 2:
 - **Python stays dumb** — no parsing of reports, no progress detection, no iteration logic. Just subprocess management.
 - **Orchestrator drives continuation** — reads files, detects incomplete status, writes filtered dispatch, re-invokes.
 - **Same prompt for all iterations** — agent discovers continuation state by checking if its files exist.
+- **Stuck detection checks both finding AND plan files** — an agent that finds no issues in a file group still updates its plan file (marking `[x]`). Checking only finding file size caused false-positive stuck detection. Both finding file and plan file sizes are compared between continuation rounds; the agent is stuck only if neither grew.
 
 ## Key Files
 

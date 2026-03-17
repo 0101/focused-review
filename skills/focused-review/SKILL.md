@@ -121,7 +121,7 @@ If `dispatch.json` is empty (no rules matched), only run concerns. If `concern-d
 
 3. **Build continuation dispatch** — From `concern-dispatch.json`, copy only the entries whose (concern, model) pairs are incomplete (exclude failures and complete pairs). Write this filtered list to `.agents/focused-review/concern-dispatch-continue.json` as a JSON array with the same entry structure. Overwrite the file each round.
 
-4. **Record file sizes** — For each incomplete finding file, note its current byte size (used to detect stuck agents in step 6).
+4. **Record file sizes** — For each incomplete entry, note the current byte size of both the **finding file** (`{entry.finding_path}`) and the **plan file** (`.agents/focused-review/scratchpad/{concern}--{model}--plan.md`). Both are used to detect stuck agents in step 6.
 
 5. **Re-invoke** — Run the concern runner with the continuation dispatch:
 
@@ -135,7 +135,7 @@ If `dispatch.json` is empty (no rules matched), only run concerns. If `concern-d
    - If the finding file still doesn't exist → agent failure (same handling as step 1)
    - If the finding file exists, read its **first line** and check the sentinel as in step 1.
      - If complete → **complete**
-     - If incomplete → check whether the file's byte size has **increased** since step 4. If it has not grown → **stuck** (agent made no progress). Treat as complete to avoid infinite loops. If it grew → remains **incomplete** (eligible for another round).
+     - If incomplete → check whether **either** the finding file's byte size **or** the plan file's byte size (`.agents/focused-review/scratchpad/{concern}--{model}--plan.md`) has **increased** since step 4. If **neither** file grew → **stuck** (agent made no progress). Treat as complete to avoid infinite loops. If either grew → remains **incomplete** (eligible for another round).
 
 7. **Repeat** — Go back to step 2. Run at most **3 continuation rounds** total (not counting the initial `run-concerns` invocation). Stop early if all pairs are complete or stuck.
 
