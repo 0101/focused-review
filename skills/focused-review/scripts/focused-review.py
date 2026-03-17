@@ -688,7 +688,12 @@ def _generate_concern_prompts(
                 "",
                 "## Output Destination",
                 "",
-                f"Write your findings report to `{finding_rel}` using the `create` tool.",
+                f"Report file: `{finding_rel}`",
+                f"Plan file: `{plan_rel}`",
+                "",
+                "On a **fresh run** (files don't exist), use the `create` tool to "
+                "write your report. On a **continuation** (files already exist), use "
+                "the `edit` tool to update/append to the existing report.",
                 "Follow the Output Format above exactly.",
                 "If no findings, write a single line: `NO FINDINGS`.",
                 "Do NOT print your findings to stdout — write them to the file.",
@@ -722,6 +727,8 @@ def _generate_concern_prompts(
                 "- **If both exist** → this is a continuation. Read them both, then "
                 "skip to step 4 and continue reviewing only the unchecked file groups "
                 "from your plan.",
+                "- **If only one exists** → treat as a fresh review. Delete the "
+                "surviving file and start from step 3.",
                 "",
                 "### 3. Plan Your Work",
                 "",

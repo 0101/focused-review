@@ -535,6 +535,8 @@ class TestGenerateConcernPrompts:
         assert "## Output Destination" in content
         assert "concern--bugs--opus.md" in content
         assert "create" in content
+        assert "edit" in content
+        assert "continuation" in content.lower()
 
     def test_dispatch_entry_includes_finding_path(self, tmp_path: Path) -> None:
         """Dispatch entries include the finding_path the prompt advertises."""
@@ -572,6 +574,21 @@ class TestGenerateConcernPrompts:
         assert "### 4. Review Incrementally" in content
         assert "### 5. React to Timer / Finish" in content
         assert "### 6. Write Review Status" in content
+
+    def test_working_protocol_handles_partial_state(self, tmp_path: Path) -> None:
+        """Continuation Detection handles the case where only one file exists."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        work_dir = repo / ".agents" / "focused-review"
+        work_dir.mkdir(parents=True)
+
+        concerns = [self._concern("bugs")]
+        changed = ["src/Foo.cs"]
+
+        entries = fr._generate_concern_prompts(concerns, changed, work_dir, repo)
+
+        content = (repo / entries[0]["prompt_path"]).read_text(encoding="utf-8")
+        assert "only one exists" in content.lower()
 
     def test_working_protocol_contains_soft_timeout(self, tmp_path: Path) -> None:
         """Working Protocol injects the soft timeout value into the timer command."""
