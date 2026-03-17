@@ -110,8 +110,8 @@ Code example.
 
 ### Diff Chunking
 
-- Small (≤500 lines): single diff.patch
-- Large (>500 lines): split at file boundaries into chunks (~500 lines each)
+- Small (≤3000 lines): single diff.patch
+- Large (>3000 lines): split at file boundaries into chunks (~3000 lines each)
 - Full codebase (`--scope full`): file lists per rule, no diff
 
 ### Instruction File Discovery Patterns
@@ -160,3 +160,6 @@ $COPILOT_CUSTOM_INSTRUCTIONS_DIRS (env var, colon/semicolon-separated paths)
 - **Generation agents use Sonnet** — better at structured extraction from prose
 - **Windows path compatibility required** — primary dev environment is Windows
 - **Default rules directory is `review/`** at repo root — simple, visible, not hidden; configurable via `focused-review.json` config file (see `docs/spec/configurable-rules-dir.md`)
+- **Self-dismissal suppression in review-runner** — when the agent concludes "no change needed", it outputs `NO VIOLATIONS FOUND` instead of a finding. Prevents false positives from self-dismissing findings.
+- **Rule generation excludes cosmetic-only rules** — refresh guidance skips rules about whitespace, indentation, brace style (enforced by formatters). Rules require Wrong/Correct examples that differ in behavior, not just formatting.
+- **Model selection favors `inherit` for judgment rules** — rules about concurrency, API design, correctness use `inherit` (resolves to user's model). Only purely mechanical/syntactic checks use `haiku`.
