@@ -196,6 +196,67 @@ class TestRunSingleConcernSuccess:
 
         assert findings_dir.is_dir()
 
+    def test_trace_file_written_on_success(self, tmp_path: Path) -> None:
+        """Raw stdout is saved to traces/ for debugging."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        work_dir = _setup_work_dir(repo)
+        entry = _make_dispatch()[0]
+
+        with patch("subprocess.run", return_value=_mock_subprocess_success()):
+            fr._run_single_concern(entry, repo, work_dir)
+
+        trace_path = work_dir / "traces" / "concern--bugs--opus.md"
+        assert trace_path.exists()
+        assert "Bug found" in trace_path.read_text(encoding="utf-8")
+
+    def test_agent_written_file_preferred_over_stdout(self, tmp_path: Path) -> None:
+        """When the agent writes clean findings to the expected path,
+        stdout (with tool-call noise) is only saved to the trace."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        work_dir = _setup_work_dir(repo)
+        entry = _make_dispatch()[0]
+        # Add finding_path to dispatch entry (as the real code does)
+        finding_rel = ".agents/focused-review/findings/concern--bugs--opus.md"
+        entry["finding_path"] = finding_rel
+
+        # Pre-create the file as if the agent wrote it via the create tool
+        finding_path = repo / Path(finding_rel.replace("/", "\\"))
+        finding_path.parent.mkdir(parents=True, exist_ok=True)
+        finding_path.write_text("### [High] Clean finding\nNo noise.", encoding="utf-8")
+
+        noisy_stdout = "● Read file.cs\n● Search grep\n### [High] Bug found\nDetails."
+        with patch("subprocess.run", return_value=_mock_subprocess_success(noisy_stdout)):
+            result = fr._run_single_concern(entry, repo, work_dir)
+
+        assert result["status"] == "success"
+        # The finding file should contain the agent-written content, not stdout
+        content = finding_path.read_text(encoding="utf-8")
+        assert "Clean finding" in content
+        assert "Read file.cs" not in content
+
+        # Trace should contain the noisy stdout
+        trace_path = work_dir / "traces" / "concern--bugs--opus.md"
+        assert "Read file.cs" in trace_path.read_text(encoding="utf-8")
+
+    def test_stdout_fallback_when_agent_does_not_write_file(self, tmp_path: Path) -> None:
+        """When the agent fails to write the file, stdout is used as fallback."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        work_dir = _setup_work_dir(repo)
+        entry = _make_dispatch()[0]
+        entry["finding_path"] = ".agents/focused-review/findings/concern--bugs--opus.md"
+
+        # Agent doesn't write the file — subprocess returns stdout only
+        with patch("subprocess.run", return_value=_mock_subprocess_success()):
+            result = fr._run_single_concern(entry, repo, work_dir)
+
+        assert result["status"] == "success"
+        finding_path = work_dir / "findings" / "concern--bugs--opus.md"
+        assert finding_path.exists()
+        assert "Bug found" in finding_path.read_text(encoding="utf-8")
+
 
 # ---------------------------------------------------------------------------
 # _run_single_concern: error cases

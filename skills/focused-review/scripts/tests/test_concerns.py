@@ -518,6 +518,40 @@ class TestGenerateConcernPrompts:
         for e in entries:
             assert "\\" not in e["prompt_path"]
 
+    def test_prompt_contains_output_destination(self, tmp_path: Path) -> None:
+        """Prompt tells the agent where to write findings."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        work_dir = repo / ".agents" / "focused-review"
+        work_dir.mkdir(parents=True)
+
+        concerns = [self._concern("bugs")]
+        changed = ["src/Foo.cs"]
+
+        entries = fr._generate_concern_prompts(concerns, changed, work_dir, repo)
+
+        prompt_path = repo / entries[0]["prompt_path"]
+        content = prompt_path.read_text(encoding="utf-8")
+        assert "## Output Destination" in content
+        assert "concern--bugs--opus.md" in content
+        assert "create" in content
+
+    def test_dispatch_entry_includes_finding_path(self, tmp_path: Path) -> None:
+        """Dispatch entries include the finding_path the prompt advertises."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        work_dir = repo / ".agents" / "focused-review"
+        work_dir.mkdir(parents=True)
+
+        concerns = [self._concern("bugs")]
+        changed = ["src/Foo.cs"]
+
+        entries = fr._generate_concern_prompts(concerns, changed, work_dir, repo)
+
+        assert "finding_path" in entries[0]
+        assert "concern--bugs--opus.md" in entries[0]["finding_path"]
+        assert "\\" not in entries[0]["finding_path"]
+
 
 # ---------------------------------------------------------------------------
 # _resolve_config: concerns_dir

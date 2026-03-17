@@ -672,6 +672,24 @@ def _generate_concern_prompts(
                     f"Full diff: `{diff_patch_rel}`.",
                 ])
 
+            # Tell the agent where to write its findings so we get
+            # clean output without tool-call traces mixed in.
+            finding_rel = _posix(
+                work_dir / "findings" / f"concern--{concern['name']}--{model}.md",
+                relative_to=repo,
+            )
+            lines.extend([
+                "",
+                "---",
+                "",
+                "## Output Destination",
+                "",
+                f"Write your findings report to `{finding_rel}` using the `create` tool.",
+                "Follow the Output Format above exactly.",
+                "If no findings, write a single line: `NO FINDINGS`.",
+                "Do NOT print your findings to stdout — write them to the file.",
+            ])
+
             prompt_path.write_text("\n".join(lines), encoding="utf-8")
 
             prompt_entries.append({
@@ -679,6 +697,7 @@ def _generate_concern_prompts(
                 "model": model,
                 "priority": str(concern.get("priority", "standard")),
                 "prompt_path": _posix(prompt_path, relative_to=repo),
+                "finding_path": finding_rel,
             })
 
     return prompt_entries
@@ -916,6 +935,19 @@ def _run_single_concern(
     findings_dir.mkdir(parents=True, exist_ok=True)
     finding_path = findings_dir / f"{finding_name}.md"
 
+    # The agent is instructed to write clean findings directly to
+    # finding_path.  If the dispatch entry includes the path the prompt
+    # advertised, use that (it may differ from our default).
+    expected_finding_rel = entry.get("finding_path")
+    if expected_finding_rel:
+        finding_path = repo / Path(expected_finding_rel.replace("/", os.sep))
+        findings_dir = finding_path.parent
+        findings_dir.mkdir(parents=True, exist_ok=True)
+
+    traces_dir = work_dir / "traces"
+    traces_dir.mkdir(parents=True, exist_ok=True)
+    trace_path = traces_dir / f"{finding_name}.md"
+
     if not prompt_abs.is_file():
         return {
             "concern": concern,
@@ -929,7 +961,7 @@ def _run_single_concern(
 
     # Prompt passed as direct CLI argument — copilot CLI does not support
     # stdin piping via ``-p -``.
-    cmd = [COPILOT_CMD, "-p", prompt_content]
+    cmd = [COPILOT_CMD, "-p", prompt_content, "--allow-all-tools"]
     if model != "inherit":
         cmd.extend(["--model", _resolve_model(model)])
 
@@ -947,7 +979,16 @@ def _run_single_concern(
                 errors="replace",
             )
             if result.returncode == 0 and result.stdout.strip():
-                finding_path.write_text(result.stdout, encoding="utf-8")
+                # Always save the raw session trace for debugging.
+                trace_path.write_text(result.stdout, encoding="utf-8")
+
+                # The agent was instructed to write clean findings to
+                # finding_path via the create tool.  If it did, use that
+                # file.  Otherwise fall back to stdout (which contains
+                # tool-call noise but is better than nothing).
+                if not finding_path.is_file():
+                    finding_path.write_text(result.stdout, encoding="utf-8")
+
                 return {
                     "concern": concern,
                     "model": model,
