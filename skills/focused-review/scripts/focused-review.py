@@ -695,7 +695,6 @@ def _generate_concern_prompts(
                 "write your report. On a **continuation** (files already exist), use "
                 "the `edit` tool to update/append to the existing report.",
                 "Follow the Output Format above exactly.",
-                "If no findings, write a single line: `NO FINDINGS`.",
                 "Do NOT print your findings to stdout — write them to the file.",
             ])
 
