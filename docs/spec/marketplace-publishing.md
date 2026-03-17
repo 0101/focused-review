@@ -9,12 +9,12 @@ Enable discovery and installation of the focused-review plugin through both Copi
 - Copilot CLI users can add the marketplace and install the plugin:
   ```
   copilot plugin marketplace add 0101/focused-review
-  copilot plugin install focused-review@0101/focused-review
+  copilot plugin install focused-review@focused-review
   ```
 - Claude Code users can add the marketplace and install the plugin:
   ```
   /plugin marketplace add 0101/focused-review
-  /plugin install focused-review@0101/focused-review
+  /plugin install focused-review@focused-review
   ```
 - The skill loads and functions identically regardless of which tool installed it.
 - A single `marketplace.json` in `.claude-plugin/` serves both tools (Copilot CLI cross-reads `.claude-plugin/`).
