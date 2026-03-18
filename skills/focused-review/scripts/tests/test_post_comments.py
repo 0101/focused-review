@@ -399,7 +399,7 @@ class TestPostCommentsErrors:
         assert exc_info.value.code == 1
 
     def test_wrong_platform(self, tmp_path: Path) -> None:
-        comments_path = _make_comments(tmp_path, platform="ado")
+        comments_path = _make_comments(tmp_path, platform="unsupported")
         args = _make_args(comments_path)
         with pytest.raises(SystemExit) as exc_info:
             fr.post_comments(args)

@@ -9,6 +9,9 @@ import os
 import re
 import subprocess
 import sys
+import urllib.error
+import urllib.parse
+import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path, PurePosixPath
 
@@ -1298,14 +1301,286 @@ def _check_gh_cli() -> None:
         sys.exit(1)
 
 
+def _check_az_cli() -> None:
+    """Verify az CLI is installed and authenticated.
+
+    Exits with code 1 and a message on stderr if the check fails.
+    """
+    try:
+        subprocess.run(
+            ["az", "--version"],
+            capture_output=True, text=True, check=True,
+        )
+    except FileNotFoundError:
+        print(
+            "Error: az CLI not found. Install it from https://aka.ms/installazurecli and run 'az login'.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    except subprocess.CalledProcessError:
+        print("Error: az CLI check failed.", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        subprocess.run(
+            ["az", "account", "show"],
+            capture_output=True, text=True, check=True,
+        )
+    except subprocess.CalledProcessError:
+        print("Error: az CLI not authenticated. Run 'az login' first.", file=sys.stderr)
+        sys.exit(1)
+
+
+def _get_ado_token() -> str:
+    """Get an Azure DevOps bearer token via ``az account get-access-token``.
+
+    Returns the access token string.
+    Exits with code 1 if the token cannot be obtained.
+    """
+    try:
+        result = subprocess.run(
+            [
+                "az", "account", "get-access-token",
+                "--resource", "499b84ac-1321-427f-aa17-267ca6975798",
+                "--query", "accessToken",
+                "-o", "tsv",
+            ],
+            capture_output=True, text=True, check=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        print(f"Error: Failed to get ADO access token: {exc.stderr.strip()}", file=sys.stderr)
+        sys.exit(1)
+
+    token = result.stdout.strip()
+    if not token:
+        print("Error: az returned empty access token.", file=sys.stderr)
+        sys.exit(1)
+    return token
+
+
+def _post_ado_thread(
+    token: str,
+    org: str,
+    project: str,
+    repo: str,
+    pr_id: int,
+    thread_body: dict,
+) -> dict:
+    """Post a single comment thread to an Azure DevOps pull request.
+
+    Returns the parsed JSON response from the API, or an empty dict if the
+    response body is empty or not valid JSON.
+    Raises ``urllib.error.URLError`` or ``urllib.error.HTTPError`` on failure.
+    """
+    enc_org = urllib.parse.quote(org, safe="")
+    enc_project = urllib.parse.quote(project, safe="")
+    enc_repo = urllib.parse.quote(repo, safe="")
+    url = (
+        f"https://dev.azure.com/{enc_org}/{enc_project}/_apis/git/repositories/{enc_repo}"
+        f"/pullRequests/{pr_id}/threads?api-version=7.0"
+    )
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(thread_body).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(req) as resp:
+        raw = resp.read().decode("utf-8")
+        if not raw:
+            return {}
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            return {}
+
+
+def _post_comments_github(
+    data: dict,
+    inline_comments: list[dict],
+    exclude_ids: set[int],
+) -> None:
+    """Post review comments to a GitHub PR via ``gh api``."""
+    owner: str = data["owner"]
+    repo: str = data["repo"]
+    pr_number: int = data["pr_number"]
+    review_body: str = data.get("review_body", "")
+
+    _check_gh_cli()
+
+    gh_comments = [
+        {
+            "path": c["path"],
+            "line": c["line"],
+            "side": "RIGHT",
+            "body": c["body"],
+        }
+        for c in inline_comments
+    ]
+
+    payload: dict = {
+        "body": review_body,
+        "event": "COMMENT",
+    }
+    if gh_comments:
+        payload["comments"] = gh_comments
+
+    endpoint = f"/repos/{owner}/{repo}/pulls/{pr_number}/reviews"
+    cmd = [
+        "gh", "api",
+        "-X", "POST",
+        endpoint,
+        "--input", "-",
+    ]
+
+    try:
+        result = subprocess.run(
+            cmd,
+            input=json.dumps(payload),
+            capture_output=True, text=True, check=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        stderr_msg = exc.stderr.strip()
+        try:
+            err_data = json.loads(exc.stdout)
+            api_msg = err_data.get("message", stderr_msg)
+        except (json.JSONDecodeError, AttributeError):
+            api_msg = stderr_msg
+
+        print(json.dumps({
+            "status": "error",
+            "error": api_msg,
+            "endpoint": endpoint,
+            "comments_attempted": len(gh_comments),
+        }))
+        sys.exit(1)
+
+    try:
+        response = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        response = {}
+
+    review_url = response.get("html_url", "")
+    print(json.dumps({
+        "status": "posted",
+        "review_url": review_url,
+        "comments_posted": len(gh_comments),
+        "comments_excluded": len(exclude_ids),
+    }))
+
+
+def _post_comments_ado(
+    data: dict,
+    inline_comments: list[dict],
+    exclude_ids: set[int],
+) -> None:
+    """Post review comments to an Azure DevOps PR via REST API.
+
+    Posts each comment as a separate thread (ADO has no batch endpoint).
+    The overall review body is posted as a thread without ``threadContext``.
+    Inline comments are posted with ``threadContext`` containing file path and
+    line position.  Continues on failure and collects results.
+    """
+    org: str = data["org"]
+    project: str = data["project"]
+    repo: str = data["repo"]
+    pr_number: int = data["pr_number"]
+    review_body: str = data.get("review_body", "")
+
+    _check_az_cli()
+    token = _get_ado_token()
+
+    posted: int = 0
+    failed: int = 0
+    errors: list[dict] = []
+
+    # Post overall review body as a thread without threadContext ----------------
+    if review_body:
+        overall_thread: dict = {
+            "comments": [{"content": review_body, "commentType": 1}],
+            "status": 1,
+        }
+        try:
+            _post_ado_thread(token, org, project, repo, pr_number, overall_thread)
+            posted += 1
+        except urllib.error.HTTPError as exc:
+            failed += 1
+            body = ""
+            try:
+                body = exc.read().decode("utf-8", errors="replace")
+            except Exception:
+                pass
+            errors.append({
+                "type": "review_body",
+                "error": f"HTTP {exc.code}: {body}",
+            })
+        except urllib.error.URLError as exc:
+            failed += 1
+            errors.append({
+                "type": "review_body",
+                "error": str(exc.reason),
+            })
+
+    # Post inline comments as individual threads with threadContext -------------
+    for comment in inline_comments:
+        thread: dict = {
+            "comments": [{"content": comment["body"], "commentType": 1}],
+            "status": 1,
+            "threadContext": {
+                "filePath": comment["path"],
+                "rightFileStart": {"line": comment["line"], "offset": 1},
+                "rightFileEnd": {"line": comment["line"], "offset": 1},
+            },
+        }
+        try:
+            _post_ado_thread(token, org, project, repo, pr_number, thread)
+            posted += 1
+        except urllib.error.HTTPError as exc:
+            failed += 1
+            body = ""
+            try:
+                body = exc.read().decode("utf-8", errors="replace")
+            except Exception:
+                pass
+            errors.append({
+                "id": comment.get("id"),
+                "path": comment["path"],
+                "line": comment["line"],
+                "error": f"HTTP {exc.code}: {body}",
+            })
+        except urllib.error.URLError as exc:
+            failed += 1
+            errors.append({
+                "id": comment.get("id"),
+                "path": comment["path"],
+                "line": comment["line"],
+                "error": str(exc.reason),
+            })
+
+    result_data: dict = {
+        "status": "posted" if failed == 0 else ("partial" if posted > 0 else "error"),
+        "comments_posted": posted,
+        "comments_failed": failed,
+        "comments_excluded": len(exclude_ids),
+    }
+    if errors:
+        result_data["errors"] = errors
+
+    print(json.dumps(result_data))
+    if posted == 0 and failed > 0:
+        sys.exit(1)
+
+
 def post_comments(args: argparse.Namespace) -> None:
-    """Post review comments to a GitHub PR via ``gh api``.
+    """Post review comments to a PR via ``gh api`` (GitHub) or ADO REST API.
 
     Reads a ``comments.json`` file (written by the skill), optionally excludes
-    specific findings by id, and posts a single PR review containing the
-    overall review body plus inline comments.
+    specific findings by id, and posts review comments to the PR.
 
-    Outputs a result JSON to stdout with the posted review URL and status.
+    Outputs a result JSON to stdout with the posted review status.
     Exits with code 1 on fatal errors.
     """
     comments_path: str = args.comments
@@ -1325,86 +1600,20 @@ def post_comments(args: argparse.Namespace) -> None:
         sys.exit(1)
 
     platform: str = data.get("platform", "")
-    if platform != "github":
-        print(f"Error: post-comments currently supports github only, got: {platform!r}", file=sys.stderr)
+    if platform not in ("github", "ado"):
+        print(f"Error: Unsupported platform: {platform!r}. Use 'github' or 'ado'.", file=sys.stderr)
         sys.exit(1)
 
-    owner: str = data["owner"]
-    repo: str = data["repo"]
-    pr_number: int = data["pr_number"]
-    review_body: str = data.get("review_body", "")
     inline_comments: list[dict] = data.get("inline_comments", [])
 
     # Filter out excluded findings ---------------------------------------------
     if exclude_ids:
         inline_comments = [c for c in inline_comments if c.get("id") not in exclude_ids]
 
-    # Preflight checks ---------------------------------------------------------
-    _check_gh_cli()
-
-    # Build the review payload -------------------------------------------------
-    gh_comments = [
-        {
-            "path": c["path"],
-            "line": c["line"],
-            "side": "RIGHT",
-            "body": c["body"],
-        }
-        for c in inline_comments
-    ]
-
-    payload: dict = {
-        "body": review_body,
-        "event": "COMMENT",
-    }
-    if gh_comments:
-        payload["comments"] = gh_comments
-
-    # Post via gh api ----------------------------------------------------------
-    endpoint = f"/repos/{owner}/{repo}/pulls/{pr_number}/reviews"
-    cmd = [
-        "gh", "api",
-        "-X", "POST",
-        endpoint,
-        "--input", "-",
-    ]
-
-    try:
-        result = subprocess.run(
-            cmd,
-            input=json.dumps(payload),
-            capture_output=True, text=True, check=True,
-        )
-    except subprocess.CalledProcessError as exc:
-        stderr_msg = exc.stderr.strip()
-        # Try to extract useful info from the API error
-        try:
-            err_data = json.loads(exc.stdout)
-            api_msg = err_data.get("message", stderr_msg)
-        except (json.JSONDecodeError, AttributeError):
-            api_msg = stderr_msg
-
-        print(json.dumps({
-            "status": "error",
-            "error": api_msg,
-            "endpoint": endpoint,
-            "comments_attempted": len(gh_comments),
-        }))
-        sys.exit(1)
-
-    # Parse response and output result -----------------------------------------
-    try:
-        response = json.loads(result.stdout)
-    except json.JSONDecodeError:
-        response = {}
-
-    review_url = response.get("html_url", "")
-    print(json.dumps({
-        "status": "posted",
-        "review_url": review_url,
-        "comments_posted": len(gh_comments),
-        "comments_excluded": len(exclude_ids),
-    }))
+    if platform == "github":
+        _post_comments_github(data, inline_comments, exclude_ids)
+    else:
+        _post_comments_ado(data, inline_comments, exclude_ids)
 
 
 # ---------------------------------------------------------------------------
@@ -1530,7 +1739,7 @@ def main() -> int:
     # post-comments subcommand
     post_parser = subparsers.add_parser(
         "post-comments",
-        help="Post review comments to a GitHub PR via gh API",
+        help="Post review comments to a GitHub or ADO PR",
     )
     post_parser.add_argument(
         "--comments",
