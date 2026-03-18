@@ -739,35 +739,38 @@ def _generate_concern_prompts(
                 "them all. Prioritize groups most likely to contain issues for "
                 "your concern type. Put those first.",
                 "",
-                "Your plan is a triage tool, not a post-analysis artifact. Write "
-                "it now, refine understanding as you review each group.",
-                "",
                 "### 3. Review One Group at a Time",
                 "",
                 "For each group in plan order:",
                 "",
-                "1. Read the diff for this group. If needed, read a few nearby "
-                "source files to verify assumptions — but stay focused on this "
-                "group. Do NOT explore the broader codebase.",
-                "2. **Write to your report file immediately after reviewing "
-                "this group** — this is critical because your process can be "
-                "killed at any moment:",
+                "1. Read the diffs for this group. Trace into source files as "
+                "needed — go as deep as the code requires to confirm or rule "
+                "out a bug.",
+                "2. **When you're done reviewing this group**, write to your "
+                "report file before moving on:",
                 f"   - Found issues → append findings to `{finding_rel}` "
                 "(using the Output Format above).",
                 "   - No issues → append: `<!-- no findings: [group name] -->`",
                 "3. Mark the group `[x]` in your plan file.",
                 "4. Move to the next group.",
                 "",
-                "**Keep each group focused.** Read the diff, trace one or two "
-                "key paths into source, write your finding. Do not read the "
-                "entire codebase before reviewing any group.",
-                "",
                 "### 4. React to Timer",
                 "",
-                "- **Timer notification arrives** → finish writing the current "
-                "finding, then go to step 5. This is a hard deadline — do not "
-                "start another group.",
-                "- **All groups reviewed before timer** → go to step 5.",
+                "When the timer notification arrives, **stop investigating "
+                "immediately**. Do not read any more files or run any more "
+                "searches. Your process will be killed shortly after this signal.",
+                "",
+                "Write to disk NOW:",
+                "",
+                "1. Any confirmed findings for the current group (full format).",
+                "2. Any hypothesis you are actively investigating — write it as "
+                "`### [Hypothesis]` with what you've checked so far and what "
+                "remains to verify. This will be picked up in the next session.",
+                "3. Mark the current group `[~]` (partially reviewed) in your "
+                "plan file.",
+                "4. Go to step 5.",
+                "",
+                "If all groups were reviewed before the timer → go to step 5.",
                 "",
                 "### 5. Write Review Status",
                 "",
