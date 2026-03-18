@@ -568,12 +568,11 @@ class TestGenerateConcernPrompts:
 
         content = (repo / entries[0]["prompt_path"]).read_text(encoding="utf-8")
         assert "## Working Protocol" in content
-        assert "### 1. Start a Background Timer" in content
-        assert "### 2. Continuation Detection" in content
-        assert "### 3. Plan Your Work" in content
-        assert "### 4. Review Incrementally" in content
-        assert "### 5. React to Timer / Finish" in content
-        assert "### 6. Write Review Status" in content
+        assert "### 1. Start Timer + Continuation Check" in content
+        assert "### 2. Plan Your Work (BEFORE reading any code)" in content
+        assert "### 3. Review One Group at a Time" in content
+        assert "### 4. React to Timer" in content
+        assert "### 5. Write Review Status" in content
 
     def test_working_protocol_handles_partial_state(self, tmp_path: Path) -> None:
         """Continuation Detection handles the case where only one file exists."""

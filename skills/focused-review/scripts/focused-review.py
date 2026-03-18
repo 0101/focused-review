@@ -50,7 +50,7 @@ DEFAULT_CONCERNS_DIR = "review/concerns/"
 BUILTIN_CONCERNS_DIR = Path(__file__).resolve().parent.parent / "defaults" / "concerns"
 
 COPILOT_CMD = os.environ.get("COPILOT_CMD", "copilot")
-CONCERN_HARD_TIMEOUT_SECS = int(os.environ.get("CONCERN_HARD_TIMEOUT", "900"))
+CONCERN_HARD_TIMEOUT_SECS = int(os.environ.get("CONCERN_HARD_TIMEOUT", "1200"))
 CONCERN_SOFT_TIMEOUT_SECS = int(os.environ.get("CONCERN_SOFT_TIMEOUT", "600"))
 CONCERN_MAX_WORKERS = int(os.environ.get("CONCERN_MAX_WORKERS", "4"))
 
@@ -709,99 +709,73 @@ def _generate_concern_prompts(
                 "",
                 "Follow this protocol exactly for every review invocation.",
                 "",
-                "### 1. Start a Background Timer",
+                "### 1. Start Timer + Continuation Check",
                 "",
-                f"Run this command as an **async, non-detached** shell task:",
+                "Do these two things in your **very first tool call** (parallel):",
                 "",
-                f'```bash\npython -c "import time; time.sleep({soft_timeout})"\n```',
+                "1. Start a background timer:",
+                f'   `python -c "import time; time.sleep({soft_timeout})"` '
+                "(async, non-detached)",
+                "2. Check if your **report file** and **plan file** already exist",
                 "",
-                'The system notification when this completes is your "time\'s up" signal.',
+                "Then:",
                 "",
-                "### 2. Continuation Detection",
+                f"- **Neither exists** → fresh review. Go to step 2.",
+                "- **Both exist** → continuation. Read them, skip to step 3, "
+                "resume from unchecked groups.",
+                "- **Only one exists** → delete it, treat as fresh.",
                 "",
-                f"Check if your **report file** (`{finding_rel}`) and "
-                f"**plan file** (`{plan_rel}`) already exist.",
+                "### 2. Plan Your Work (BEFORE reading any code)",
                 "",
-                "- **If neither exists** → this is a fresh review. Proceed to step 3.",
-                "- **If both exist** → this is a continuation. Read them both, then "
-                "skip to step 4 and continue reviewing only the unchecked file groups "
-                "from your plan.",
-                "- **If only one exists** → treat as a fresh review. Delete the "
-                "surviving file and start from step 3.",
+                "**Your next tool call MUST create the plan file.** Do NOT read "
+                "any diffs or source files first. Use only the Changed Files list "
+                "above to create your plan.",
                 "",
-                "### 3. Plan Your Work",
+                "1. Group the changed files into logical clusters (by feature, "
+                "module, or directory).",
+                "2. Write the plan as a checklist to:",
+                f"   `{plan_rel}`",
+                "3. **Assess scope**: if you have many groups, you may not finish "
+                "them all. Prioritize groups most likely to contain issues for "
+                "your concern type. Put those first.",
                 "",
-                "Group the changed files into logical clusters (by feature, module, or "
-                "directory). Write your plan — a checklist of file groups — to:",
+                "Your plan is a triage tool, not a post-analysis artifact. Write "
+                "it now, refine understanding as you review each group.",
                 "",
-                f"  `{plan_rel}`",
+                "### 3. Review One Group at a Time",
                 "",
-                "Mark each group with `[ ]` (unchecked). You will check them off as "
-                "you complete each group.",
+                "For each group in plan order:",
                 "",
-                "### 4. Review Incrementally",
-                "",
-                "Work through your plan one file group at a time. **You MUST write "
-                "to the report file after EVERY group** — this is critical because "
-                "a hard timeout can kill your process at any moment, and anything "
-                "only in your context is lost forever.",
-                "",
-                "For each file group:",
-                "",
-                "1. Review the group.",
-                "2. **Immediately write to your report file** "
-                f"(`{finding_rel}`):",
-                "   - If you found issues → append the findings (using the Output "
-                "Format above).",
-                "   - If you found NO issues → append a group marker: "
-                "`<!-- no findings: [group name] -->`.",
-                "   **Never skip this step.** Every reviewed group must produce a "
-                "write to the report file.",
-                "3. Update your plan file — mark the completed group with `[x]`.",
+                "1. Read the diff for this group. If needed, read a few nearby "
+                "source files to verify assumptions — but stay focused on this "
+                "group. Do NOT explore the broader codebase.",
+                "2. **Write to your report file immediately after reviewing "
+                "this group** — this is critical because your process can be "
+                "killed at any moment:",
+                f"   - Found issues → append findings to `{finding_rel}` "
+                "(using the Output Format above).",
+                "   - No issues → append: `<!-- no findings: [group name] -->`",
+                "3. Mark the group `[x]` in your plan file.",
                 "4. Move to the next group.",
                 "",
-                "**Example of correct incremental output** (what your report file "
-                "should look like after reviewing 3 groups):",
+                "**Keep each group focused.** Read the diff, trace one or two "
+                "key paths into source, write your finding. Do not read the "
+                "entire codebase before reviewing any group.",
                 "",
-                "```markdown",
-                "### [High] Missing null check in UserService.GetById — returns "
-                "uninitialized object",
+                "### 4. React to Timer",
                 "",
-                "**File:** `src/Services/UserService.cs:42`",
-                "...(full finding)...",
+                "- **Timer notification arrives** → finish writing the current "
+                "finding, then go to step 5. This is a hard deadline — do not "
+                "start another group.",
+                "- **All groups reviewed before timer** → go to step 5.",
                 "",
-                "---",
+                "### 5. Write Review Status",
                 "",
-                "<!-- no findings: API Controllers group -->",
+                "At the **very top** of your report file, write exactly one of:",
                 "",
-                "---",
-                "",
-                "### [Medium] Off-by-one in pagination logic",
-                "",
-                "**File:** `src/Repositories/PagedQuery.cs:87`",
-                "...(full finding)...",
-                "```",
-                "",
-                "**Anti-pattern — do NOT do this:** reviewing all groups first, "
-                "then writing all findings at the end. If the hard timeout fires "
-                "before you write, all your work is lost.",
-                "",
-                "### 5. React to Timer / Finish",
-                "",
-                "- **Timer notification arrives** → finish writing the current finding, "
-                "then go to step 6.",
-                "- **All file groups reviewed before timer** → go to step 6.",
-                "",
-                "### 6. Write Review Status",
-                "",
-                "At the **very top** of your report file, include exactly one of these "
-                "sentinel lines:",
-                "",
-                "- If you reviewed everything:",
-                "  `Review Status: This review is complete.`",
-                "- If file groups remain unchecked in your plan:",
-                "  `Review Status: This review is incomplete, please invoke the agent "
-                "again to continue reviewing.`",
+                "- `Review Status: This review is complete.`",
+                "- `Review Status: This review is incomplete, please invoke the "
+                "agent again to continue reviewing.`",
                 "",
                 "This line MUST be the first line of your report file.",
             ])
@@ -1112,7 +1086,10 @@ def _run_single_concern(
             out["finding_path"] = _posix(finding_path, relative_to=repo)
         return out
 
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as exc:
+        # Save whatever stdout was captured before the kill for debugging.
+        if exc.stdout and exc.stdout.strip():
+            trace_path.write_text(exc.stdout, encoding="utf-8")
         out = {
             "concern": concern,
             "model": model,
