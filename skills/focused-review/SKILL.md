@@ -110,43 +110,49 @@ If `dispatch.json` is empty (no rules matched), only run concerns. If `concern-d
 
 **Concern continuation loop** — After the concern runner completes and rule findings are saved, check whether any concern agents need continuation. If `concern-dispatch.json` was empty (no concerns were dispatched), skip this loop entirely.
 
-1. **Classify each (concern, model) pair** — Read `concern-dispatch.json` to get the list of expected entries. For each entry:
-   - If the finding file at `{entry.finding_path}` does **not exist**: record as an **agent failure**. Note the concern name, model, and trace file path (`.agents/focused-review/traces/concern--{concern}--{model}.md` if it exists). Do NOT retry failures.
-   - If the finding file **exists**: read its **first line**.
-     - Starts with `Review Status: This review is complete.` → **complete**
-     - Starts with `Review Status: This review is incomplete` → **incomplete**
-     - Neither sentinel present → treat as **complete** (legacy format)
+1. **Classify results** — Run:
+   ```bash
+   python {script_path} classify-concerns --dispatch .agents/focused-review/concern-dispatch.json --work-dir .agents/focused-review
+   ```
+   Parse the JSON output. If `incomplete` is empty, proceed to Phase 2. If `failed` is
+   non-empty, note the failures for reporting in step 7.
 
-2. **If no incomplete pairs remain**, proceed to Phase 2. Otherwise continue.
+2. **Measure baseline progress** — Run:
+   ```bash
+   python {script_path} measure-progress --dispatch .agents/focused-review/concern-dispatch.json --work-dir .agents/focused-review
+   ```
+   Save the JSON output as the baseline for stuck-detection.
 
-3. **Build continuation dispatch** — From `concern-dispatch.json`, copy only the entries whose (concern, model) pairs are incomplete (exclude failures and complete pairs). Write this filtered list to `.agents/focused-review/concern-dispatch-continue.json` as a JSON array with the same entry structure. Overwrite the file each round.
+3. **Build continuation dispatch** — Format the incomplete pairs as `concern:model`
+   comma-separated, then run:
+   ```bash
+   python {script_path} build-continuation --dispatch .agents/focused-review/concern-dispatch.json --incomplete "{pairs}" --output .agents/focused-review/concern-dispatch-continue.json
+   ```
 
-4. **Record file sizes** — For each incomplete entry, note the current byte size of both the **finding file** (`{entry.finding_path}`) and the **plan file** (`.agents/focused-review/scratchpad/{concern}--{model}--plan.md`). Both are used to detect stuck agents in step 6.
-
-5. **Re-invoke** — Run the concern runner with the continuation dispatch:
-
+4. **Re-invoke** — Run the concern runner with the continuation dispatch:
    ```bash
    python {script_path} run-concerns --repo . --dispatch .agents/focused-review/concern-dispatch-continue.json
    ```
-
    Use `mode="sync"` with `initial_wait: 300`.
 
-6. **Re-classify** — After the runner completes, re-check only the entries from the continuation dispatch (step 3). For each entry:
-   - If the finding file still doesn't exist → agent failure (same handling as step 1)
-   - If the finding file exists, read its **first line** and check the sentinel as in step 1.
-     - If complete → **complete**
-     - If incomplete → check whether **either** the finding file's byte size **or** the plan file's byte size (`.agents/focused-review/scratchpad/{concern}--{model}--plan.md`) has **increased** since step 4. If **neither** file grew → **stuck** (agent made no progress). Treat as complete to avoid infinite loops. If either grew → remains **incomplete** (eligible for another round).
+5. **Re-classify and detect stuck** — Run `classify-concerns` again on the continuation
+   dispatch, and `measure-progress` again. Compare progress metrics with the baseline
+   from step 2: if an incomplete pair's `finding_size` did not increase AND
+   `plan_checkmarks` did not increase, it is **stuck** — treat as complete to avoid
+   infinite loops. Remove stuck pairs from the incomplete list.
 
-7. **Repeat** — Go back to step 2. Run at most **3 continuation rounds** total (not counting the initial `run-concerns` invocation). Stop early if all pairs are complete or stuck.
+6. **Repeat** — Go back to step 1 (using the continuation dispatch for classification).
+   Run at most **3 continuation rounds** total (not counting the initial `run-concerns`
+   invocation). Stop early if all pairs are complete or stuck.
 
-8. **Report failures** — Before proceeding to Phase 2, if any (concern, model) pairs were agent failures, tell the user:
-
+7. **Report failures** — Before proceeding to Phase 2, if any (concern, model) pairs
+   were agent failures, tell the user:
    ```
    ⚠ {n} concern agent(s) failed to produce findings:
-   - {concern} ({model}): no output file. Trace: .agents/focused-review/traces/concern--{concern}--{model}.md
+   - {concern} ({model}): no output file. Trace: {trace_path}
    ```
-
-   If a trace file doesn't exist for a failure, omit the trace pointer for that entry. These failures are informational — they do not block the review.
+   If no trace_path is provided for a failure, omit the trace pointer. These failures
+   are informational — they do not block the review.
 
 ### Step 3: Phase 2 — Consolidation
 

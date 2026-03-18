@@ -996,6 +996,194 @@ def prepare_review(args: argparse.Namespace) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Continuation helpers
+# ---------------------------------------------------------------------------
+
+_COMPLETE_SENTINEL = "Review Status: This review is complete."
+_INCOMPLETE_SENTINEL = "Review Status: This review is incomplete"
+
+
+def classify_concern_results(
+    dispatch_path: Path,
+    work_dir: Path,
+) -> dict[str, list[dict[str, str]]]:
+    """Classify concern results as complete, incomplete, or failed.
+
+    Returns dict with keys 'complete', 'incomplete', 'failed', each containing
+    a list of entry dicts with at minimum 'concern' and 'model' keys.
+    Failed entries also get a 'trace_path' key if the trace file exists.
+    """
+    entries: list[dict[str, str]] = json.loads(
+        dispatch_path.read_text(encoding="utf-8")
+    )
+    result: dict[str, list[dict[str, str]]] = {
+        "complete": [],
+        "incomplete": [],
+        "failed": [],
+    }
+    for entry in entries:
+        concern = entry["concern"]
+        model = entry["model"]
+        finding_rel = entry.get("finding_path", "")
+        finding_abs = (
+            Path(finding_rel) if Path(finding_rel).is_absolute()
+            else work_dir.parent.parent / finding_rel
+        ) if finding_rel else (
+            work_dir / "findings" / f"concern--{concern}--{model}.md"
+        )
+
+        if not finding_abs.is_file():
+            failed_entry: dict[str, str] = {
+                "concern": concern,
+                "model": model,
+            }
+            trace_candidate = (
+                work_dir / "traces" / f"concern--{concern}--{model}.jsonl"
+            )
+            if trace_candidate.is_file():
+                failed_entry["trace_path"] = str(trace_candidate)
+            result["failed"].append(failed_entry)
+        else:
+            first_line = ""
+            text = finding_abs.read_text(encoding="utf-8")
+            if text:
+                first_line = text.split("\n", 1)[0]
+
+            classified_entry = dict(entry)
+            if first_line.startswith(_INCOMPLETE_SENTINEL):
+                result["incomplete"].append(classified_entry)
+            elif first_line.startswith(_COMPLETE_SENTINEL):
+                result["complete"].append(classified_entry)
+            else:
+                # Legacy format (no sentinel) → treat as complete
+                result["complete"].append(classified_entry)
+
+    return result
+
+
+def build_continuation_dispatch(
+    dispatch_path: Path,
+    incomplete_pairs: list[tuple[str, str]],
+    output_path: Path,
+) -> Path:
+    """Build a filtered dispatch file containing only incomplete (concern, model) pairs.
+
+    Reads the original dispatch, filters to entries matching incomplete_pairs,
+    writes to output_path. Returns output_path.
+    """
+    entries: list[dict[str, str]] = json.loads(
+        dispatch_path.read_text(encoding="utf-8")
+    )
+    pair_set = set(incomplete_pairs)
+    filtered = [
+        e for e in entries
+        if (e["concern"], e["model"]) in pair_set
+    ]
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(filtered, indent=2), encoding="utf-8")
+    return output_path
+
+
+def measure_progress(
+    entries: list[dict[str, str]],
+    work_dir: Path,
+) -> dict[tuple[str, str], dict[str, int]]:
+    """Measure current progress metrics for each (concern, model) pair.
+
+    Returns dict mapping (concern, model) → {
+        'finding_size': int (bytes),
+        'plan_checkmarks': int (count of [x] and [~] in plan file)
+    }
+    """
+    metrics: dict[tuple[str, str], dict[str, int]] = {}
+    for entry in entries:
+        concern = entry["concern"]
+        model = entry["model"]
+        finding_rel = entry.get("finding_path", "")
+        finding_abs = (
+            Path(finding_rel) if Path(finding_rel).is_absolute()
+            else work_dir.parent.parent / finding_rel
+        ) if finding_rel else (
+            work_dir / "findings" / f"concern--{concern}--{model}.md"
+        )
+
+        finding_size = finding_abs.stat().st_size if finding_abs.is_file() else 0
+
+        plan_path = work_dir / "scratchpad" / f"{concern}--{model}--plan.md"
+        plan_checkmarks = 0
+        if plan_path.is_file():
+            plan_text = plan_path.read_text(encoding="utf-8")
+            plan_checkmarks = plan_text.count("[x]") + plan_text.count("[~]")
+
+        metrics[(concern, model)] = {
+            "finding_size": finding_size,
+            "plan_checkmarks": plan_checkmarks,
+        }
+    return metrics
+
+
+def detect_stuck(
+    current: dict[tuple[str, str], dict[str, int]],
+    previous: dict[tuple[str, str], dict[str, int]],
+) -> list[tuple[str, str]]:
+    """Return (concern, model) pairs that made no progress between measurements.
+
+    A pair is stuck if BOTH:
+    - finding_size did not increase
+    - plan_checkmarks did not increase
+    """
+    stuck: list[tuple[str, str]] = []
+    for key, cur in current.items():
+        prev = previous.get(key)
+        if prev is None:
+            # New entry — not stuck
+            continue
+        if (cur["finding_size"] <= prev["finding_size"]
+                and cur["plan_checkmarks"] <= prev["plan_checkmarks"]):
+            stuck.append(key)
+    return stuck
+
+
+# ---------------------------------------------------------------------------
+# Subcommand handlers: continuation
+# ---------------------------------------------------------------------------
+
+
+def _classify_concerns_cmd(args: argparse.Namespace) -> None:
+    """Handler for classify-concerns subcommand."""
+    work_dir = Path(args.work_dir).resolve()
+    dispatch_path = Path(args.dispatch).resolve()
+    result = classify_concern_results(dispatch_path, work_dir)
+    print(json.dumps(result, indent=2))
+
+
+def _build_continuation_cmd(args: argparse.Namespace) -> None:
+    """Handler for build-continuation subcommand."""
+    dispatch_path = Path(args.dispatch).resolve()
+    output_path = Path(args.output).resolve()
+    pairs = [
+        tuple(p.split(":", 1)) for p in args.incomplete.split(",") if p.strip()
+    ]
+    build_continuation_dispatch(dispatch_path, pairs, output_path)
+    print(json.dumps({"written": str(output_path)}))
+
+
+def _measure_progress_cmd(args: argparse.Namespace) -> None:
+    """Handler for measure-progress subcommand."""
+    work_dir = Path(args.work_dir).resolve()
+    dispatch_path = Path(args.dispatch).resolve()
+    entries: list[dict[str, str]] = json.loads(
+        dispatch_path.read_text(encoding="utf-8")
+    )
+    metrics = measure_progress(entries, work_dir)
+    # Convert tuple keys to "concern:model" strings for JSON
+    serializable = {
+        f"{c}:{m}": v for (c, m), v in metrics.items()
+    }
+    print(json.dumps(serializable, indent=2))
+
+
+# ---------------------------------------------------------------------------
 # Subcommand: run-concerns
 # ---------------------------------------------------------------------------
 
@@ -1305,6 +1493,62 @@ def main() -> int:
         help="Path to an alternate dispatch JSON file (default: .agents/focused-review/concern-dispatch.json)",
     )
     concerns_parser.set_defaults(func=run_concerns)
+
+    # classify-concerns subcommand
+    classify_parser = subparsers.add_parser(
+        "classify-concerns",
+        help="Classify concern results as complete, incomplete, or failed",
+    )
+    classify_parser.add_argument(
+        "--dispatch",
+        required=True,
+        help="Path to dispatch JSON file",
+    )
+    classify_parser.add_argument(
+        "--work-dir",
+        default=".agents/focused-review",
+        help="Working directory (default: .agents/focused-review)",
+    )
+    classify_parser.set_defaults(func=_classify_concerns_cmd)
+
+    # build-continuation subcommand
+    build_cont_parser = subparsers.add_parser(
+        "build-continuation",
+        help="Build a filtered dispatch file for incomplete concern/model pairs",
+    )
+    build_cont_parser.add_argument(
+        "--dispatch",
+        required=True,
+        help="Path to original dispatch JSON file",
+    )
+    build_cont_parser.add_argument(
+        "--incomplete",
+        required=True,
+        help="Comma-separated concern:model pairs (e.g. bugs:opus,security:gemini)",
+    )
+    build_cont_parser.add_argument(
+        "--output",
+        required=True,
+        help="Output path for filtered dispatch JSON",
+    )
+    build_cont_parser.set_defaults(func=_build_continuation_cmd)
+
+    # measure-progress subcommand
+    progress_parser = subparsers.add_parser(
+        "measure-progress",
+        help="Measure progress metrics for concern/model pairs",
+    )
+    progress_parser.add_argument(
+        "--dispatch",
+        required=True,
+        help="Path to dispatch JSON file",
+    )
+    progress_parser.add_argument(
+        "--work-dir",
+        default=".agents/focused-review",
+        help="Working directory (default: .agents/focused-review)",
+    )
+    progress_parser.set_defaults(func=_measure_progress_cmd)
 
     args = parser.parse_args()
     args.func(args)
