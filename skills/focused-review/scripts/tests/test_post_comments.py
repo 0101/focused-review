@@ -375,6 +375,60 @@ class TestPostCommentsExclude:
         result = json.loads(mock_print.call_args[0][0])
         assert result["comments_posted"] == 1
 
+    @patch("subprocess.run")
+    def test_exclude_trailing_comma(
+        self, mock_run: MagicMock, tmp_path: Path
+    ) -> None:
+        """Trailing comma should be tolerated — empty segment is ignored."""
+        comments_path = _make_comments(
+            tmp_path, inline_comments=SAMPLE_INLINE_COMMENTS
+        )
+        mock_run.side_effect = [
+            MagicMock(returncode=0),
+            MagicMock(returncode=0),
+            _gh_api_success(),
+        ]
+
+        args = _make_args(comments_path, exclude="1,2,")
+        with patch("builtins.print") as mock_print:
+            fr.post_comments(args)
+
+        result = json.loads(mock_print.call_args[0][0])
+        assert result["comments_posted"] == 1
+        assert result["comments_excluded"] == 2
+
+    def test_exclude_non_integer_value(self, tmp_path: Path) -> None:
+        """Non-integer --exclude value should exit with code 1."""
+        comments_path = _make_comments(
+            tmp_path, inline_comments=SAMPLE_INLINE_COMMENTS
+        )
+        args = _make_args(comments_path, exclude="1,abc,3")
+        with pytest.raises(SystemExit) as exc_info:
+            fr.post_comments(args)
+        assert exc_info.value.code == 1
+
+    @patch("subprocess.run")
+    def test_exclude_leading_and_double_commas(
+        self, mock_run: MagicMock, tmp_path: Path
+    ) -> None:
+        """Leading comma and double commas should be tolerated."""
+        comments_path = _make_comments(
+            tmp_path, inline_comments=SAMPLE_INLINE_COMMENTS
+        )
+        mock_run.side_effect = [
+            MagicMock(returncode=0),
+            MagicMock(returncode=0),
+            _gh_api_success(),
+        ]
+
+        args = _make_args(comments_path, exclude=",1,,3,")
+        with patch("builtins.print") as mock_print:
+            fr.post_comments(args)
+
+        result = json.loads(mock_print.call_args[0][0])
+        assert result["comments_posted"] == 1
+        assert result["comments_excluded"] == 2
+
 
 # ---------------------------------------------------------------------------
 # post_comments — error handling

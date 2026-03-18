@@ -1530,7 +1530,7 @@ def _post_comments_ado(
             "comments": [{"content": comment["body"], "commentType": 1}],
             "status": 1,
             "threadContext": {
-                "filePath": comment["path"],
+                "filePath": "/" + comment["path"].lstrip("/"),
                 "rightFileStart": {"line": comment["line"], "offset": 1},
                 "rightFileEnd": {"line": comment["line"], "offset": 1},
             },
@@ -1586,7 +1586,14 @@ def post_comments(args: argparse.Namespace) -> None:
     comments_path: str = args.comments
     exclude_ids: set[int] = set()
     if args.exclude:
-        exclude_ids = {int(x.strip()) for x in args.exclude.split(",")}
+        try:
+            exclude_ids = {int(x.strip()) for x in args.exclude.split(",") if x.strip()}
+        except ValueError:
+            print(
+                "Error: --exclude must be comma-separated integers (e.g. '1,2,3')",
+                file=sys.stderr,
+            )
+            sys.exit(1)
 
     # Load comments.json -------------------------------------------------------
     try:

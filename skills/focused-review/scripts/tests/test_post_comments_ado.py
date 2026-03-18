@@ -309,7 +309,7 @@ class TestPostCommentsAdoSuccess:
 
         assert "threadContext" in body
         tc = body["threadContext"]
-        assert tc["filePath"] == "src/foo.cs"
+        assert tc["filePath"] == "/src/foo.cs"
         assert tc["rightFileStart"] == {"line": 42, "offset": 1}
         assert tc["rightFileEnd"] == {"line": 42, "offset": 1}
         assert body["status"] == 1
@@ -654,8 +654,8 @@ class TestPostCommentsAdoSequentialOrder:
 
         # Second call: first inline comment
         body1 = json.loads(calls[1][0][0].data.decode("utf-8"))
-        assert body1["threadContext"]["filePath"] == "src/foo.cs"
+        assert body1["threadContext"]["filePath"] == "/src/foo.cs"
 
         # Third call: second inline comment
         body2 = json.loads(calls[2][0][0].data.decode("utf-8"))
-        assert body2["threadContext"]["filePath"] == "src/bar.cs"
+        assert body2["threadContext"]["filePath"] == "/src/bar.cs"
