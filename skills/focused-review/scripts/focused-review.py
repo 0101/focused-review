@@ -1172,7 +1172,10 @@ def parse_pr_url(args: argparse.Namespace) -> None:
         }))
         return
 
-    print(f"Error: Unrecognised PR URL: {url}", file=sys.stderr)
+    print(
+        json.dumps({"error": f"Unrecognised PR URL: {url}"}),
+        file=sys.stderr,
+    )
     sys.exit(1)
 
 
@@ -1199,13 +1202,26 @@ def get_pr_user(args: argparse.Namespace) -> None:
                 capture_output=True, text=True, check=True,
             ).stdout.strip()
         except FileNotFoundError:
-            print("Error: gh CLI not found. Install it and run 'gh auth login'.", file=sys.stderr)
+            print(
+                json.dumps({"error": "gh CLI not found. Install it and run 'gh auth login'."}),
+                file=sys.stderr,
+            )
             sys.exit(1)
         except subprocess.CalledProcessError as exc:
-            print(f"Error: gh CLI failed: {exc.stderr.strip()}", file=sys.stderr)
+            print(
+                json.dumps({"error": f"gh CLI failed: {exc.stderr.strip()}"}),
+                file=sys.stderr,
+            )
             sys.exit(1)
 
-        user = json.loads(raw)
+        try:
+            user = json.loads(raw)
+        except (json.JSONDecodeError, ValueError):
+            print(
+                json.dumps({"error": "gh api /user returned invalid JSON"}),
+                file=sys.stderr,
+            )
+            sys.exit(1)
         username = user.get("login", "")
         display_name = user.get("name") or username
 
@@ -1221,16 +1237,174 @@ def get_pr_user(args: argparse.Namespace) -> None:
                 capture_output=True, text=True, check=True,
             ).stdout.strip()
         except FileNotFoundError:
-            print("Error: az CLI not found. Install it and run 'az login'.", file=sys.stderr)
+            print(
+                json.dumps({"error": "az CLI not found. Install it and run 'az login'."}),
+                file=sys.stderr,
+            )
             sys.exit(1)
         except subprocess.CalledProcessError as exc:
-            print(f"Error: az CLI failed: {exc.stderr.strip()}", file=sys.stderr)
+            print(
+                json.dumps({"error": f"az CLI failed: {exc.stderr.strip()}"}),
+                file=sys.stderr,
+            )
             sys.exit(1)
 
+        # NOTE: ADO returns the user's display name (e.g. "John Doe"), not a
+        # unique login ID.  This is a platform limitation — az CLI does not
+        # expose unique identifiers for the signed-in user.  The display name
+        # is used for both username and display_name in the attribution footer.
         print(json.dumps({
             "username": display_name,
             "display_name": display_name,
         }))
+
+    else:
+        print(
+            json.dumps({"error": f"Unsupported platform: {platform}"}),
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
+# Post comments to PR
+# ---------------------------------------------------------------------------
+
+
+def _check_gh_cli() -> None:
+    """Verify gh CLI is installed and authenticated.
+
+    Exits with code 1 and a message on stderr if the check fails.
+    """
+    try:
+        subprocess.run(
+            ["gh", "--version"],
+            capture_output=True, text=True, check=True,
+        )
+    except FileNotFoundError:
+        print("Error: gh CLI not found. Install it from https://cli.github.com/ and run 'gh auth login'.", file=sys.stderr)
+        sys.exit(1)
+    except subprocess.CalledProcessError:
+        print("Error: gh CLI check failed.", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        subprocess.run(
+            ["gh", "auth", "status"],
+            capture_output=True, text=True, check=True,
+        )
+    except subprocess.CalledProcessError:
+        print("Error: gh CLI not authenticated. Run 'gh auth login' first.", file=sys.stderr)
+        sys.exit(1)
+
+
+def post_comments(args: argparse.Namespace) -> None:
+    """Post review comments to a GitHub PR via ``gh api``.
+
+    Reads a ``comments.json`` file (written by the skill), optionally excludes
+    specific findings by id, and posts a single PR review containing the
+    overall review body plus inline comments.
+
+    Outputs a result JSON to stdout with the posted review URL and status.
+    Exits with code 1 on fatal errors.
+    """
+    comments_path: str = args.comments
+    exclude_ids: set[int] = set()
+    if args.exclude:
+        exclude_ids = {int(x.strip()) for x in args.exclude.split(",")}
+
+    # Load comments.json -------------------------------------------------------
+    try:
+        with open(comments_path, encoding="utf-8") as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        print(f"Error: Comments file not found: {comments_path}", file=sys.stderr)
+        sys.exit(1)
+    except json.JSONDecodeError as exc:
+        print(f"Error: Invalid JSON in {comments_path}: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    platform: str = data.get("platform", "")
+    if platform != "github":
+        print(f"Error: post-comments currently supports github only, got: {platform!r}", file=sys.stderr)
+        sys.exit(1)
+
+    owner: str = data["owner"]
+    repo: str = data["repo"]
+    pr_number: int = data["pr_number"]
+    review_body: str = data.get("review_body", "")
+    inline_comments: list[dict] = data.get("inline_comments", [])
+
+    # Filter out excluded findings ---------------------------------------------
+    if exclude_ids:
+        inline_comments = [c for c in inline_comments if c.get("id") not in exclude_ids]
+
+    # Preflight checks ---------------------------------------------------------
+    _check_gh_cli()
+
+    # Build the review payload -------------------------------------------------
+    gh_comments = [
+        {
+            "path": c["path"],
+            "line": c["line"],
+            "side": "RIGHT",
+            "body": c["body"],
+        }
+        for c in inline_comments
+    ]
+
+    payload: dict = {
+        "body": review_body,
+        "event": "COMMENT",
+    }
+    if gh_comments:
+        payload["comments"] = gh_comments
+
+    # Post via gh api ----------------------------------------------------------
+    endpoint = f"/repos/{owner}/{repo}/pulls/{pr_number}/reviews"
+    cmd = [
+        "gh", "api",
+        "-X", "POST",
+        endpoint,
+        "--input", "-",
+    ]
+
+    try:
+        result = subprocess.run(
+            cmd,
+            input=json.dumps(payload),
+            capture_output=True, text=True, check=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        stderr_msg = exc.stderr.strip()
+        # Try to extract useful info from the API error
+        try:
+            err_data = json.loads(exc.stdout)
+            api_msg = err_data.get("message", stderr_msg)
+        except (json.JSONDecodeError, AttributeError):
+            api_msg = stderr_msg
+
+        print(json.dumps({
+            "status": "error",
+            "error": api_msg,
+            "endpoint": endpoint,
+            "comments_attempted": len(gh_comments),
+        }))
+        sys.exit(1)
+
+    # Parse response and output result -----------------------------------------
+    try:
+        response = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        response = {}
+
+    review_url = response.get("html_url", "")
+    print(json.dumps({
+        "status": "posted",
+        "review_url": review_url,
+        "comments_posted": len(gh_comments),
+        "comments_excluded": len(exclude_ids),
+    }))
 
 
 # ---------------------------------------------------------------------------
@@ -1352,6 +1526,23 @@ def main() -> int:
         help="Platform to query (github or ado)",
     )
     pr_user_parser.set_defaults(func=get_pr_user)
+
+    # post-comments subcommand
+    post_parser = subparsers.add_parser(
+        "post-comments",
+        help="Post review comments to a GitHub PR via gh API",
+    )
+    post_parser.add_argument(
+        "--comments",
+        required=True,
+        help="Path to comments.json file",
+    )
+    post_parser.add_argument(
+        "--exclude",
+        default=None,
+        help="Comma-separated list of finding IDs to exclude",
+    )
+    post_parser.set_defaults(func=post_comments)
 
     args = parser.parse_args()
     args.func(args)

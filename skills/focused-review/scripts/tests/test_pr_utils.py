@@ -199,6 +199,27 @@ class TestGetPrUserGitHub:
             fr.get_pr_user(args)
         assert exc_info.value.code == 1
 
+    @patch("subprocess.run")
+    def test_gh_api_returns_invalid_json(self, mock_run: MagicMock) -> None:
+        """gh api /user returns non-JSON (e.g. HTML error page)."""
+        mock_run.return_value = MagicMock(
+            stdout="<html>Server Error</html>\n",
+            returncode=0,
+        )
+        args = argparse.Namespace(platform="github")
+        with pytest.raises(SystemExit) as exc_info:
+            fr.get_pr_user(args)
+        assert exc_info.value.code == 1
+
+    @patch("subprocess.run")
+    def test_gh_api_returns_empty_output(self, mock_run: MagicMock) -> None:
+        """gh api /user returns empty string."""
+        mock_run.return_value = MagicMock(stdout="", returncode=0)
+        args = argparse.Namespace(platform="github")
+        with pytest.raises(SystemExit) as exc_info:
+            fr.get_pr_user(args)
+        assert exc_info.value.code == 1
+
 
 class TestGetPrUserAdo:
     """Test ADO user identity retrieval."""
@@ -228,6 +249,27 @@ class TestGetPrUserAdo:
     )
     def test_az_auth_failure(self, mock_run: MagicMock) -> None:
         args = argparse.Namespace(platform="ado")
+        with pytest.raises(SystemExit) as exc_info:
+            fr.get_pr_user(args)
+        assert exc_info.value.code == 1
+
+    @patch("subprocess.run")
+    def test_empty_display_name(self, mock_run: MagicMock) -> None:
+        """az account show returns empty string for user name."""
+        mock_run.return_value = MagicMock(stdout="\n", returncode=0)
+        args = argparse.Namespace(platform="ado")
+        with patch("builtins.print") as mock_print:
+            fr.get_pr_user(args)
+        result = json.loads(mock_print.call_args[0][0])
+        assert result["username"] == ""
+        assert result["display_name"] == ""
+
+
+class TestGetPrUserUnknownPlatform:
+    """Test unknown platform produces an error."""
+
+    def test_unknown_platform_exits(self) -> None:
+        args = argparse.Namespace(platform="bitbucket")
         with pytest.raises(SystemExit) as exc_info:
             fr.get_pr_user(args)
         assert exc_info.value.code == 1
