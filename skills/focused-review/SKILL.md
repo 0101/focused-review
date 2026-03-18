@@ -90,15 +90,17 @@ Where:
 - `chunk` line: include as `{chunk_index} of {total_chunks}` when both are present. Omit the line entirely when `chunk_index` is null.
 - `autofix` line: include as `true` or `false` from the dispatch entry.
 
-Use the model specified in each entry's `model` field. If `"inherit"`, do NOT pass a model parameter to the Task tool.
+Use the model specified in each entry's `model` field. If `"inherit"`, pass **your own model** (the model you are currently running as — check your system prompt's `<model>` tag for the `id` attribute) to the Task tool's `model` parameter. This ensures subagents run at the same quality level as the orchestrator.
 
 **Concern runner** — If `concern-dispatch.json` has entries, start the Python concern runner **in the same response** as the rule agent launches. Use the `powershell` tool with `mode="sync"` and `initial_wait: 300` (concern sessions can take several minutes):
 
 ```bash
-python {script_path} run-concerns --repo .
+python {script_path} run-concerns --repo . --inherit-model {your_model_id}
 ```
 
-This launches `copilot -p` sessions in parallel via ThreadPoolExecutor. It reads `concern-dispatch.json` internally and writes findings to `.agents/focused-review/findings/concern--{name}--{model}.md`.
+Where `{your_model_id}` is the same model ID you used for `inherit` rules above (from your system prompt's `<model>` tag `id` attribute).
+
+This launches `copilot -p` sessions in parallel via ThreadPoolExecutor.It reads `concern-dispatch.json` internally and writes findings to `.agents/focused-review/findings/concern--{name}--{model}.md`.
 
 **Batching**: Max 12 Task agents per message. Include the `run-concerns` bash command in the same response as the first batch of rule agents. If rules need multiple batches (>12 entries), the concern runner is already running from the first batch — subsequent batches only contain rule agents.
 

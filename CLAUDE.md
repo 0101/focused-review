@@ -20,7 +20,7 @@ Copilot CLI plugin / Claude Code skill that runs parallel code reviews using com
 - **Refresh is explicit**: user runs `/focused-review refresh` — no auto-generation
 - **Python for deterministic work** (discovery, diffing, chunking); **LLM for semantic work** (rule extraction, comparison, agent-assisted discovery)
 - **Three-layer discovery**: Python globs (fast first pass) → configured `sources` in `focused-review.json` → agent-assisted exploration (reads candidates and filters to code review guidance)
-- **Review agents default to Haiku** (fast, cheap); **generation agents use Sonnet** (better at structured extraction)
+- **Review agents inherit the orchestrator's model by default** — rules can override to `haiku` or `sonnet` for mechanical checks; **generation agents use Sonnet** (better at structured extraction)
 - **Windows path compatibility required** — primary dev environment is Windows
 
 ## Python (`focused-review.py`)

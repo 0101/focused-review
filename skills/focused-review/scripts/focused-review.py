@@ -913,6 +913,7 @@ def _run_single_concern(
     *,
     timeout: int = CONCERN_TIMEOUT_SECS,
     retries: int = CONCERN_RETRIES,
+    inherit_model: str = "",
 ) -> dict[str, object]:
     """Launch one ``copilot -p`` session for a (concern × model) pair.
 
@@ -962,7 +963,10 @@ def _run_single_concern(
     # Prompt passed as direct CLI argument — copilot CLI does not support
     # stdin piping via ``-p -``.
     cmd = [COPILOT_CMD, "-p", prompt_content, "--allow-all-tools"]
-    if model != "inherit":
+    if model == "inherit":
+        if inherit_model:
+            cmd.extend(["--model", inherit_model])
+    else:
         cmd.extend(["--model", _resolve_model(model)])
 
     last_error = ""
@@ -1066,6 +1070,7 @@ def run_concerns(args: argparse.Namespace) -> None:
     max_workers = args.max_workers
     timeout = args.timeout
     retries = args.retries
+    inherit_model = getattr(args, "inherit_model", "") or ""
 
     results: list[dict[str, object]] = []
 
@@ -1078,6 +1083,7 @@ def run_concerns(args: argparse.Namespace) -> None:
                 work_dir,
                 timeout=timeout,
                 retries=retries,
+                inherit_model=inherit_model,
             ): entry
             for entry in entries
         }
@@ -1213,6 +1219,11 @@ def main() -> int:
         type=int,
         default=CONCERN_RETRIES,
         help=f"Number of retries per failed session (default: {CONCERN_RETRIES})",
+    )
+    concerns_parser.add_argument(
+        "--inherit-model",
+        default="",
+        help="Model ID to use for entries with model='inherit' (the orchestrator's own model)",
     )
     concerns_parser.set_defaults(func=run_concerns)
 
