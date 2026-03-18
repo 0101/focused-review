@@ -1122,6 +1122,118 @@ def run_concerns(args: argparse.Namespace) -> None:
 
 
 # ---------------------------------------------------------------------------
+# PR URL parsing
+# ---------------------------------------------------------------------------
+
+# GitHub: https://github.com/{owner}/{repo}/pull/{number}[/files|/commits|...]
+_GITHUB_PR_RE = re.compile(
+    r"^https://github\.com/(?P<owner>[^/]+)/(?P<repo>[^/]+)/pull/(?P<pr_number>\d+)"
+)
+
+# ADO new-style: https://dev.azure.com/{org}/{project}/_git/{repo}/pullrequest/{id}
+_ADO_NEW_RE = re.compile(
+    r"^https://dev\.azure\.com/(?P<org>[^/]+)/(?P<project>[^/]+)/_git/(?P<repo>[^/]+)/pullrequest/(?P<pr_number>\d+)"
+)
+
+# ADO old-style: https://{org}.visualstudio.com/{project}/_git/{repo}/pullrequest/{id}
+_ADO_OLD_RE = re.compile(
+    r"^https://(?P<org>[^.]+)\.visualstudio\.com/(?P<project>[^/]+)/_git/(?P<repo>[^/]+)/pullrequest/(?P<pr_number>\d+)"
+)
+
+
+def parse_pr_url(args: argparse.Namespace) -> None:
+    """Parse a GitHub or Azure DevOps PR URL and output JSON to stdout.
+
+    Extracts platform, owner/org, project (ADO only), repo, and pr_number.
+    Exits with code 1 and an error message on stderr for unrecognised URLs.
+    """
+    url: str = args.url.strip()
+
+    m = _GITHUB_PR_RE.match(url)
+    if m:
+        print(json.dumps({
+            "platform": "github",
+            "owner": m.group("owner"),
+            "repo": m.group("repo"),
+            "pr_number": int(m.group("pr_number")),
+        }))
+        return
+
+    m = _ADO_NEW_RE.match(url)
+    if not m:
+        m = _ADO_OLD_RE.match(url)
+    if m:
+        print(json.dumps({
+            "platform": "ado",
+            "org": m.group("org"),
+            "project": m.group("project"),
+            "repo": m.group("repo"),
+            "pr_number": int(m.group("pr_number")),
+        }))
+        return
+
+    print(f"Error: Unrecognised PR URL: {url}", file=sys.stderr)
+    sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
+# PR user identity
+# ---------------------------------------------------------------------------
+
+
+def get_pr_user(args: argparse.Namespace) -> None:
+    """Get the authenticated user identity for GitHub or ADO.
+
+    GitHub: calls ``gh api /user`` and parses login + name from JSON.
+    ADO: calls ``az account show --query user.name -o tsv``.
+
+    Outputs JSON with ``username`` and ``display_name`` to stdout.
+    Exits with code 1 on failure.
+    """
+    platform: str = args.platform
+
+    if platform == "github":
+        try:
+            raw = subprocess.run(
+                ["gh", "api", "/user"],
+                capture_output=True, text=True, check=True,
+            ).stdout.strip()
+        except FileNotFoundError:
+            print("Error: gh CLI not found. Install it and run 'gh auth login'.", file=sys.stderr)
+            sys.exit(1)
+        except subprocess.CalledProcessError as exc:
+            print(f"Error: gh CLI failed: {exc.stderr.strip()}", file=sys.stderr)
+            sys.exit(1)
+
+        user = json.loads(raw)
+        username = user.get("login", "")
+        display_name = user.get("name") or username
+
+        print(json.dumps({
+            "username": username,
+            "display_name": display_name,
+        }))
+
+    elif platform == "ado":
+        try:
+            display_name = subprocess.run(
+                ["az", "account", "show", "--query", "user.name", "-o", "tsv"],
+                capture_output=True, text=True, check=True,
+            ).stdout.strip()
+        except FileNotFoundError:
+            print("Error: az CLI not found. Install it and run 'az login'.", file=sys.stderr)
+            sys.exit(1)
+        except subprocess.CalledProcessError as exc:
+            print(f"Error: az CLI failed: {exc.stderr.strip()}", file=sys.stderr)
+            sys.exit(1)
+
+        print(json.dumps({
+            "username": display_name,
+            "display_name": display_name,
+        }))
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -1215,6 +1327,31 @@ def main() -> int:
         help=f"Number of retries per failed session (default: {CONCERN_RETRIES})",
     )
     concerns_parser.set_defaults(func=run_concerns)
+
+    # parse-pr-url subcommand
+    pr_url_parser = subparsers.add_parser(
+        "parse-pr-url",
+        help="Parse a GitHub or Azure DevOps PR URL into structured JSON",
+    )
+    pr_url_parser.add_argument(
+        "--url",
+        required=True,
+        help="The PR URL to parse",
+    )
+    pr_url_parser.set_defaults(func=parse_pr_url)
+
+    # get-pr-user subcommand
+    pr_user_parser = subparsers.add_parser(
+        "get-pr-user",
+        help="Get the authenticated user identity for GitHub or ADO",
+    )
+    pr_user_parser.add_argument(
+        "--platform",
+        required=True,
+        choices=["github", "ado"],
+        help="Platform to query (github or ado)",
+    )
+    pr_user_parser.set_defaults(func=get_pr_user)
 
     args = parser.parse_args()
     args.func(args)
