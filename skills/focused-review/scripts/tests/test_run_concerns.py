@@ -206,7 +206,7 @@ class TestRunSingleConcernSuccess:
         with patch("subprocess.run", return_value=_mock_subprocess_success()):
             fr._run_single_concern(entry, repo, work_dir)
 
-        trace_path = work_dir / "traces" / "concern--bugs--opus.md"
+        trace_path = work_dir / "traces" / "concern--bugs--opus.jsonl"
         assert trace_path.exists()
         assert "Bug found" in trace_path.read_text(encoding="utf-8")
 
@@ -237,7 +237,7 @@ class TestRunSingleConcernSuccess:
         assert "Read file.cs" not in content
 
         # Trace should contain the noisy stdout
-        trace_path = work_dir / "traces" / "concern--bugs--opus.md"
+        trace_path = work_dir / "traces" / "concern--bugs--opus.jsonl"
         assert "Read file.cs" in trace_path.read_text(encoding="utf-8")
 
     def test_stdout_fallback_when_agent_does_not_write_file(self, tmp_path: Path) -> None:

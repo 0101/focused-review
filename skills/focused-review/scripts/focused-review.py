@@ -1038,7 +1038,7 @@ def _run_single_concern(
 
     traces_dir = work_dir / "traces"
     traces_dir.mkdir(parents=True, exist_ok=True)
-    trace_path = traces_dir / f"{finding_name}.md"
+    trace_path = traces_dir / f"{finding_name}.jsonl"
 
     if not prompt_abs.is_file():
         return {
@@ -1052,7 +1052,8 @@ def _run_single_concern(
 
     # Prompt passed as direct CLI argument — copilot CLI does not support
     # stdin piping via ``-p -``.
-    cmd = [COPILOT_CMD, "-p", prompt_content, "--allow-all-tools"]
+    cmd = [COPILOT_CMD, "-p", prompt_content, "--allow-all-tools",
+           "--output-format", "json"]
     if model != "inherit":
         cmd.extend(["--model", _resolve_model(model)])
 
