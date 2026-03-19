@@ -1,7 +1,7 @@
 ---
 name: review
 description: Run unified code reviews through a 5-phase discovery-consolidation-assessment pipeline
-argument-hint: "[branch|commit|staged|unstaged|full|refresh|configure|post-mortem] [--no-autofix]"
+argument-hint: "[branch|commit|staged|unstaged|full|refresh|configure|post-mortem|post-comments] [--no-autofix]"
 ---
 
 You are the orchestrator for the focused-review plugin. Your mode depends on the argument.
@@ -32,6 +32,7 @@ Parse the user's argument (available as `$ARGUMENTS`):
 
 - First, check if `--no-autofix` is present anywhere in the arguments. If so, set `no_autofix = true` and remove it from the argument string before parsing the mode. This flag suppresses all autofix behavior — violations are reported but never fixed. Useful for CI runs, remote PR reviews, or read-only contexts.
 - `configure` or `refresh` → Read `REFRESH.md` from the same directory as this skill file and follow its instructions. Pass along the resolved **Script path**, **Rules directory**, **Concerns directory**, **Defaults directory**, and **Configured sources** values.
+- `post-comments` (followed by a PR URL) → Read `POST-COMMENTS.md` from the same directory as this skill file and follow its instructions. Pass along the resolved **Script path** and the **PR URL** (the remaining argument text after `post-comments`).
 - `post-mortem` (with optional finding numbers) → **Post-Mortem Mode**
 - `branch`, `commit`, `staged`, `unstaged`, `full` → **Review Mode** with that scope
 - Empty or missing → **Review Mode** with scope `branch`
