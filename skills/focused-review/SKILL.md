@@ -81,12 +81,14 @@ chunk_path: {chunk_path_value}
 scope: {entry.scope}
 chunk: {chunk_index} of {total_chunks}
 autofix: {entry.autofix}
+findings_path: .agents/focused-review/findings/rule--{rule-name}.md
 ```
 
 Where:
 - `chunk_path_value` is `entry.chunk_path` when not null, or `.agents/focused-review/changed-files.txt` when null (for `full` scope)
 - `chunk` line: include as `{chunk_index} of {total_chunks}` when both are present. Omit the line entirely when `chunk_index` is null.
 - `autofix` line: include as `true` or `false` from the dispatch entry.
+- `{rule-name}` is the rule filename without extension from `rule_path` (e.g. `null-handling` from `review/rules/null-handling.md`). When a rule has multiple chunks, append the chunk index: `rule--null-handling--2.md`.
 
 Use the model specified in each entry's `model` field. If `"inherit"`, pass **your own model** (the model you are currently running as — check your system prompt's `<model>` tag for the `id` attribute) to the Task tool's `model` parameter. This ensures subagents run at the same quality level as the orchestrator.
 
@@ -106,7 +108,7 @@ Wait for all rule agents and the concern runner to complete before proceeding.
 
 If `dispatch.json` is empty (no rules matched), only run concerns. If `concern-dispatch.json` is empty (no concerns), only run rules.
 
-**Save rule findings to disk** — After all rule agents complete, save each agent's output to `.agents/focused-review/findings/rule--{rule-name}.md` (where `{rule-name}` is the rule filename without extension from `rule_path`). Create the `findings/` directory if needed. If a rule ran against multiple chunks, concatenate all chunk outputs into one file. The concern runner already writes its findings to disk — this step ensures rule findings are also available for Phase 2.
+Rule agents write their findings directly to `.agents/focused-review/findings/`. The concern runner does the same. After all agents complete, verify the findings directory has the expected files before proceeding.
 
 ### Step 3: Phase 2 — Consolidation
 

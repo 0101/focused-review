@@ -14,6 +14,7 @@ Parse these named fields from your prompt:
 - `scope` — what is being reviewed: `branch`, `commit`, `staged`, `unstaged`, or `full`
 - `chunk` — (optional) which chunk this is out of the total, e.g. "2 of 5". If absent, the diff fits in a single chunk.
 - `autofix` — whether to fix violations directly (`true`) or report them (`false`)
+- `findings_path` — file path where you must write your findings (e.g. `.agents/focused-review/findings/rule--null-handling.md`)
 
 Read both files yourself using the view tool.
 
@@ -103,3 +104,4 @@ NO VIOLATIONS FOUND
 - **Added lines only.** In diff patches, only flag code on `+` lines (new/modified code). Never flag removed lines.
 - **Explore freely, report on the diff.** Use `grep` and `view` to read source files, check callers, understand context — the broader codebase is available to you and exploring it leads to better analysis. However, your `VIOLATION` output must only target code on `+` lines in the diff. If you discover a significant pre-existing issue outside the diff while exploring, you may report it as a `PRE-EXISTING` finding (see output format below).
 - **Read files yourself.** Always use `view` to read the rule and chunk files. Never assume content.
+- **Write findings to disk.** After producing your output, write it to `findings_path` using the `create` tool. This is required — the orchestrator reads findings from disk, not from your response. Create parent directories if needed.
