@@ -1,5 +1,5 @@
 ---
-name: review
+name: focused-review
 description: Run unified code reviews through a 5-phase discovery-consolidation-assessment pipeline
 argument-hint: "[branch|commit|staged|unstaged|full|refresh|configure|post-mortem|post-comments] [--no-autofix]"
 ---
