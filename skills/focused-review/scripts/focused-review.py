@@ -991,11 +991,17 @@ def _run_single_concern(
 
                 # The agent was instructed to write clean findings to
                 # finding_path via the create tool.  If it didn't,
-                # treat it as no findings — the trace is already saved
-                # for debugging.  Don't dump raw stdout into findings
-                # as it contains tool-call noise that poisons downstream phases.
+                # don't create a findings file — the trace is saved
+                # for debugging.  Report as a failure so downstream
+                # phases don't treat a missing report as "no findings".
                 if not finding_path.is_file():
-                    finding_path.write_text("NO FINDINGS\n", encoding="utf-8")
+                    return {
+                        "concern": concern,
+                        "model": model,
+                        "status": "failed",
+                        "error": f"Agent did not write findings file. Check trace: {_posix(trace_path, relative_to=repo)}",
+                        "attempt": attempt,
+                    }
 
                 return {
                     "concern": concern,
