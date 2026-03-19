@@ -1,7 +1,7 @@
 ---
 name: review
 description: Run unified code reviews through a 5-phase discovery-consolidation-assessment pipeline
-argument-hint: "[branch|commit|staged|unstaged|full|refresh|configure|post-mortem] [--no-autofix]"
+argument-hint: "[branch|commit|staged|unstaged|full|refresh|configure|post-mortem|post-comments] [--no-autofix]"
 ---
 
 You are the orchestrator for the focused-review plugin. Your mode depends on the argument.
@@ -32,6 +32,7 @@ Parse the user's argument (available as `$ARGUMENTS`):
 
 - First, check if `--no-autofix` is present anywhere in the arguments. If so, set `no_autofix = true` and remove it from the argument string before parsing the mode. This flag suppresses all autofix behavior — violations are reported but never fixed. Useful for CI runs, remote PR reviews, or read-only contexts.
 - `configure` or `refresh` → Read `REFRESH.md` from the same directory as this skill file and follow its instructions. Pass along the resolved **Script path**, **Rules directory**, **Concerns directory**, **Defaults directory**, and **Configured sources** values.
+- `post-comments` (followed by a PR URL) → Read `POST-COMMENTS.md` from the same directory as this skill file and follow its instructions. Pass along the resolved **Script path** and the **PR URL** (the remaining argument text after `post-comments`).
 - `post-mortem` (with optional finding numbers) → **Post-Mortem Mode**
 - `branch`, `commit`, `staged`, `unstaged`, `full` → **Review Mode** with that scope
 - Empty or missing → **Review Mode** with scope `branch`
@@ -44,9 +45,11 @@ Five-phase pipeline: Discovery → Consolidation → Assessment → (Rebuttal) �
 
 Rules and concerns run in parallel during Phase 1. Subsequent phases validate and refine findings.
 
+**Your role is orchestration only.** You do not generate diffs, discover files, read rules, or review code yourself. You run the Python script, then dispatch subagents using its output. Every step below either runs the Python script or launches subagents — if you find yourself running `git` commands or reading source files, you are doing it wrong.
+
 ### Step 1: Prepare dispatch
 
-Determine the scope from the argument (default `branch`), then run the Python helper:
+Run the Python helper with the scope from the argument (default `branch`):
 
 ```bash
 python {script_path} prepare-review --repo . --scope {scope} {no_autofix_flag}
@@ -54,12 +57,7 @@ python {script_path} prepare-review --repo . --scope {scope} {no_autofix_flag}
 
 Where `{no_autofix_flag}` is `--no-autofix` if `no_autofix` was set during mode selection, or omitted entirely otherwise.
 
-The script will:
-- Read all rule files from `{rules_dir}` and write `dispatch.json`
-- Read concern files from `{concerns_dir}` (or built-in defaults) and write `concern-dispatch.json`
-- Generate per-file diffs to `.agents/focused-review/diffs/`
-- Generate concern prompt files to `.agents/focused-review/prompts/`
-- Print a JSON summary to stdout with `agents`, `concern_prompts`, `concerns_total`, `scope`, etc.
+The script handles everything: git operations, diff generation, file discovery, rule matching, and chunking. It writes all artifacts to `.agents/focused-review/` and prints a JSON summary to stdout.
 
 **Error handling:**
 - **No rules found**: Tell the user "No review rules found — collecting rules from instruction files" and automatically proceed with Refresh Mode in `REFRESH.md` (same directory as this skill file). After refresh completes, re-run this prepare-review step with the same scope.
@@ -71,7 +69,7 @@ Parse the JSON summary. If `agents` is 0 and `concern_prompts` is 0, tell the us
 
 Read `.agents/focused-review/dispatch.json` (rule dispatch) and `.agents/focused-review/concern-dispatch.json` (concern dispatch).
 
-**IMPORTANT: Do NOT read the rule files, diff/chunk files, or concern prompt files yourself.** The subagents and concern runner read their own files.
+**IMPORTANT: Do NOT read the rule files, diff/chunk files, or concern prompt files yourself.** The subagents and concern runner read their own files. You only need the metadata from dispatch.json (paths, model, autofix flag) to construct the agent prompts — never `view` or `cat` the rule or diff content.
 
 **In a single response**, launch all of the following in parallel:
 
@@ -83,22 +81,26 @@ chunk_path: {chunk_path_value}
 scope: {entry.scope}
 chunk: {chunk_index} of {total_chunks}
 autofix: {entry.autofix}
+findings_path: .agents/focused-review/findings/rule--{rule-name}.md
 ```
 
 Where:
 - `chunk_path_value` is `entry.chunk_path` when not null, or `.agents/focused-review/changed-files.txt` when null (for `full` scope)
 - `chunk` line: include as `{chunk_index} of {total_chunks}` when both are present. Omit the line entirely when `chunk_index` is null.
 - `autofix` line: include as `true` or `false` from the dispatch entry.
+- `{rule-name}` is the rule filename without extension from `rule_path` (e.g. `null-handling` from `review/rules/null-handling.md`). When a rule has multiple chunks, append the chunk index: `rule--null-handling--2.md`.
 
-Use the model specified in each entry's `model` field. If `"inherit"`, do NOT pass a model parameter to the Task tool.
+Use the model specified in each entry's `model` field. If `"inherit"`, pass **your own model** (the model you are currently running as — check your system prompt's `<model>` tag for the `id` attribute) to the Task tool's `model` parameter. This ensures subagents run at the same quality level as the orchestrator.
 
 **Concern runner** — If `concern-dispatch.json` has entries, start the Python concern runner **in the same response** as the rule agent launches. Use the `powershell` tool with `mode="sync"` and `initial_wait: 300` (concern sessions can take several minutes):
 
 ```bash
-python {script_path} run-concerns --repo .
+python {script_path} run-concerns --repo . --inherit-model {your_model_id}
 ```
 
-This launches `copilot -p` sessions in parallel via ThreadPoolExecutor. It reads `concern-dispatch.json` internally and writes findings to `.agents/focused-review/findings/concern--{name}--{model}.md`.
+Where `{your_model_id}` is the same model ID you used for `inherit` rules above (from your system prompt's `<model>` tag `id` attribute).
+
+This launches `copilot -p` sessions in parallel via ThreadPoolExecutor.It reads `concern-dispatch.json` internally and writes findings to `.agents/focused-review/findings/concern--{name}--{model}.md`.
 
 **Batching**: Max 12 Task agents per message. Include the `run-concerns` bash command in the same response as the first batch of rule agents. If rules need multiple batches (>12 entries), the concern runner is already running from the first batch — subsequent batches only contain rule agents.
 
@@ -106,7 +108,7 @@ Wait for all rule agents and the concern runner to complete before proceeding.
 
 If `dispatch.json` is empty (no rules matched), only run concerns. If `concern-dispatch.json` is empty (no concerns), only run rules.
 
-**Save rule findings to disk** — After all rule agents complete, save each agent's output to `.agents/focused-review/findings/rule--{rule-name}.md` (where `{rule-name}` is the rule filename without extension from `rule_path`). Create the `findings/` directory if needed. If a rule ran against multiple chunks, concatenate all chunk outputs into one file. The concern runner already writes its findings to disk — this step ensures rule findings are also available for Phase 2.
+Rule agents write their findings directly to `.agents/focused-review/findings/`. The concern runner does the same. After all agents complete, verify the findings directory has the expected files before proceeding.
 
 **Concern continuation loop** — After the concern runner completes and rule findings are saved, check whether any concern agents need continuation. If `concern-dispatch.json` was empty (no concerns were dispatched), skip this loop entirely.
 
@@ -296,10 +298,13 @@ Use these values from earlier steps:
 - Within each file group, order findings by line number.
 - If a verdict section has no findings, omit it entirely.
 
-After writing the report, tell the user:
+**REQUIRED — User-facing summary.** After writing the report file, you MUST present ALL of the following to the user. Do not skip any item.
 
-1. Pipeline summary: `{rule_count} rules + {concern_count} concerns → {consolidated_count} unique findings → {confirmed + questionable} actionable`
-2. A numbered summary table of confirmed and questionable findings:
+1. **Report path** — the full path to the written report file (e.g. `.agents/focused-review/review-20260319-143200.md`). State this first so the user can open it immediately.
+
+2. **Pipeline summary** — one-line stats: `{rule_count} rules + {concern_count} concerns → {consolidated_count} unique findings → {confirmed + questionable} actionable`
+
+3. **Findings table** — a numbered table of ALL confirmed and questionable findings. Every row MUST include the `Found by` column showing which rules/concerns discovered it:
 
 ```
 | # | Verdict | Severity | Found by | File | Issue |
@@ -308,9 +313,7 @@ After writing the report, tell the user:
 | 2 | ❓ | Medium | rule:null-handling | path:88 | Brief description... |
 ```
 
-The `Found by` column lists each source that discovered the finding. Use short labels: `bugs(opus,gemini)` for concern:bugs found by opus and gemini, `arch(codex)` for concern:architecture found by codex, `rule:name` for rules. Group models under the same concern name for readability.
-
-3. The path to the full report file
+The `Found by` column lists each source that discovered the finding. Use short labels: `bugs(opus,gemini)` for concern:bugs found by opus and gemini, `arch(codex)` for concern:architecture found by codex, `rule:name` for rules. Group models under the same concern name for readability. This column is essential — it tells the user which review lens caught each issue, enabling post-mortem tuning.
 
 ---
 

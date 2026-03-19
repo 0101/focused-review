@@ -471,8 +471,8 @@ class TestRunSingleConcernTimeout:
         # Shorthand "opus" should be resolved to full CLI name
         assert cmd[model_idx + 1] == "claude-opus-4.6"
 
-    def test_inherit_model_not_in_command(self, tmp_path: Path) -> None:
-        """When model is 'inherit', --model flag is omitted."""
+    def test_inherit_model_without_flag_omits_model(self, tmp_path: Path) -> None:
+        """When model is 'inherit' and no inherit_model provided, --model is omitted."""
         repo = tmp_path / "repo"
         repo.mkdir()
         entries = [
@@ -492,6 +492,33 @@ class TestRunSingleConcernTimeout:
         call_args = mock_run.call_args
         cmd = call_args[0][0]
         assert "--model" not in cmd
+
+    def test_inherit_model_with_flag_uses_orchestrator_model(self, tmp_path: Path) -> None:
+        """When model is 'inherit' and inherit_model is provided, that model is used."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        entries = [
+            {
+                "concern": "bugs",
+                "model": "inherit",
+                "priority": "high",
+                "prompt_path": ".agents/focused-review/prompts/bugs--inherit.md",
+            }
+        ]
+        work_dir = _setup_work_dir(repo, entries)
+
+        mock_run = MagicMock(return_value=_mock_subprocess_success())
+        with patch("subprocess.run", mock_run):
+            fr._run_single_concern(
+                entries[0], repo, work_dir,
+                inherit_model="claude-opus-4.6",
+            )
+
+        call_args = mock_run.call_args
+        cmd = call_args[0][0]
+        assert "--model" in cmd
+        model_idx = cmd.index("--model")
+        assert cmd[model_idx + 1] == "claude-opus-4.6"
 
 
 # ---------------------------------------------------------------------------

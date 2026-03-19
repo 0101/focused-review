@@ -19,8 +19,9 @@ Copilot CLI plugin / Claude Code skill that runs parallel code reviews using com
 - **Rules are version-controlled**: live in `review/` (configurable via `focused-review.json`), reviewed in PRs like code
 - **Refresh is explicit**: user runs `/focused-review refresh` — no auto-generation
 - **Python for deterministic work** (discovery, diffing, chunking); **LLM for semantic work** (rule extraction, comparison, agent-assisted discovery)
+- **No Python parsing of LLM output**: Python must not parse or interpret LLM-generated content (review reports, findings, assessed.md). The LLM that produced it can read it natively — use skill/agent orchestration for anything that requires understanding report content. Python handles only structured/mechanical tasks (git, file I/O, config, CLI tool invocation).
 - **Three-layer discovery**: Python globs (fast first pass) → configured `sources` in `focused-review.json` → agent-assisted exploration (reads candidates and filters to code review guidance)
-- **Review agents default to Haiku** (fast, cheap); **generation agents use Sonnet** (better at structured extraction)
+- **Review agents inherit the orchestrator's model by default** — rules can override to `haiku` or `sonnet` for mechanical checks; **generation agents use Sonnet** (better at structured extraction)
 - **Windows path compatibility required** — primary dev environment is Windows
 
 ## Python (`focused-review.py`)
@@ -49,6 +50,16 @@ source: "CLAUDE.md"
 ## Wrong
 ## Correct
 ```
+
+## Release Workflow
+
+Any change to plugin files (skills, agents, scripts, defaults, plugin.json) requires a version bump and publish:
+
+1. Bump the `version` field in **both** `plugin.json` and `.claude-plugin/marketplace.json`
+2. Commit, push to `main`
+3. Run `copilot plugin marketplace publish` to update the marketplace
+
+Do this for every change — users install from the marketplace and won't get updates until a new version is published.
 
 ## Working With This Codebase
 

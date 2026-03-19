@@ -157,7 +157,7 @@ $COPILOT_CUSTOM_INSTRUCTIONS_DIRS (env var, colon/semicolon-separated paths)
 - **Python for deterministic, performance-critical work** — discovery, diff splitting, dispatch planning
 - **LLM for everything requiring understanding** — rule extraction, comparison against existing rules, contradiction detection, file writing during refresh
 - **Rules default to report-only (no autofix)** — user must explicitly confirm auto-fix candidates during refresh
-- **Review agents use Haiku by default** — fast and cheap for single-criterion checking
+- **Review agents inherit the orchestrator's model by default** — rules can override to `haiku` or `sonnet` for mechanical checks
 - **Generation agents use Sonnet** — better at structured extraction from prose
 - **Windows path compatibility required** — primary dev environment is Windows
 - **Default rules directory is `review/`** at repo root — simple, visible, not hidden; configurable via `focused-review.json` config file (see `docs/spec/configurable-rules-dir.md`)
