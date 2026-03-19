@@ -51,6 +51,16 @@ source: "CLAUDE.md"
 ## Correct
 ```
 
+## Release Workflow
+
+Any change to plugin files (skills, agents, scripts, defaults, plugin.json) requires a version bump and publish:
+
+1. Bump the `version` field in **both** `plugin.json` and `.claude-plugin/marketplace.json`
+2. Commit, push to `main`
+3. Run `copilot plugin marketplace publish` to update the marketplace
+
+Do this for every change — users install from the marketplace and won't get updates until a new version is published.
+
 ## Working With This Codebase
 
 - Spec: `docs/spec/focused-review.md`

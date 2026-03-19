@@ -45,9 +45,11 @@ Five-phase pipeline: Discovery → Consolidation → Assessment → (Rebuttal) �
 
 Rules and concerns run in parallel during Phase 1. Subsequent phases validate and refine findings.
 
+**Your role is orchestration only.** You do not generate diffs, discover files, read rules, or review code yourself. You run the Python script, then dispatch subagents using its output. Every step below either runs the Python script or launches subagents — if you find yourself running `git` commands or reading source files, you are doing it wrong.
+
 ### Step 1: Prepare dispatch
 
-Determine the scope from the argument (default `branch`), then run the Python helper:
+Run the Python helper with the scope from the argument (default `branch`):
 
 ```bash
 python {script_path} prepare-review --repo . --scope {scope} {no_autofix_flag}
@@ -55,12 +57,7 @@ python {script_path} prepare-review --repo . --scope {scope} {no_autofix_flag}
 
 Where `{no_autofix_flag}` is `--no-autofix` if `no_autofix` was set during mode selection, or omitted entirely otherwise.
 
-The script will:
-- Read all rule files from `{rules_dir}` and write `dispatch.json`
-- Read concern files from `{concerns_dir}` (or built-in defaults) and write `concern-dispatch.json`
-- Generate per-file diffs to `.agents/focused-review/diffs/`
-- Generate concern prompt files to `.agents/focused-review/prompts/`
-- Print a JSON summary to stdout with `agents`, `concern_prompts`, `concerns_total`, `scope`, etc.
+The script handles everything: git operations, diff generation, file discovery, rule matching, and chunking. It writes all artifacts to `.agents/focused-review/` and prints a JSON summary to stdout.
 
 **Error handling:**
 - **No rules found**: Tell the user "No review rules found — collecting rules from instruction files" and automatically proceed with Refresh Mode in `REFRESH.md` (same directory as this skill file). After refresh completes, re-run this prepare-review step with the same scope.
@@ -72,7 +69,7 @@ Parse the JSON summary. If `agents` is 0 and `concern_prompts` is 0, tell the us
 
 Read `.agents/focused-review/dispatch.json` (rule dispatch) and `.agents/focused-review/concern-dispatch.json` (concern dispatch).
 
-**IMPORTANT: Do NOT read the rule files, diff/chunk files, or concern prompt files yourself.** The subagents and concern runner read their own files.
+**IMPORTANT: Do NOT read the rule files, diff/chunk files, or concern prompt files yourself.** The subagents and concern runner read their own files. You only need the metadata from dispatch.json (paths, model, autofix flag) to construct the agent prompts — never `view` or `cat` the rule or diff content.
 
 **In a single response**, launch all of the following in parallel:
 
@@ -253,10 +250,13 @@ Use these values from earlier steps:
 - Within each file group, order findings by line number.
 - If a verdict section has no findings, omit it entirely.
 
-After writing the report, tell the user:
+**REQUIRED — User-facing summary.** After writing the report file, you MUST present ALL of the following to the user. Do not skip any item.
 
-1. Pipeline summary: `{rule_count} rules + {concern_count} concerns → {consolidated_count} unique findings → {confirmed + questionable} actionable`
-2. A numbered summary table of confirmed and questionable findings:
+1. **Report path** — the full path to the written report file (e.g. `.agents/focused-review/review-20260319-143200.md`). State this first so the user can open it immediately.
+
+2. **Pipeline summary** — one-line stats: `{rule_count} rules + {concern_count} concerns → {consolidated_count} unique findings → {confirmed + questionable} actionable`
+
+3. **Findings table** — a numbered table of ALL confirmed and questionable findings. Every row MUST include the `Found by` column showing which rules/concerns discovered it:
 
 ```
 | # | Verdict | Severity | Found by | File | Issue |
@@ -265,9 +265,7 @@ After writing the report, tell the user:
 | 2 | ❓ | Medium | rule:null-handling | path:88 | Brief description... |
 ```
 
-The `Found by` column lists each source that discovered the finding. Use short labels: `bugs(opus,gemini)` for concern:bugs found by opus and gemini, `arch(codex)` for concern:architecture found by codex, `rule:name` for rules. Group models under the same concern name for readability.
-
-3. The path to the full report file
+The `Found by` column lists each source that discovered the finding. Use short labels: `bugs(opus,gemini)` for concern:bugs found by opus and gemini, `arch(codex)` for concern:architecture found by codex, `rule:name` for rules. Group models under the same concern name for readability. This column is essential — it tells the user which review lens caught each issue, enabling post-mortem tuning.
 
 ---
 
