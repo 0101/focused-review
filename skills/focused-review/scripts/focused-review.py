@@ -990,11 +990,12 @@ def _run_single_concern(
                 trace_path.write_text(result.stdout, encoding="utf-8")
 
                 # The agent was instructed to write clean findings to
-                # finding_path via the create tool.  If it did, use that
-                # file.  Otherwise fall back to stdout (which contains
-                # tool-call noise but is better than nothing).
+                # finding_path via the create tool.  If it didn't,
+                # treat it as no findings — the trace is already saved
+                # for debugging.  Don't dump raw stdout into findings
+                # as it contains tool-call noise that poisons downstream phases.
                 if not finding_path.is_file():
-                    finding_path.write_text(result.stdout, encoding="utf-8")
+                    finding_path.write_text("NO FINDINGS\n", encoding="utf-8")
 
                 return {
                     "concern": concern,

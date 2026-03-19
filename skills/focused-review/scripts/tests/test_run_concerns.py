@@ -159,7 +159,8 @@ class TestRunSingleConcernSuccess:
 
         finding_path = work_dir / "findings" / "concern--bugs--opus.md"
         assert finding_path.exists()
-        assert "Bug found" in finding_path.read_text(encoding="utf-8")
+        # Agent didn't write the file itself, so runner writes NO FINDINGS
+        assert "NO FINDINGS" in finding_path.read_text(encoding="utf-8")
 
     def test_finding_filename_format(self, tmp_path: Path) -> None:
         """Finding filename is concern--{name}--{model}.md."""
@@ -241,7 +242,7 @@ class TestRunSingleConcernSuccess:
         assert "Read file.cs" in trace_path.read_text(encoding="utf-8")
 
     def test_stdout_fallback_when_agent_does_not_write_file(self, tmp_path: Path) -> None:
-        """When the agent fails to write the file, stdout is used as fallback."""
+        """When the agent fails to write the file, NO FINDINGS placeholder is written."""
         repo = tmp_path / "repo"
         repo.mkdir()
         work_dir = _setup_work_dir(repo)
@@ -255,7 +256,7 @@ class TestRunSingleConcernSuccess:
         assert result["status"] == "success"
         finding_path = work_dir / "findings" / "concern--bugs--opus.md"
         assert finding_path.exists()
-        assert "Bug found" in finding_path.read_text(encoding="utf-8")
+        assert "NO FINDINGS" in finding_path.read_text(encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -683,7 +684,8 @@ class TestRunConcerns:
 
         finding_path = repo / ".agents" / "focused-review" / "findings" / "concern--bugs--opus.md"
         assert finding_path.exists()
-        assert "Race condition" in finding_path.read_text(encoding="utf-8")
+        # Agent didn't write the file (mock doesn't create it), so NO FINDINGS placeholder
+        assert "NO FINDINGS" in finding_path.read_text(encoding="utf-8")
 
     def test_progress_on_stderr(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
