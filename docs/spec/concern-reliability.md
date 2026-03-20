@@ -35,11 +35,12 @@ The **same prompt** is used for all invocations. The agent detects it's a contin
 
 After the initial `run-concerns` completes (Phase 1), the orchestrator:
 
-1. Reads each `concern--{name}--{model}.md` finding file individually
-2. Identifies which specific (concern, model) pairs are incomplete
-3. Writes `concern-dispatch-continue.json` with only those entries
-4. Runs `python run-concerns --repo . --dispatch {continue_dispatch}`
-5. Repeats up to 3 total rounds; stops early if all complete or a file didn't grow (stuck agent)
+1. Uses `list-findings` to get file existence/size metadata (opaque — Python does not read content)
+2. Reads each existing finding file itself and checks the first-line sentinel
+3. Identifies which (concern, model) pairs are incomplete
+4. Uses `build-continuation` to write a filtered dispatch with only those entries
+5. Runs `python run-concerns --repo . --dispatch {continue_dispatch}`
+6. Repeats up to 3 continuation rounds; stops early if all complete or timed out
 
 ### Timeout Architecture
 
@@ -56,6 +57,8 @@ After the initial `run-concerns` completes (Phase 1), the orchestrator:
 
 1. **Simplify `_run_single_concern`** — remove retry loop. Single subprocess launch with hard timeout. Return process-level status only (exited/timed_out + file existence). No output parsing. Update timeout defaults: `CONCERN_HARD_TIMEOUT=900`, remove `CONCERN_RETRIES`. Also add scratchpad directory creation to `prepare-review` (`.agents/focused-review/scratchpad/`).
 2. **Add `--dispatch {path}` arg** to `run-concerns` — reads alternate dispatch file for continuation rounds instead of default `concern-dispatch.json`.
+3. **Add `list-findings` subcommand** — returns opaque file metadata (existence, size, path) per dispatch entry. Does NOT read file content.
+4. **Add `build-continuation` subcommand** — accepts `--incomplete` pairs list, filters dispatch to matching entries, writes output file.
 
 ### Prompt Changes (`_generate_concern_prompts`)
 
@@ -73,19 +76,21 @@ Add `## Working Approach` section to each default concern (bugs.md, security.md,
 ### SKILL.md Changes
 
 Add continuation loop between Phase 1 and Phase 2:
-- Read finding files after `run-concerns` completes
-- Check each for incomplete sentinel (per concern × model)
-- Write filtered dispatch, re-invoke, check progress
-- Proceed to Phase 2 when all complete or max rounds reached
+- Run `list-findings` after `run-concerns` completes (gets opaque metadata)
+- Read each finding file and check first-line sentinel for incomplete status
+- Use `build-continuation` to write filtered dispatch for incomplete pairs
+- Re-invoke `run-concerns` with continuation dispatch
+- Repeat up to 3 rounds; stop early if all complete
+- Proceed to Phase 2 when done
 
 ## Decisions
 
 - **Agent owns its timer** — starts background sleep as first action; system notification is the signal. No Python threading.
 - **Agent owns its work organization** — decides file groupings and review order. No programmatic chunking of concern scope.
-- **Python stays dumb** — no parsing of reports, no progress detection, no iteration logic. Just subprocess management.
-- **Orchestrator drives continuation** — reads files, detects incomplete status, writes filtered dispatch, re-invokes.
+- **Python stays dumb** — no parsing of reports, no progress detection, no iteration logic. Just subprocess management and opaque file metadata (existence, size).
+- **Orchestrator drives continuation** — reads finding files, checks sentinel, writes filtered dispatch via `build-continuation`, re-invokes.
 - **Same prompt for all iterations** — agent discovers continuation state by checking if its files exist.
-- **Stuck detection checks both finding AND plan files** — an agent that finds no issues in a file group still updates its plan file (marking `[x]`). Checking only finding file size caused false-positive stuck detection. Both finding file and plan file sizes are compared between continuation rounds; the agent is stuck only if neither grew.
+- **No stuck detection** — agents either finish (complete sentinel), run out of time (incomplete sentinel or hard timeout), or error. Max 3 continuation rounds is the only safety cap.
 
 ## Key Files
 

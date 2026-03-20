@@ -1070,67 +1070,6 @@ def build_continuation_dispatch(
     return output_path
 
 
-def measure_progress(
-    entries: list[dict[str, str]],
-    work_dir: Path,
-    repo: Path,
-) -> dict[tuple[str, str], dict[str, int]]:
-    """Measure current progress metrics for each (concern, model) pair.
-
-    Returns dict mapping (concern, model) → {
-        'finding_size': int (bytes),
-        'plan_checkmarks': int (count of [x] and [~] in plan file)
-    }
-    """
-    metrics: dict[tuple[str, str], dict[str, int]] = {}
-    for entry in entries:
-        concern = entry["concern"]
-        model = entry["model"]
-        finding_rel = entry.get("finding_path", "")
-        finding_abs = (
-            Path(finding_rel) if Path(finding_rel).is_absolute()
-            else repo / finding_rel
-        ) if finding_rel else (
-            work_dir / "findings" / f"concern--{concern}--{model}.md"
-        )
-
-        finding_size = finding_abs.stat().st_size if finding_abs.is_file() else 0
-
-        plan_path = work_dir / "scratchpad" / f"{concern}--{model}--plan.md"
-        plan_checkmarks = 0
-        if plan_path.is_file():
-            plan_text = plan_path.read_text(encoding="utf-8")
-            plan_checkmarks = plan_text.count("[x]") + plan_text.count("[~]")
-
-        metrics[(concern, model)] = {
-            "finding_size": finding_size,
-            "plan_checkmarks": plan_checkmarks,
-        }
-    return metrics
-
-
-def detect_stuck(
-    current: dict[tuple[str, str], dict[str, int]],
-    previous: dict[tuple[str, str], dict[str, int]],
-) -> list[tuple[str, str]]:
-    """Return (concern, model) pairs that made no progress between measurements.
-
-    A pair is stuck if BOTH:
-    - finding_size did not increase
-    - plan_checkmarks did not increase
-    """
-    stuck: list[tuple[str, str]] = []
-    for key, cur in current.items():
-        prev = previous.get(key)
-        if prev is None:
-            # New entry — not stuck
-            continue
-        if (cur["finding_size"] <= prev["finding_size"]
-                and cur["plan_checkmarks"] <= prev["plan_checkmarks"]):
-            stuck.append(key)
-    return stuck
-
-
 # ---------------------------------------------------------------------------
 # Subcommand handlers: continuation
 # ---------------------------------------------------------------------------
@@ -1161,20 +1100,6 @@ def _build_continuation_cmd(args: argparse.Namespace) -> None:
         pairs.append((parts[0].strip(), parts[1].strip()))
     build_continuation_dispatch(dispatch_path, pairs, output_path)
     print(json.dumps({"written": str(output_path)}))
-
-
-def _measure_progress_cmd(args: argparse.Namespace) -> None:
-    """Handler for measure-progress subcommand."""
-    repo = Path(args.repo).resolve()
-    work_dir = Path(args.work_dir).resolve()
-    dispatch_path = Path(args.dispatch).resolve()
-    entries = _read_dispatch(dispatch_path)
-    metrics = measure_progress(entries, work_dir, repo)
-    # Convert tuple keys to "concern:model" strings for JSON
-    serializable = {
-        f"{c}:{m}": v for (c, m), v in metrics.items()
-    }
-    print(json.dumps(serializable, indent=2))
 
 
 # ---------------------------------------------------------------------------
@@ -2045,28 +1970,6 @@ def main() -> int:
         help="Output path for filtered dispatch JSON",
     )
     build_cont_parser.set_defaults(func=_build_continuation_cmd)
-
-    # measure-progress subcommand
-    progress_parser = subparsers.add_parser(
-        "measure-progress",
-        help="Measure progress metrics for concern/model pairs",
-    )
-    progress_parser.add_argument(
-        "--dispatch",
-        required=True,
-        help="Path to dispatch JSON file",
-    )
-    progress_parser.add_argument(
-        "--work-dir",
-        default=".agents/focused-review",
-        help="Working directory (default: .agents/focused-review)",
-    )
-    progress_parser.add_argument(
-        "--repo",
-        default=".",
-        help="Path to the repository root (default: current directory)",
-    )
-    progress_parser.set_defaults(func=_measure_progress_cmd)
 
     # parse-pr-url subcommand
     pr_url_parser = subparsers.add_parser(

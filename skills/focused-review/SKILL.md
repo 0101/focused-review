@@ -125,37 +125,25 @@ Rule agents write their findings directly to `.agents/focused-review/findings/`.
      - Starts with `"Review Status: This review is complete."` → **complete**
      - Anything else → **complete** (legacy format, no sentinel)
 
-   If no entries are incomplete, proceed to Phase 2. If any entries failed, note them for reporting in step 7.
+   If no entries are incomplete, proceed to Phase 2. If any entries failed, note them for reporting in step 5.
 
-2. **Measure baseline progress** — Run:
-   ```bash
-   python {script_path} measure-progress --dispatch .agents/focused-review/concern-dispatch.json --work-dir .agents/focused-review
-   ```
-   Save the JSON output as the baseline for stuck-detection.
-
-3. **Build continuation dispatch** — Format the incomplete pairs as `concern:model`
+2. **Build continuation dispatch** — Format the incomplete pairs as `concern:model`
    comma-separated, then run:
    ```bash
    python {script_path} build-continuation --dispatch .agents/focused-review/concern-dispatch.json --incomplete "{pairs}" --output .agents/focused-review/concern-dispatch-continue.json
    ```
 
-4. **Re-invoke** — Run the concern runner with the continuation dispatch:
+3. **Re-invoke** — Run the concern runner with the continuation dispatch:
    ```bash
-   python {script_path} run-concerns --repo . --dispatch .agents/focused-review/concern-dispatch-continue.json
+   python {script_path} run-concerns --repo . --dispatch .agents/focused-review/concern-dispatch-continue.json --inherit-model {your_model_id}
    ```
    Use `mode="sync"` with `initial_wait: 300`.
 
-5. **Re-classify and detect stuck** — Run `list-findings` again on the continuation
-   dispatch, and `measure-progress` again. Classify each entry using the same logic as step 1. Compare progress metrics with the baseline
-   from step 2: if an incomplete pair's `finding_size` did not increase AND
-   `plan_checkmarks` did not increase, it is **stuck** — treat as complete to avoid
-   infinite loops. Remove stuck pairs from the incomplete list.
-
-6. **Repeat** — Go back to step 1 (using the continuation dispatch for classification).
+4. **Repeat** — Go back to step 1 (using the continuation dispatch for classification).
    Run at most **3 continuation rounds** total (not counting the initial `run-concerns`
-   invocation). Stop early if all pairs are complete or stuck.
+   invocation). Stop early if all pairs are complete.
 
-7. **Report failures** — Before proceeding to Phase 2, if any (concern, model) pairs
+5. **Report failures** — Before proceeding to Phase 2, if any (concern, model) pairs
    were agent failures, tell the user:
    ```
    ⚠ {n} concern agent(s) failed to produce findings:

@@ -247,138 +247,6 @@ class TestBuildContinuationDispatch:
 
 
 # ---------------------------------------------------------------------------
-# TestMeasureProgress
-# ---------------------------------------------------------------------------
-
-
-class TestMeasureProgress:
-    def test_counts_checkmarks(self, tmp_path: Path) -> None:
-        """Counts [x] and [~] marks in plan file."""
-        work_dir = _setup_work_dir(tmp_path)
-        entry = _make_entry("bugs", "opus")
-        create_file(
-            tmp_path,
-            entry["finding_path"],
-            "Some findings content here.",
-        )
-        create_file(
-            tmp_path,
-            ".agents/focused-review/scratchpad/bugs--opus--plan.md",
-            "- [x] Check nulls\n- [~] Partial check\n- [ ] Not done\n- [x] Another done",
-        )
-
-        result = fr.measure_progress([entry], work_dir, tmp_path)
-
-        assert result[("bugs", "opus")]["plan_checkmarks"] == 3
-
-    def test_missing_plan_file(self, tmp_path: Path) -> None:
-        """Missing plan file → 0 checkmarks."""
-        work_dir = _setup_work_dir(tmp_path)
-        entry = _make_entry("bugs", "opus")
-        create_file(tmp_path, entry["finding_path"], "content")
-
-        result = fr.measure_progress([entry], work_dir, tmp_path)
-
-        assert result[("bugs", "opus")]["plan_checkmarks"] == 0
-
-    def test_finding_size(self, tmp_path: Path) -> None:
-        """Reports correct byte size of finding file."""
-        work_dir = _setup_work_dir(tmp_path)
-        entry = _make_entry("bugs", "opus")
-        content = "Hello, world! This is a finding."
-        create_file(tmp_path, entry["finding_path"], content)
-
-        result = fr.measure_progress([entry], work_dir, tmp_path)
-
-        expected_size = len(content.encode("utf-8"))
-        assert result[("bugs", "opus")]["finding_size"] == expected_size
-
-    def test_missing_finding_file(self, tmp_path: Path) -> None:
-        """Missing finding file → 0 bytes."""
-        work_dir = _setup_work_dir(tmp_path)
-        entry = _make_entry("bugs", "opus")
-
-        result = fr.measure_progress([entry], work_dir, tmp_path)
-
-        assert result[("bugs", "opus")]["finding_size"] == 0
-
-    def test_unchecked_boxes_not_counted(self, tmp_path: Path) -> None:
-        """[ ] marks are NOT counted as progress."""
-        work_dir = _setup_work_dir(tmp_path)
-        entry = _make_entry("bugs", "opus")
-        create_file(tmp_path, entry["finding_path"], "content")
-        create_file(
-            tmp_path,
-            ".agents/focused-review/scratchpad/bugs--opus--plan.md",
-            "- [ ] Not done\n- [ ] Also not done\n- [ ] Still not done",
-        )
-
-        result = fr.measure_progress([entry], work_dir, tmp_path)
-
-        assert result[("bugs", "opus")]["plan_checkmarks"] == 0
-
-
-# ---------------------------------------------------------------------------
-# TestDetectStuck
-# ---------------------------------------------------------------------------
-
-
-class TestDetectStuck:
-    def test_no_progress_is_stuck(self) -> None:
-        """Same metrics before and after → stuck."""
-        metrics = {("bugs", "opus"): {"finding_size": 100, "plan_checkmarks": 2}}
-
-        stuck = fr.detect_stuck(metrics, metrics)
-
-        assert ("bugs", "opus") in stuck
-
-    def test_finding_grew_not_stuck(self) -> None:
-        """Finding size increased → not stuck."""
-        prev = {("bugs", "opus"): {"finding_size": 100, "plan_checkmarks": 2}}
-        curr = {("bugs", "opus"): {"finding_size": 200, "plan_checkmarks": 2}}
-
-        stuck = fr.detect_stuck(curr, prev)
-
-        assert stuck == []
-
-    def test_checkmarks_grew_not_stuck(self) -> None:
-        """Plan checkmarks increased → not stuck."""
-        prev = {("bugs", "opus"): {"finding_size": 100, "plan_checkmarks": 2}}
-        curr = {("bugs", "opus"): {"finding_size": 100, "plan_checkmarks": 3}}
-
-        stuck = fr.detect_stuck(curr, prev)
-
-        assert stuck == []
-
-    def test_both_grew_not_stuck(self) -> None:
-        """Both metrics increased → not stuck."""
-        prev = {("bugs", "opus"): {"finding_size": 100, "plan_checkmarks": 2}}
-        curr = {("bugs", "opus"): {"finding_size": 200, "plan_checkmarks": 4}}
-
-        stuck = fr.detect_stuck(curr, prev)
-
-        assert stuck == []
-
-    def test_only_finding_shrunk_is_stuck(self) -> None:
-        """Finding size decreased (shouldn't happen but handle) → stuck."""
-        prev = {("bugs", "opus"): {"finding_size": 200, "plan_checkmarks": 2}}
-        curr = {("bugs", "opus"): {"finding_size": 150, "plan_checkmarks": 2}}
-
-        stuck = fr.detect_stuck(curr, prev)
-
-        assert ("bugs", "opus") in stuck
-
-    def test_hypothesis_finding_grows_file(self, tmp_path: Path) -> None:
-        """A [Hypothesis] finding increases file size → not stuck."""
-        prev = {("bugs", "opus"): {"finding_size": 50, "plan_checkmarks": 0}}
-        curr = {("bugs", "opus"): {"finding_size": 200, "plan_checkmarks": 0}}
-
-        stuck = fr.detect_stuck(curr, prev)
-
-        assert stuck == []
-
-
-# ---------------------------------------------------------------------------
 # Subcommand integration tests
 # ---------------------------------------------------------------------------
 
@@ -434,30 +302,6 @@ class TestBuildContinuationSubcommand:
         assert written[0]["concern"] == "bugs"
 
 
-class TestMeasureProgressSubcommand:
-    def test_json_output(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-        """Subcommand produces valid JSON with progress metrics."""
-        work_dir = _setup_work_dir(tmp_path)
-        entry = _make_entry("bugs", "opus")
-        create_file(tmp_path, entry["finding_path"], "Some content here.")
-        dispatch = _write_dispatch(tmp_path, [entry])
-
-        import argparse
-
-        args = argparse.Namespace(
-            dispatch=str(dispatch),
-            work_dir=str(work_dir),
-            repo=str(tmp_path),
-        )
-        fr._measure_progress_cmd(args)
-
-        captured = capsys.readouterr()
-        output = json.loads(captured.out)
-        assert "bugs:opus" in output
-        assert "finding_size" in output["bugs:opus"]
-        assert "plan_checkmarks" in output["bugs:opus"]
-
-
 # ---------------------------------------------------------------------------
 # Integration: Full Continuation Loop
 # ---------------------------------------------------------------------------
@@ -484,13 +328,11 @@ def _simulate_orchestrator_loop(
         'rounds': int,
         'final_complete': list,
         'final_failed': list,
-        'stuck': list,
     }
     """
     if repo is None:
         repo = work_dir.parent.parent
     current_dispatch = dispatch_path
-    all_stuck: list[tuple[str, str]] = []
     all_complete: list[dict] = []
     all_failed: list[dict] = []
     round_num = 0
@@ -519,31 +361,19 @@ def _simulate_orchestrator_loop(
         all_complete.extend(complete)
         all_failed.extend(failed)
 
-        incomplete = [
-            e for e in incomplete
-            if (e["concern"], e["model"]) not in all_stuck
-        ]
-
         if not incomplete or round_num >= max_rounds:
             return {
                 "rounds": round_num,
                 "final_complete": all_complete,
                 "final_failed": all_failed,
-                "stuck": all_stuck,
             }
 
         incomplete_pairs = [(str(e["concern"]), str(e["model"])) for e in incomplete]
         cont_path = work_dir.parent / "concern-dispatch-continue.json"
         fr.build_continuation_dispatch(dispatch_path, incomplete_pairs, cont_path)
 
-        previous = fr.measure_progress(incomplete, work_dir, repo)
-
         if round_callback:
             round_callback(round_num, incomplete)
-
-        current = fr.measure_progress(incomplete, work_dir, repo)
-        stuck_pairs = fr.detect_stuck(current, previous)
-        all_stuck.extend(stuck_pairs)
 
         round_num += 1
         current_dispatch = cont_path
@@ -572,9 +402,6 @@ class TestContinuationLoop:
         assert result["rounds"] == 0
         assert len(result["final_complete"]) == 2
         assert result["final_failed"] == []
-        assert result["stuck"] == []
-
-    def test_one_incomplete_then_completes(self, tmp_path: Path) -> None:
         """One agent incomplete → 1 continuation round → completes."""
         work_dir = _setup_work_dir(tmp_path)
         entries = [
@@ -616,33 +443,6 @@ class TestContinuationLoop:
         assert result["rounds"] == 1
         assert len(result["final_complete"]) == 2
         assert result["final_failed"] == []
-        assert result["stuck"] == []
-
-    def test_stuck_agent_halted(self, tmp_path: Path) -> None:
-        """Agent makes no progress → detected as stuck after 1 round."""
-        work_dir = _setup_work_dir(tmp_path)
-        entry = _make_entry("bugs", "opus")
-        dispatch = _write_dispatch(tmp_path, [entry])
-
-        create_file(
-            tmp_path,
-            entry["finding_path"],
-            "Review Status: This review is incomplete — 1 of 5 areas.\n\nPartial.",
-        )
-        create_file(
-            tmp_path,
-            ".agents/focused-review/scratchpad/bugs--opus--plan.md",
-            "- [x] Area 1\n- [ ] Area 2\n- [ ] Area 3\n- [ ] Area 4\n- [ ] Area 5",
-        )
-
-        def on_continuation(round_num: int, incomplete: list[dict]) -> None:
-            pass  # Agent makes no progress
-
-        result = _simulate_orchestrator_loop(dispatch, work_dir, round_callback=on_continuation)
-
-        assert result["rounds"] == 1
-        assert ("bugs", "opus") in result["stuck"]
-        assert result["final_complete"] == []
 
     def test_max_rounds_limit(self, tmp_path: Path) -> None:
         """Agent stays incomplete → stops after max_rounds."""
@@ -661,7 +461,6 @@ class TestContinuationLoop:
         def on_continuation(round_num: int, incomplete: list[dict]) -> None:
             nonlocal call_count
             call_count += 1
-            # Make progress (grow file) so not detected as stuck, but never complete
             finding = tmp_path / entry["finding_path"]
             finding.write_text(
                 f"Review Status: This review is incomplete — {call_count + 1} of 5 areas.\n\n"
@@ -675,7 +474,6 @@ class TestContinuationLoop:
 
         assert result["rounds"] == 2
         assert result["final_complete"] == []
-        assert result["stuck"] == []
         assert call_count == 2
 
     def test_mixed_complete_incomplete_failed(self, tmp_path: Path) -> None:
@@ -715,7 +513,6 @@ class TestContinuationLoop:
         assert len(result["final_complete"]) == 2
         assert len(result["final_failed"]) == 1
         assert result["final_failed"][0]["concern"] == "arch"
-        assert result["stuck"] == []
 
     def test_hypothesis_survives_continuation(self, tmp_path: Path) -> None:
         """Agent writes [Hypothesis] finding → continuation agent confirms it → both in final file."""
@@ -756,7 +553,6 @@ class TestContinuationLoop:
 
         assert result["rounds"] == 1
         assert len(result["final_complete"]) == 1
-        assert result["stuck"] == []
 
         final = (tmp_path / entry["finding_path"]).read_text(encoding="utf-8")
         assert "[Hypothesis]" in final
