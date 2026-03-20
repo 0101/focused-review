@@ -1269,12 +1269,13 @@ def _run_single_concern(
         if result.stdout.strip():
             trace_path.write_text(result.stdout, encoding="utf-8")
 
-            # The agent was instructed to write clean findings to
-            # finding_path via the create tool.  If it did, use that
-            # file.  Otherwise fall back to stdout (which contains
-            # tool-call noise but is better than nothing).
             if not finding_path.is_file():
-                finding_path.write_text(result.stdout, encoding="utf-8")
+                return {
+                    "concern": concern,
+                    "model": model,
+                    "status": "failed",
+                    "error": f"Agent did not write findings file. Check trace: {_posix(trace_path, relative_to=repo)}",
+                }
 
         out: dict[str, object] = {
             "concern": concern,

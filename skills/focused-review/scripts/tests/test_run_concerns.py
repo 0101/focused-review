@@ -91,6 +91,19 @@ def _mock_subprocess_failure(
     return mock
 
 
+def _write_finding(
+    repo: Path,
+    concern: str,
+    model: str,
+    content: str = "### [High] Bug found\nDetails.",
+) -> Path:
+    """Pre-create a findings file as if the agent wrote it during subprocess.run."""
+    finding_path = repo / ".agents" / "focused-review" / "findings" / f"concern--{concern}--{model}.md"
+    finding_path.parent.mkdir(parents=True, exist_ok=True)
+    finding_path.write_text(content, encoding="utf-8")
+    return finding_path
+
+
 # ---------------------------------------------------------------------------
 # _resolve_model and MODEL_MAP
 # ---------------------------------------------------------------------------
@@ -146,6 +159,7 @@ class TestRunSingleConcernSuccess:
         repo.mkdir()
         work_dir = _setup_work_dir(repo)
         entry = _make_dispatch()[0]
+        _write_finding(repo, "bugs", "opus")
 
         with patch("subprocess.run", return_value=_mock_subprocess_success()):
             result = fr._run_single_concern(entry, repo, work_dir)
@@ -159,7 +173,6 @@ class TestRunSingleConcernSuccess:
 
         finding_path = work_dir / "findings" / "concern--bugs--opus.md"
         assert finding_path.exists()
-        assert "Bug found" in finding_path.read_text(encoding="utf-8")
 
     def test_finding_filename_format(self, tmp_path: Path) -> None:
         """Finding filename is concern--{name}--{model}.md."""
@@ -174,6 +187,7 @@ class TestRunSingleConcernSuccess:
             }
         ]
         work_dir = _setup_work_dir(repo, entries)
+        _write_finding(repo, "security", "codex")
 
         with patch("subprocess.run", return_value=_mock_subprocess_success()):
             result = fr._run_single_concern(entries[0], repo, work_dir)
@@ -241,7 +255,7 @@ class TestRunSingleConcernSuccess:
         assert "Read file.cs" in trace_path.read_text(encoding="utf-8")
 
     def test_stdout_fallback_when_agent_does_not_write_file(self, tmp_path: Path) -> None:
-        """When the agent fails to write the file, stdout is used as fallback."""
+        """When the agent fails to write the file, report as failed."""
         repo = tmp_path / "repo"
         repo.mkdir()
         work_dir = _setup_work_dir(repo)
@@ -252,10 +266,10 @@ class TestRunSingleConcernSuccess:
         with patch("subprocess.run", return_value=_mock_subprocess_success()):
             result = fr._run_single_concern(entry, repo, work_dir)
 
-        assert result["status"] == "exited"
+        assert result["status"] == "failed"
+        assert "did not write findings" in result["error"]
         finding_path = work_dir / "findings" / "concern--bugs--opus.md"
-        assert finding_path.exists()
-        assert "Bug found" in finding_path.read_text(encoding="utf-8")
+        assert not finding_path.exists()
 
 
 # ---------------------------------------------------------------------------
@@ -582,6 +596,8 @@ class TestRunConcerns:
             },
         ]
         _setup_work_dir(repo, entries)
+        _write_finding(repo, "bugs", "opus")
+        _write_finding(repo, "security", "opus")
 
         args = argparse.Namespace(
             repo=str(repo),
@@ -617,6 +633,7 @@ class TestRunConcerns:
             },
         ]
         _setup_work_dir(repo, entries)
+        _write_finding(repo, "bugs", "opus")
 
         # First call succeeds, second fails
         mock_run = MagicMock(
@@ -666,8 +683,8 @@ class TestRunConcerns:
             fr.run_concerns(args)
 
         finding_path = repo / ".agents" / "focused-review" / "findings" / "concern--bugs--opus.md"
-        assert finding_path.exists()
-        assert "Race condition" in finding_path.read_text(encoding="utf-8")
+        # Agent didn't write the file (mock doesn't create it), so reported as failed
+        assert not finding_path.exists()
 
     def test_progress_on_stderr(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
@@ -818,6 +835,8 @@ class TestConcernParallelism:
             },
         ]
         _setup_work_dir(repo, entries)
+        _write_finding(repo, "bugs", "opus")
+        _write_finding(repo, "security", "opus")
 
         args = argparse.Namespace(
             repo=str(repo),
@@ -858,6 +877,8 @@ class TestConcernParallelism:
             },
         ]
         _setup_work_dir(repo, entries)
+        _write_finding(repo, "bugs", "opus")
+        _write_finding(repo, "bugs", "codex")
 
         args = argparse.Namespace(
             repo=str(repo),
@@ -909,6 +930,11 @@ class TestDispatchArg:
         prompts_dir = work_dir / "prompts"
         prompts_dir.mkdir(parents=True, exist_ok=True)
         (prompts_dir / "security--opus.md").write_text("Review security", encoding="utf-8")
+
+        # Create finding file so _run_single_concern treats it as success
+        findings_dir = work_dir / "findings"
+        findings_dir.mkdir(parents=True, exist_ok=True)
+        (findings_dir / "concern--security--opus.md").write_text("NO FINDINGS", encoding="utf-8")
 
         args = argparse.Namespace(
             repo=str(repo),

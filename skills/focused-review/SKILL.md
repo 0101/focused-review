@@ -222,98 +222,30 @@ After all rebuttals complete, read each rebuttal file. For any finding where the
 
 ### Step 6: Phase 5 — Presentation
 
-Determine the data source (check in order, use the first that exists):
-- If `assessed.md` exists (Phases 3+ ran): read `.agents/focused-review/assessed.md`, applying any rebuttal overrides from Step 5. For each overridden finding (rebuttal recommends "Reinstate"), replace its verdict with Confirmed at the reinstated severity and append the rebuttal reasoning to the assessment section.
-- If only `consolidated.md` exists (`full` scope or Phase 3 failed): read `.agents/focused-review/consolidated.md`. Treat all findings as Confirmed (no assessment was performed).
-- If neither exists (Phase 2 also failed): read raw Phase 1 findings from `.agents/focused-review/findings/` directly. List all `rule--*.md` and `concern--*.md` files, read each, and include their findings as-is. Treat all as Confirmed with provenance derived from filenames (e.g. `rule--sealed-classes.md` → provenance "rule:sealed-classes", `concern--bugs--opus.md` → provenance "concern:bugs (opus)"). Deduplicate by file path + line number, keeping the entry with the highest severity.
+Determine the data source and type (check in order, use the first that exists):
+- If `.agents/focused-review/assessed.md` exists → `data_source_type: assessed`
+- Else if `.agents/focused-review/consolidated.md` exists → `data_source_type: consolidated`
+- Else → `data_source_type: raw_findings` (path: `.agents/focused-review/findings`)
 
-Use the `create` tool to write the final report directly to:
+Build the `rebuttal_overrides` value: if Step 5 produced any "Reinstate" recommendations, format as a JSON list of `{"id": "A-XX", "severity": "High", "reasoning": "..."}`. Otherwise omit the line.
 
-```
-.agents/focused-review/review-{timestamp}.md
-```
-
-Where `{timestamp}` is `YYYYMMDD-HHmmss`. Do NOT use a Python subcommand — write the file yourself.
-
-**Report format:**
-
-Use these values from earlier steps:
-- `{rule_count}`: number of unique rules dispatched (from `dispatch.json` length or prepare-review summary `rules_matched`)
-- `{concern_count}`: number of concerns dispatched (from prepare-review summary `concern_prompts`)
-- `{consolidated_count}`: total findings in consolidated report (from Phase 2 output header)
-
-```markdown
-# Unified Review Report
-
-**Scope:** {scope}
-**Date:** {ISO timestamp}
-**Pipeline:** Discovery ({rule_count} rules, {concern_count} concerns) → Consolidation → Assessment
-
-## Summary
-
-| Verdict | Count |
-|---------|-------|
-| ✅ Confirmed | {n} |
-| ❓ Questionable | {n} |
-| ❌ Invalid (filtered) | {n} |
-
----
-
-## Confirmed Findings
-
-{For each Confirmed finding, grouped by file path, ordered by line number within each file:}
-
-### {n}. [{severity}] {title}
-
-**File:** `{path}:{line}`
-**Fix complexity:** {quickfix|moderate|complex}
-**Found by:** {sources with agreement count, e.g. "3 sources: rule:sealed-classes, concern:bugs (opus), concern:bugs (gemini)" or "1 source: rule:null-handling"}
-
-{description}
-
-> **Assessment:** {assessment reasoning — why this was confirmed}
-
-**Suggestion:** {suggestion}
-
----
-
-## Questionable Findings
-
-{Same format as Confirmed. Include counter-arguments in the Assessment line.}
-
----
-
-<details>
-<summary>{invalid_count} findings filtered as invalid</summary>
-
-| ID | Severity | File | Title | Reason |
-|----|----------|------|-------|--------|
-| {A-XX} | {sev} | `{path}` | {title} | {one-line assessment reason} |
-
-</details>
-```
-
-**Grouping rules:**
-- Within each verdict section (Confirmed, Questionable), group findings by file path.
-- Within each file group, order findings by line number.
-- If a verdict section has no findings, omit it entirely.
-
-**REQUIRED — User-facing summary.** After writing the report file, you MUST present ALL of the following to the user. Do not skip any item.
-
-1. **Report path** — the full path to the written report file (e.g. `.agents/focused-review/review-20260319-143200.md`). State this first so the user can open it immediately.
-
-2. **Pipeline summary** — one-line stats: `{rule_count} rules + {concern_count} concerns → {consolidated_count} unique findings → {confirmed + questionable} actionable`
-
-3. **Findings table** — a numbered table of ALL confirmed and questionable findings. Every row MUST include the `Found by` column showing which rules/concerns discovered it:
+Launch a `general-purpose` Task agent:
 
 ```
-| # | Verdict | Severity | Found by | File | Issue |
-|---|---------|----------|----------|------|-------|
-| 1 | ✅ | High | bugs(opus,gemini), arch(opus) | path:42 | Brief description... |
-| 2 | ❓ | Medium | rule:null-handling | path:88 | Brief description... |
+Read and follow the agent profile at agents/review-reporter.agent.md
+
+data_source: {path to assessed.md, consolidated.md, or findings/}
+data_source_type: {assessed|consolidated|raw_findings}
+report_path: .agents/focused-review/review-{timestamp}.md
+scope: {scope}
+rule_count: {rule_count}
+concern_count: {concern_count}
+rebuttal_overrides: {JSON list or omit}
 ```
 
-The `Found by` column lists each source that discovered the finding. Use short labels: `bugs(opus,gemini)` for concern:bugs found by opus and gemini, `arch(codex)` for concern:architecture found by codex, `rule:name` for rules. Group models under the same concern name for readability. This column is essential — it tells the user which review lens caught each issue, enabling post-mortem tuning.
+Where `{timestamp}` is `YYYYMMDD-HHmmss`.
+
+Wait for completion. **Relay the agent's output directly to the user** — do not rephrase, summarize, or add commentary. The agent's output IS the user-facing summary.
 
 ---
 
