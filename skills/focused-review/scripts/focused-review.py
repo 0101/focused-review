@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import urllib.error
@@ -816,6 +817,18 @@ def prepare_review(args: argparse.Namespace) -> None:
 
     work_dir = repo / ".agents" / "focused-review"
     work_dir.mkdir(parents=True, exist_ok=True)
+
+    # -- clean stale phase artifacts from previous runs -------------------
+    for stale in ("consolidated.md", "assessed.md"):
+        stale_path = work_dir / stale
+        if stale_path.exists():
+            stale_path.unlink()
+    findings_dir = work_dir / "findings"
+    if findings_dir.exists():
+        shutil.rmtree(findings_dir)
+    rebuttals_dir = work_dir / "rebuttals"
+    if rebuttals_dir.exists():
+        shutil.rmtree(rebuttals_dir)
 
     # -- determine changed files & chunks --------------------------------
 
