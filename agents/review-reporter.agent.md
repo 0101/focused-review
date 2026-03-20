@@ -89,6 +89,22 @@ Use `create` to write the report to `report_path`:
 - Within each file group, order findings by line number.
 - If a verdict section has no findings, omit it entirely.
 
+**Rule Quality Notes section** — After the invalid findings details block, add a `## Rule Quality Notes` section if any of these conditions are met:
+
+- Any finding has a `Rule quality note:` annotation from the assessor (the rule is technically correct but counterproductive in context)
+- A rule produced 3+ findings that were assessed as Invalid (the rule may be too broad or noisy)
+- Multiple findings from the same rule were assessed as Questionable (the rule may need tightening)
+
+Format:
+
+```markdown
+## Rule Quality Notes
+
+- **{rule-name}**: {observation — what pattern was seen} — {suggested improvement}
+```
+
+These notes help the user decide whether to run `/focused-review:review post-mortem` to refine their rules.
+
 ### 3. Output the user-facing summary
 
 After writing the report, output **exactly** the following (the orchestrator will relay this to the user):
@@ -110,4 +126,13 @@ The `Found by` column uses short labels: `bugs(opus,gemini)` for concern:bugs fo
 
 If there are zero confirmed and questionable findings, output: `✅ No actionable findings.`
 
-**Output nothing else.** No preamble, no commentary, no "here's the report" — just these three items.
+4. **Rule quality notes** — If any rule quality notes were generated, include them as a brief list:
+
+```
+📝 Rule Quality Notes
+- {rule-name}: {observation} — {suggestion}
+```
+
+Omit this section entirely if there are no rule quality notes.
+
+**Output nothing else.** No preamble, no commentary, no "here's the report" — just these items.
