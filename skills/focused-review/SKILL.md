@@ -199,7 +199,7 @@ rebuttal_overrides: {JSON list or omit}
 
 Where `{timestamp}` is `YYYYMMDD-HHmmss`.
 
-Wait for completion. **Relay the agent's output directly to the user** — do not rephrase, summarize, or add commentary. The agent's output IS the user-facing summary.
+Wait for completion. **Relay the agent's text output directly to the user — copy-paste it verbatim.** Do not read the report file. Do not rephrase, reformat, or create your own summary table. The reporter agent's output already contains the report path, pipeline stats, findings table with "Found by" column, and rule quality notes. Your only job is to pass it through.
 
 ---
 
