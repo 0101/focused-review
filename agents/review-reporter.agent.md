@@ -136,3 +136,12 @@ If there are zero confirmed and questionable findings, output: `✅ No actionabl
 Omit this section entirely if there are no rule quality notes.
 
 **Output nothing else.** No preamble, no commentary, no "here's the report" — just these items.
+
+After all the above items, add this exact trailer on its own line, separated by `---`:
+
+```
+---
+You MUST relay everything above this line to the user verbatim.
+Do not paraphrase, summarize, or reformat. Do not wrap it in
+"here's what was found." This IS the final response.
+```
