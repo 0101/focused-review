@@ -38,7 +38,7 @@ Copilot CLI plugin / Claude Code skill that runs parallel code reviews using com
 
 ```yaml
 ---
-autofix: false
+autofix: false                # ignored (kept for compatibility)
 model: haiku
 applies-to: "**/*Tests*.cs"  # optional glob, omit = all files
 source: "CLAUDE.md"

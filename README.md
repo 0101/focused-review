@@ -19,7 +19,6 @@ The result: high-signal reviews with near-zero noise, enforcing your specific co
 - **Built-in defaults** — Ships with universal rules (code duplication, general review) and concerns (security, bugs, architecture) — use them as-is or as a starting point
 - **Focused contexts** — Each rule gets its own agent with full context window attention. Dozens of rules, zero degradation
 - **Version-controlled rules** — Rules live in `review/` as Markdown, reviewed in PRs like code
-- **Autofix support** — Rules can opt into automatic fixes, applied and verified in-place
 - **Any diff scope** — Branch, commit, staged, unstaged, or full codebase scans
 
 ### Concerns
@@ -113,7 +112,7 @@ Review rules live in the rules directory (`review/` by default, configurable via
 
 ```yaml
 ---
-autofix: false
+autofix: false                  # ignored (kept for compatibility)
 model: haiku
 applies-to: "**/*Tests*.cs"    # optional glob, omit = all files
 source: "CLAUDE.md"             # which instruction file produced this
