@@ -150,11 +150,9 @@ Rule agents write their findings directly to `.agents/focused-review/findings/`.
 
 ### Step 3: Phase 2 — Consolidation
 
-Launch a `general-purpose` Task agent with this prompt:
+Launch a `focused-review:review-consolidator` Task agent with this prompt:
 
 ```
-Read and follow the agent profile at agents/review-consolidator.agent.md
-
 findings_dir: .agents/focused-review/findings
 ```
 
@@ -166,11 +164,9 @@ Wait for completion. If the agent fails, report the error and skip to Step 6 wit
 
 **Skip this step for `full` scope** (no diff to assess against). Proceed directly to Step 6 using the consolidated report.
 
-Launch a `general-purpose` Task agent with this prompt:
+Launch a `focused-review:review-assessor` Task agent with this prompt:
 
 ```
-Read and follow the agent profile at agents/review-assessor.agent.md
-
 consolidated_path: .agents/focused-review/consolidated.md
 diff_path: .agents/focused-review/diff.patch
 rules_dir: {rules_dir}
@@ -221,11 +217,9 @@ Determine the data source and type (check in order, use the first that exists):
 
 Build the `rebuttal_overrides` value: if Step 5 produced any "Reinstate" recommendations, format as a JSON list of `{"id": "A-XX", "severity": "High", "reasoning": "..."}`. Otherwise omit the line.
 
-Launch a `general-purpose` Task agent:
+Launch a `focused-review:review-reporter` Task agent:
 
 ```
-Read and follow the agent profile at agents/review-reporter.agent.md
-
 data_source: {path to assessed.md, consolidated.md, or findings/}
 data_source_type: {assessed|consolidated|raw_findings}
 report_path: .agents/focused-review/review-{timestamp}.md
