@@ -15,7 +15,7 @@ The LLM that produced content can read it natively — routing semantic interpre
 ## Requirements
 - Python code must not read and interpret the semantic content of LLM-generated files (findings, reports, assessed.md, review output)
 - Python code must not extract structured data from LLM prose (e.g., regex on markdown findings to count severity levels)
-- File I/O is fine — Python can read/write/copy LLM output files as opaque blobs; it just must not interpret their meaning
+- File I/O is fine— Python can read/write/copy LLM output files as opaque blobs; it just must not interpret their meaning
 - Python can parse structured formats it controls (JSON config, dispatch.json, CLI arguments) — the restriction is on LLM-generated content
 
 ## Wrong

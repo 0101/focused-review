@@ -53,6 +53,10 @@ DEFAULT_CONCERNS_DIR = "review/concerns/"
 BUILTIN_CONCERNS_DIR = Path(__file__).resolve().parent.parent / "defaults" / "concerns"
 
 COPILOT_CMD = os.environ.get("COPILOT_CMD", "copilot")
+
+_COMPLETE_SENTINEL = "Review Status: This review is complete."
+_INCOMPLETE_SENTINEL = "Review Status: This review is incomplete"
+
 CONCERN_HARD_TIMEOUT_SECS = int(os.environ.get("CONCERN_HARD_TIMEOUT", "1200"))
 CONCERN_SOFT_TIMEOUT_SECS = int(os.environ.get("CONCERN_SOFT_TIMEOUT", "600"))
 CONCERN_MAX_WORKERS = int(os.environ.get("CONCERN_MAX_WORKERS", "4"))
@@ -779,8 +783,8 @@ def _generate_concern_prompts(
                 "",
                 "At the **very top** of your report file, write exactly one of:",
                 "",
-                "- `Review Status: This review is complete.`",
-                "- `Review Status: This review is incomplete, please invoke the "
+                f"- `{_COMPLETE_SENTINEL}`",
+                f"- `{_INCOMPLETE_SENTINEL}, please invoke the "
                 "agent again to continue reviewing.`",
                 "",
                 "This line MUST be the first line of your report file.",
@@ -1002,66 +1006,47 @@ def prepare_review(args: argparse.Namespace) -> None:
 # Continuation helpers
 # ---------------------------------------------------------------------------
 
-_COMPLETE_SENTINEL = "Review Status: This review is complete."
-_INCOMPLETE_SENTINEL = "Review Status: This review is incomplete"
+
+def _read_dispatch(path: Path) -> list[dict[str, str]]:
+    """Read and parse a JSON dispatch file."""
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
-def classify_concern_results(
+def list_concern_findings(
     dispatch_path: Path,
     work_dir: Path,
-) -> dict[str, list[dict[str, str]]]:
-    """Classify concern results as complete, incomplete, or failed.
+    repo: Path,
+) -> list[dict[str, object]]:
+    """List finding file metadata for each dispatched concern.
 
-    Returns dict with keys 'complete', 'incomplete', 'failed', each containing
-    a list of entry dicts with at minimum 'concern' and 'model' keys.
-    Failed entries also get a 'trace_path' key if the trace file exists.
+    Returns a list of dicts with file existence and size info.
+    Does NOT read file content — classification is the orchestrator's job.
     """
-    entries: list[dict[str, str]] = json.loads(
-        dispatch_path.read_text(encoding="utf-8")
-    )
-    result: dict[str, list[dict[str, str]]] = {
-        "complete": [],
-        "incomplete": [],
-        "failed": [],
-    }
+    entries = _read_dispatch(dispatch_path)
+    results: list[dict[str, object]] = []
     for entry in entries:
         concern = entry["concern"]
         model = entry["model"]
         finding_rel = entry.get("finding_path", "")
         finding_abs = (
             Path(finding_rel) if Path(finding_rel).is_absolute()
-            else work_dir.parent.parent / finding_rel
+            else repo / finding_rel
         ) if finding_rel else (
             work_dir / "findings" / f"concern--{concern}--{model}.md"
         )
 
-        if not finding_abs.is_file():
-            failed_entry: dict[str, str] = {
-                "concern": concern,
-                "model": model,
-            }
-            trace_candidate = (
-                work_dir / "traces" / f"concern--{concern}--{model}.jsonl"
-            )
-            if trace_candidate.is_file():
-                failed_entry["trace_path"] = str(trace_candidate)
-            result["failed"].append(failed_entry)
-        else:
-            first_line = ""
-            text = finding_abs.read_text(encoding="utf-8")
-            if text:
-                first_line = text.split("\n", 1)[0]
-
-            classified_entry = dict(entry)
-            if first_line.startswith(_INCOMPLETE_SENTINEL):
-                result["incomplete"].append(classified_entry)
-            elif first_line.startswith(_COMPLETE_SENTINEL):
-                result["complete"].append(classified_entry)
-            else:
-                # Legacy format (no sentinel) → treat as complete
-                result["complete"].append(classified_entry)
-
-    return result
+        info: dict[str, object] = {
+            "concern": concern,
+            "model": model,
+            "finding_path": _posix(finding_abs, relative_to=repo) if not Path(finding_rel).is_absolute() else str(finding_abs),
+            "exists": finding_abs.is_file(),
+            "size": finding_abs.stat().st_size if finding_abs.is_file() else 0,
+        }
+        trace_candidate = work_dir / "traces" / f"concern--{concern}--{model}.jsonl"
+        if trace_candidate.is_file():
+            info["trace_path"] = _posix(trace_candidate, relative_to=repo)
+        results.append(info)
+    return results
 
 
 def build_continuation_dispatch(
@@ -1074,9 +1059,7 @@ def build_continuation_dispatch(
     Reads the original dispatch, filters to entries matching incomplete_pairs,
     writes to output_path. Returns output_path.
     """
-    entries: list[dict[str, str]] = json.loads(
-        dispatch_path.read_text(encoding="utf-8")
-    )
+    entries = _read_dispatch(dispatch_path)
     pair_set = set(incomplete_pairs)
     filtered = [
         e for e in entries
@@ -1090,6 +1073,7 @@ def build_continuation_dispatch(
 def measure_progress(
     entries: list[dict[str, str]],
     work_dir: Path,
+    repo: Path,
 ) -> dict[tuple[str, str], dict[str, int]]:
     """Measure current progress metrics for each (concern, model) pair.
 
@@ -1105,7 +1089,7 @@ def measure_progress(
         finding_rel = entry.get("finding_path", "")
         finding_abs = (
             Path(finding_rel) if Path(finding_rel).is_absolute()
-            else work_dir.parent.parent / finding_rel
+            else repo / finding_rel
         ) if finding_rel else (
             work_dir / "findings" / f"concern--{concern}--{model}.md"
         )
@@ -1152,11 +1136,12 @@ def detect_stuck(
 # ---------------------------------------------------------------------------
 
 
-def _classify_concerns_cmd(args: argparse.Namespace) -> None:
-    """Handler for classify-concerns subcommand."""
+def _list_findings_cmd(args: argparse.Namespace) -> None:
+    """Handler for list-findings subcommand."""
+    repo = Path(args.repo).resolve()
     work_dir = Path(args.work_dir).resolve()
     dispatch_path = Path(args.dispatch).resolve()
-    result = classify_concern_results(dispatch_path, work_dir)
+    result = list_concern_findings(dispatch_path, work_dir, repo)
     print(json.dumps(result, indent=2))
 
 
@@ -1164,21 +1149,27 @@ def _build_continuation_cmd(args: argparse.Namespace) -> None:
     """Handler for build-continuation subcommand."""
     dispatch_path = Path(args.dispatch).resolve()
     output_path = Path(args.output).resolve()
-    pairs = [
-        tuple(p.split(":", 1)) for p in args.incomplete.split(",") if p.strip()
-    ]
+    pairs: list[tuple[str, str]] = []
+    for p in args.incomplete.split(","):
+        p = p.strip()
+        if not p:
+            continue
+        parts = p.split(":", 1)
+        if len(parts) != 2:
+            print(f"Warning: ignoring malformed pair '{p}' (expected concern:model)", file=sys.stderr)
+            continue
+        pairs.append((parts[0].strip(), parts[1].strip()))
     build_continuation_dispatch(dispatch_path, pairs, output_path)
     print(json.dumps({"written": str(output_path)}))
 
 
 def _measure_progress_cmd(args: argparse.Namespace) -> None:
     """Handler for measure-progress subcommand."""
+    repo = Path(args.repo).resolve()
     work_dir = Path(args.work_dir).resolve()
     dispatch_path = Path(args.dispatch).resolve()
-    entries: list[dict[str, str]] = json.loads(
-        dispatch_path.read_text(encoding="utf-8")
-    )
-    metrics = measure_progress(entries, work_dir)
+    entries = _read_dispatch(dispatch_path)
+    metrics = measure_progress(entries, work_dir, repo)
     # Convert tuple keys to "concern:model" strings for JSON
     serializable = {
         f"{c}:{m}": v for (c, m), v in metrics.items()
@@ -1255,6 +1246,8 @@ def _run_single_concern(
     else:
         cmd.extend(["--model", _resolve_model(model)])
 
+    pre_mtime = finding_path.stat().st_mtime if finding_path.is_file() else 0
+
     try:
         result = subprocess.run(
             cmd,
@@ -1277,10 +1270,13 @@ def _run_single_concern(
                     "error": f"Agent did not write findings file. Check trace: {_posix(trace_path, relative_to=repo)}",
                 }
 
+        post_mtime = finding_path.stat().st_mtime if finding_path.is_file() else 0
         out: dict[str, object] = {
             "concern": concern,
             "model": model,
             "status": "exited",
+            "returncode": result.returncode,
+            "finding_updated": post_mtime > pre_mtime,
         }
         if finding_path.is_file():
             out["finding_path"] = _posix(finding_path, relative_to=repo)
@@ -1340,9 +1336,7 @@ def run_concerns(args: argparse.Namespace) -> None:
         )
         sys.exit(1)
 
-    entries: list[dict[str, str]] = json.loads(
-        dispatch_path.read_text(encoding="utf-8")
-    )
+    entries = _read_dispatch(dispatch_path)
 
     if not entries:
         print(json.dumps({
@@ -2008,22 +2002,27 @@ def main() -> int:
     )
     concerns_parser.set_defaults(func=run_concerns)
 
-    # classify-concerns subcommand
-    classify_parser = subparsers.add_parser(
-        "classify-concerns",
-        help="Classify concern results as complete, incomplete, or failed",
+    # list-findings subcommand
+    list_findings_parser = subparsers.add_parser(
+        "list-findings",
+        help="List finding file metadata for each dispatched concern",
     )
-    classify_parser.add_argument(
+    list_findings_parser.add_argument(
         "--dispatch",
         required=True,
         help="Path to dispatch JSON file",
     )
-    classify_parser.add_argument(
+    list_findings_parser.add_argument(
         "--work-dir",
         default=".agents/focused-review",
         help="Working directory (default: .agents/focused-review)",
     )
-    classify_parser.set_defaults(func=_classify_concerns_cmd)
+    list_findings_parser.add_argument(
+        "--repo",
+        default=".",
+        help="Path to the repository root (default: current directory)",
+    )
+    list_findings_parser.set_defaults(func=_list_findings_cmd)
 
     # build-continuation subcommand
     build_cont_parser = subparsers.add_parser(
@@ -2061,6 +2060,11 @@ def main() -> int:
         "--work-dir",
         default=".agents/focused-review",
         help="Working directory (default: .agents/focused-review)",
+    )
+    progress_parser.add_argument(
+        "--repo",
+        default=".",
+        help="Path to the repository root (default: current directory)",
     )
     progress_parser.set_defaults(func=_measure_progress_cmd)
 

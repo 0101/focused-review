@@ -54,13 +54,13 @@ def _setup_work_dir(tmp_path: Path) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# TestClassifyConcernResults
+# TestListConcernFindings
 # ---------------------------------------------------------------------------
 
 
-class TestClassifyConcernResults:
-    def test_complete_finding(self, tmp_path: Path) -> None:
-        """Finding file exists with complete sentinel → classified as complete."""
+class TestListConcernFindings:
+    def test_existing_finding(self, tmp_path: Path) -> None:
+        """Finding file exists → exists=True and size > 0."""
         work_dir = _setup_work_dir(tmp_path)
         entry = _make_entry("bugs", "opus")
         create_file(
@@ -70,138 +70,112 @@ class TestClassifyConcernResults:
         )
         dispatch = _write_dispatch(tmp_path, [entry])
 
-        result = fr.classify_concern_results(dispatch, work_dir)
+        result = fr.list_concern_findings(dispatch, work_dir, tmp_path)
 
-        assert len(result["complete"]) == 1
-        assert result["complete"][0]["concern"] == "bugs"
-        assert result["incomplete"] == []
-        assert result["failed"] == []
+        assert len(result) == 1
+        assert result[0]["concern"] == "bugs"
+        assert result[0]["model"] == "opus"
+        assert result[0]["exists"] is True
+        assert result[0]["size"] > 0
 
-    def test_incomplete_finding(self, tmp_path: Path) -> None:
-        """Finding file exists with incomplete sentinel → classified as incomplete."""
+    def test_existing_finding_size(self, tmp_path: Path) -> None:
+        """Finding file with incomplete sentinel → still just reports exists=True and size > 0."""
         work_dir = _setup_work_dir(tmp_path)
         entry = _make_entry("security", "gemini")
+        content = "Review Status: This review is incomplete — 3 of 7 areas examined.\n\nPartial."
         create_file(
             tmp_path,
             entry["finding_path"],
-            "Review Status: This review is incomplete — 3 of 7 areas examined.\n\nPartial.",
+            content,
         )
         dispatch = _write_dispatch(tmp_path, [entry])
 
-        result = fr.classify_concern_results(dispatch, work_dir)
+        result = fr.list_concern_findings(dispatch, work_dir, tmp_path)
 
-        assert len(result["incomplete"]) == 1
-        assert result["incomplete"][0]["concern"] == "security"
-        assert result["complete"] == []
-        assert result["failed"] == []
+        assert len(result) == 1
+        assert result[0]["concern"] == "security"
+        assert result[0]["exists"] is True
+        assert result[0]["size"] > 0
 
     def test_missing_finding(self, tmp_path: Path) -> None:
-        """Finding file doesn't exist → classified as failed."""
+        """Finding file doesn't exist → exists=False and size=0."""
         work_dir = _setup_work_dir(tmp_path)
         entry = _make_entry("arch", "haiku")
         dispatch = _write_dispatch(tmp_path, [entry])
 
-        result = fr.classify_concern_results(dispatch, work_dir)
+        result = fr.list_concern_findings(dispatch, work_dir, tmp_path)
 
-        assert len(result["failed"]) == 1
-        assert result["failed"][0]["concern"] == "arch"
-        assert result["failed"][0]["model"] == "haiku"
-        assert result["complete"] == []
-        assert result["incomplete"] == []
+        assert len(result) == 1
+        assert result[0]["concern"] == "arch"
+        assert result[0]["model"] == "haiku"
+        assert result[0]["exists"] is False
+        assert result[0]["size"] == 0
 
     def test_missing_finding_with_trace(self, tmp_path: Path) -> None:
-        """Failed entry includes trace_path when trace file exists."""
+        """Missing finding with trace file → trace_path present."""
         work_dir = _setup_work_dir(tmp_path)
         entry = _make_entry("arch", "haiku")
-        trace_path = create_file(
+        create_file(
             tmp_path,
             ".agents/focused-review/traces/concern--arch--haiku.jsonl",
             '{"type":"trace"}',
         )
         dispatch = _write_dispatch(tmp_path, [entry])
 
-        result = fr.classify_concern_results(dispatch, work_dir)
+        result = fr.list_concern_findings(dispatch, work_dir, tmp_path)
 
-        assert len(result["failed"]) == 1
-        assert result["failed"][0]["trace_path"] == str(trace_path)
-
-    def test_legacy_no_sentinel(self, tmp_path: Path) -> None:
-        """Finding file exists without sentinel → classified as complete (legacy)."""
-        work_dir = _setup_work_dir(tmp_path)
-        entry = _make_entry("bugs", "opus")
-        create_file(
-            tmp_path,
-            entry["finding_path"],
-            "## Bug Findings\n\nFound a null pointer issue in module X.",
-        )
-        dispatch = _write_dispatch(tmp_path, [entry])
-
-        result = fr.classify_concern_results(dispatch, work_dir)
-
-        assert len(result["complete"]) == 1
-        assert result["incomplete"] == []
-        assert result["failed"] == []
+        assert len(result) == 1
+        assert result[0]["exists"] is False
+        assert "trace_path" in result[0]
 
     def test_empty_finding_file(self, tmp_path: Path) -> None:
-        """Empty finding file → classified as complete (legacy)."""
+        """Empty finding file → exists=True and size=0."""
         work_dir = _setup_work_dir(tmp_path)
         entry = _make_entry("bugs", "opus")
         create_file(tmp_path, entry["finding_path"], "")
         dispatch = _write_dispatch(tmp_path, [entry])
 
-        result = fr.classify_concern_results(dispatch, work_dir)
+        result = fr.list_concern_findings(dispatch, work_dir, tmp_path)
 
-        assert len(result["complete"]) == 1
+        assert len(result) == 1
+        assert result[0]["exists"] is True
+        assert result[0]["size"] == 0
 
     def test_mixed_results(self, tmp_path: Path) -> None:
-        """Multiple entries with different statuses → correctly classified."""
+        """Multiple entries → correct exists/size for each."""
         work_dir = _setup_work_dir(tmp_path)
-        complete_entry = _make_entry("bugs", "opus")
-        incomplete_entry = _make_entry("security", "gemini")
-        failed_entry = _make_entry("arch", "haiku")
+        existing_entry = _make_entry("bugs", "opus")
+        another_entry = _make_entry("security", "gemini")
+        missing_entry = _make_entry("arch", "haiku")
 
         create_file(
             tmp_path,
-            complete_entry["finding_path"],
+            existing_entry["finding_path"],
             "Review Status: This review is complete.\n\nDone.",
         )
         create_file(
             tmp_path,
-            incomplete_entry["finding_path"],
+            another_entry["finding_path"],
             "Review Status: This review is incomplete — 2 of 5 areas.\n\nPartial.",
         )
-        # failed_entry: no finding file created
+        # missing_entry: no finding file created
 
         dispatch = _write_dispatch(
-            tmp_path, [complete_entry, incomplete_entry, failed_entry]
+            tmp_path, [existing_entry, another_entry, missing_entry]
         )
 
-        result = fr.classify_concern_results(dispatch, work_dir)
+        result = fr.list_concern_findings(dispatch, work_dir, tmp_path)
 
-        assert len(result["complete"]) == 1
-        assert len(result["incomplete"]) == 1
-        assert len(result["failed"]) == 1
-        assert result["complete"][0]["concern"] == "bugs"
-        assert result["incomplete"][0]["concern"] == "security"
-        assert result["failed"][0]["concern"] == "arch"
-
-    def test_hypothesis_in_incomplete(self, tmp_path: Path) -> None:
-        """Finding with [Hypothesis] heading + incomplete sentinel → classified as incomplete."""
-        work_dir = _setup_work_dir(tmp_path)
-        entry = _make_entry("bugs", "opus")
-        create_file(
-            tmp_path,
-            entry["finding_path"],
-            "Review Status: This review is incomplete — 1 of 4 areas.\n\n"
-            "## [Hypothesis] Possible null dereference\n\nNeeds verification.",
-        )
-        dispatch = _write_dispatch(tmp_path, [entry])
-
-        result = fr.classify_concern_results(dispatch, work_dir)
-
-        assert len(result["incomplete"]) == 1
-        assert result["incomplete"][0]["concern"] == "bugs"
-        assert result["complete"] == []
+        assert len(result) == 3
+        bugs = next(r for r in result if r["concern"] == "bugs")
+        security = next(r for r in result if r["concern"] == "security")
+        arch = next(r for r in result if r["concern"] == "arch")
+        assert bugs["exists"] is True
+        assert bugs["size"] > 0
+        assert security["exists"] is True
+        assert security["size"] > 0
+        assert arch["exists"] is False
+        assert arch["size"] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -293,7 +267,7 @@ class TestMeasureProgress:
             "- [x] Check nulls\n- [~] Partial check\n- [ ] Not done\n- [x] Another done",
         )
 
-        result = fr.measure_progress([entry], work_dir)
+        result = fr.measure_progress([entry], work_dir, tmp_path)
 
         assert result[("bugs", "opus")]["plan_checkmarks"] == 3
 
@@ -303,7 +277,7 @@ class TestMeasureProgress:
         entry = _make_entry("bugs", "opus")
         create_file(tmp_path, entry["finding_path"], "content")
 
-        result = fr.measure_progress([entry], work_dir)
+        result = fr.measure_progress([entry], work_dir, tmp_path)
 
         assert result[("bugs", "opus")]["plan_checkmarks"] == 0
 
@@ -314,7 +288,7 @@ class TestMeasureProgress:
         content = "Hello, world! This is a finding."
         create_file(tmp_path, entry["finding_path"], content)
 
-        result = fr.measure_progress([entry], work_dir)
+        result = fr.measure_progress([entry], work_dir, tmp_path)
 
         expected_size = len(content.encode("utf-8"))
         assert result[("bugs", "opus")]["finding_size"] == expected_size
@@ -324,7 +298,7 @@ class TestMeasureProgress:
         work_dir = _setup_work_dir(tmp_path)
         entry = _make_entry("bugs", "opus")
 
-        result = fr.measure_progress([entry], work_dir)
+        result = fr.measure_progress([entry], work_dir, tmp_path)
 
         assert result[("bugs", "opus")]["finding_size"] == 0
 
@@ -339,7 +313,7 @@ class TestMeasureProgress:
             "- [ ] Not done\n- [ ] Also not done\n- [ ] Still not done",
         )
 
-        result = fr.measure_progress([entry], work_dir)
+        result = fr.measure_progress([entry], work_dir, tmp_path)
 
         assert result[("bugs", "opus")]["plan_checkmarks"] == 0
 
@@ -409,9 +383,9 @@ class TestDetectStuck:
 # ---------------------------------------------------------------------------
 
 
-class TestClassifyConcernsSubcommand:
+class TestListFindingsSubcommand:
     def test_json_output(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-        """Subcommand produces valid JSON with complete/incomplete/failed keys."""
+        """Subcommand produces valid JSON list with finding metadata."""
         work_dir = _setup_work_dir(tmp_path)
         entry = _make_entry("bugs", "opus")
         create_file(
@@ -426,15 +400,17 @@ class TestClassifyConcernsSubcommand:
         args = argparse.Namespace(
             dispatch=str(dispatch),
             work_dir=str(work_dir),
+            repo=str(tmp_path),
         )
-        fr._classify_concerns_cmd(args)
+        fr._list_findings_cmd(args)
 
         captured = capsys.readouterr()
         output = json.loads(captured.out)
-        assert "complete" in output
-        assert "incomplete" in output
-        assert "failed" in output
-        assert len(output["complete"]) == 1
+        assert isinstance(output, list)
+        assert len(output) == 1
+        assert output[0]["concern"] == "bugs"
+        assert output[0]["exists"] is True
+        assert output[0]["size"] > 0
 
 
 class TestBuildContinuationSubcommand:
@@ -471,6 +447,7 @@ class TestMeasureProgressSubcommand:
         args = argparse.Namespace(
             dispatch=str(dispatch),
             work_dir=str(work_dir),
+            repo=str(tmp_path),
         )
         fr._measure_progress_cmd(args)
 
@@ -491,9 +468,13 @@ def _simulate_orchestrator_loop(
     work_dir: Path,
     max_rounds: int = 3,
     *,
+    repo: Path | None = None,
     round_callback: Callable[[int, list[dict]], None] | None = None,
 ) -> dict:
     """Simulate the SKILL.md continuation loop using Python helpers.
+
+    Classification logic lives here (simulating the orchestrator LLM) —
+    list_concern_findings only reports metadata.
 
     round_callback is called before each continuation round with
     (round_number, incomplete_entries) — test code uses this to
@@ -506,6 +487,8 @@ def _simulate_orchestrator_loop(
         'stuck': list,
     }
     """
+    if repo is None:
+        repo = work_dir.parent.parent
     current_dispatch = dispatch_path
     all_stuck: list[tuple[str, str]] = []
     all_complete: list[dict] = []
@@ -513,12 +496,31 @@ def _simulate_orchestrator_loop(
     round_num = 0
 
     while True:
-        result = fr.classify_concern_results(current_dispatch, work_dir)
-        all_complete.extend(result["complete"])
-        all_failed.extend(result["failed"])
+        findings_info = fr.list_concern_findings(current_dispatch, work_dir, repo)
+
+        # Orchestrator classification (simulated here — in prod, the LLM does this)
+        complete: list[dict] = []
+        incomplete: list[dict] = []
+        failed: list[dict] = []
+        for info in findings_info:
+            if not info["exists"]:
+                failed.append(info)
+            else:
+                finding_path = repo / str(info["finding_path"])
+                text = finding_path.read_text(encoding="utf-8")
+                first_line = text.split("\n", 1)[0] if text else ""
+                if first_line.startswith(fr._INCOMPLETE_SENTINEL):
+                    incomplete.append(info)
+                elif first_line.startswith(fr._COMPLETE_SENTINEL):
+                    complete.append(info)
+                else:
+                    complete.append(info)  # legacy
+
+        all_complete.extend(complete)
+        all_failed.extend(failed)
 
         incomplete = [
-            e for e in result["incomplete"]
+            e for e in incomplete
             if (e["concern"], e["model"]) not in all_stuck
         ]
 
@@ -530,16 +532,16 @@ def _simulate_orchestrator_loop(
                 "stuck": all_stuck,
             }
 
-        incomplete_pairs = [(e["concern"], e["model"]) for e in incomplete]
+        incomplete_pairs = [(str(e["concern"]), str(e["model"])) for e in incomplete]
         cont_path = work_dir.parent / "concern-dispatch-continue.json"
         fr.build_continuation_dispatch(dispatch_path, incomplete_pairs, cont_path)
 
-        previous = fr.measure_progress(incomplete, work_dir)
+        previous = fr.measure_progress(incomplete, work_dir, repo)
 
         if round_callback:
             round_callback(round_num, incomplete)
 
-        current = fr.measure_progress(incomplete, work_dir)
+        current = fr.measure_progress(incomplete, work_dir, repo)
         stuck_pairs = fr.detect_stuck(current, previous)
         all_stuck.extend(stuck_pairs)
 

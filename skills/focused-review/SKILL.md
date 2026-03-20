@@ -114,10 +114,18 @@ Rule agents write their findings directly to `.agents/focused-review/findings/`.
 
 1. **Classify results** — Run:
    ```bash
-   python {script_path} classify-concerns --dispatch .agents/focused-review/concern-dispatch.json --work-dir .agents/focused-review
+   python {script_path} list-findings --dispatch .agents/focused-review/concern-dispatch.json --work-dir .agents/focused-review --repo .
    ```
-   Parse the JSON output. If `incomplete` is empty, proceed to Phase 2. If `failed` is
-   non-empty, note the failures for reporting in step 7.
+   Parse the JSON output — an array of entries with `exists`, `size`, `finding_path`, and optional `trace_path`.
+
+   Classify each entry:
+   - **Failed**: `exists` is `false` — the agent did not produce a finding file.
+   - **Complete or Incomplete**: `exists` is `true` — read the file at `finding_path` and check the **first line**:
+     - Starts with `"Review Status: This review is incomplete"` → **incomplete** (needs continuation)
+     - Starts with `"Review Status: This review is complete."` → **complete**
+     - Anything else → **complete** (legacy format, no sentinel)
+
+   If no entries are incomplete, proceed to Phase 2. If any entries failed, note them for reporting in step 7.
 
 2. **Measure baseline progress** — Run:
    ```bash
@@ -137,8 +145,8 @@ Rule agents write their findings directly to `.agents/focused-review/findings/`.
    ```
    Use `mode="sync"` with `initial_wait: 300`.
 
-5. **Re-classify and detect stuck** — Run `classify-concerns` again on the continuation
-   dispatch, and `measure-progress` again. Compare progress metrics with the baseline
+5. **Re-classify and detect stuck** — Run `list-findings` again on the continuation
+   dispatch, and `measure-progress` again. Classify each entry using the same logic as step 1. Compare progress metrics with the baseline
    from step 2: if an incomplete pair's `finding_size` did not increase AND
    `plan_checkmarks` did not increase, it is **stuck** — treat as complete to avoid
    infinite loops. Remove stuck pairs from the incomplete list.
