@@ -95,12 +95,10 @@ Use the model specified in each entry's `model` field. If `"inherit"`, pass **yo
 **Concern runner** — If `concern-dispatch.json` has entries, start the Python concern runner **in the same response** as the rule agent launches. Use the `powershell` tool with `mode="sync"` and `initial_wait: 300` (concern sessions can take several minutes):
 
 ```bash
-python {script_path} run-concerns --repo . --inherit-model {your_model_id}
+python {script_path} run-concerns --repo .
 ```
 
-Where `{your_model_id}` is the same model ID you used for `inherit` rules above (from your system prompt's `<model>` tag `id` attribute).
-
-This launches `copilot -p` sessions in parallel via ThreadPoolExecutor.It reads `concern-dispatch.json` internally and writes findings to `.agents/focused-review/findings/concern--{name}--{model}.md`.
+This launches `copilot -p` sessions in parallel via ThreadPoolExecutor. It reads `concern-dispatch.json` internally and writes findings to `.agents/focused-review/findings/concern--{name}--{model}.md`.
 
 **Batching**: Max 12 Task agents per message. Include the `run-concerns` bash command in the same response as the first batch of rule agents. If rules need multiple batches (>12 entries), the concern runner is already running from the first batch — subsequent batches only contain rule agents.
 
