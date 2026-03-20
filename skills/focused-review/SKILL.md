@@ -1,7 +1,7 @@
 ---
 name: review
 description: Run unified code reviews through a 5-phase discovery-consolidation-assessment pipeline
-argument-hint: "[branch|commit|staged|unstaged|full|refresh|configure|post-mortem|post-comments] [--no-autofix]"
+argument-hint: "[branch|commit|staged|unstaged|full|refresh|configure|post-mortem|post-comments]"
 ---
 
 You are the orchestrator for the focused-review plugin. Your mode depends on the argument.
@@ -30,7 +30,7 @@ Parse the JSON output and store these values for use throughout:
 
 Parse the user's argument (available as `$ARGUMENTS`):
 
-- First, check if `--no-autofix` is present anywhere in the arguments. If so, set `no_autofix = true` and remove it from the argument string before parsing the mode. This flag suppresses all autofix behavior — violations are reported but never fixed. Useful for CI runs, remote PR reviews, or read-only contexts.
+- First, check if the argument starts with one of the known mode keywords below. If not, default to `branch`.
 - `configure` or `refresh` → Read `REFRESH.md` from the same directory as this skill file and follow its instructions. Pass along the resolved **Script path**, **Rules directory**, **Concerns directory**, **Defaults directory**, and **Configured sources** values.
 - `post-comments` (followed by a PR URL) → Read `POST-COMMENTS.md` from the same directory as this skill file and follow its instructions. Pass along the resolved **Script path** and the **PR URL** (the remaining argument text after `post-comments`).
 - `post-mortem` (with optional finding numbers) → **Post-Mortem Mode**
@@ -52,10 +52,8 @@ Rules and concerns run in parallel during Phase 1. Subsequent phases validate an
 Run the Python helper with the scope from the argument (default `branch`):
 
 ```bash
-python {script_path} prepare-review --repo . --scope {scope} {no_autofix_flag}
+python {script_path} prepare-review --repo . --scope {scope}
 ```
-
-Where `{no_autofix_flag}` is `--no-autofix` if `no_autofix` was set during mode selection, or omitted entirely otherwise.
 
 The script handles everything: git operations, diff generation, file discovery, rule matching, and chunking. It writes all artifacts to `.agents/focused-review/` and prints a JSON summary to stdout.
 
@@ -69,7 +67,7 @@ Parse the JSON summary. If `agents` is 0 and `concern_prompts` is 0, tell the us
 
 Read `.agents/focused-review/dispatch.json` (rule dispatch) and `.agents/focused-review/concern-dispatch.json` (concern dispatch).
 
-**IMPORTANT: Do NOT read the rule files, diff/chunk files, or concern prompt files yourself.** The subagents and concern runner read their own files. You only need the metadata from dispatch.json (paths, model, autofix flag) to construct the agent prompts — never `view` or `cat` the rule or diff content.
+**IMPORTANT: Do NOT read the rule files, diff/chunk files, or concern prompt files yourself.** The subagents and concern runner read their own files. You only need the metadata from dispatch.json (paths, model) to construct the agent prompts — never `view` or `cat` the rule or diff content.
 
 **In a single response**, launch all of the following in parallel:
 
@@ -80,14 +78,12 @@ rule_path: {entry.rule_path}
 chunk_path: {chunk_path_value}
 scope: {entry.scope}
 chunk: {chunk_index} of {total_chunks}
-autofix: {entry.autofix}
 findings_path: .agents/focused-review/findings/rule--{rule-name}.md
 ```
 
 Where:
 - `chunk_path_value` is `entry.chunk_path` when not null, or `.agents/focused-review/changed-files.txt` when null (for `full` scope)
 - `chunk` line: include as `{chunk_index} of {total_chunks}` when both are present. Omit the line entirely when `chunk_index` is null.
-- `autofix` line: include as `true` or `false` from the dispatch entry.
 - `{rule-name}` is the rule filename without extension from `rule_path` (e.g. `null-handling` from `review/rules/null-handling.md`). When a rule has multiple chunks, append the chunk index: `rule--null-handling--2.md`.
 
 Use the model specified in each entry's `model` field. If `"inherit"`, pass **your own model** (the model you are currently running as — check your system prompt's `<model>` tag for the `id` attribute) to the Task tool's `model` parameter. This ensures subagents run at the same quality level as the orchestrator.
@@ -241,7 +237,7 @@ rebuttal_overrides: {JSON list or omit}
 
 Where `{timestamp}` is `YYYYMMDD-HHmmss`.
 
-Wait for completion. **Relay the agent's output directly to the user** — do not rephrase, summarize, or add commentary. The agent's output IS the user-facing summary.
+Wait for completion. **Relay the agent's text output directly to the user — copy-paste it verbatim.** Do not read the report file. Do not rephrase, reformat, or create your own summary table. The reporter agent's output already contains the report path, pipeline stats, findings table with "Found by" column, and rule quality notes. Your only job is to pass it through.
 
 ---
 

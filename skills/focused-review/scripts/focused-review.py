@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import urllib.error
@@ -371,7 +372,6 @@ def _read_rules(rules_dir: Path, repo: Path) -> list[dict[str, object]]:
                 "path": _posix(rule_file, relative_to=repo),
                 "name": name,
                 "model": meta.get("model", "inherit"),
-                "autofix": meta.get("autofix", False),
                 "applies_to": meta.get("applies-to"),
                 "source": meta.get("source"),
             }
@@ -853,7 +853,6 @@ def _build_dispatch(
                     {
                         "rule_path": rule["path"],
                         "model": rule["model"],
-                        "autofix": rule["autofix"],
                         "chunk_path": None,
                         "chunk_index": None,
                         "total_chunks": None,
@@ -877,7 +876,6 @@ def _build_dispatch(
                 {
                     "rule_path": rule["path"],
                     "model": rule["model"],
-                    "autofix": rule["autofix"],
                     "chunk_path": _posix(cp, relative_to=repo),
                     "chunk_index": i + 1,
                     "total_chunks": total_chunks,
@@ -917,6 +915,18 @@ def prepare_review(args: argparse.Namespace) -> None:
     work_dir = repo / ".agents" / "focused-review"
     work_dir.mkdir(parents=True, exist_ok=True)
     (work_dir / "scratchpad").mkdir(exist_ok=True)
+
+    # -- clean stale phase artifacts from previous runs -------------------
+    for stale in ("consolidated.md", "assessed.md"):
+        stale_path = work_dir / stale
+        if stale_path.exists():
+            stale_path.unlink()
+    findings_dir = work_dir / "findings"
+    if findings_dir.exists():
+        shutil.rmtree(findings_dir)
+    rebuttals_dir = work_dir / "rebuttals"
+    if rebuttals_dir.exists():
+        shutil.rmtree(rebuttals_dir)
 
     # -- determine changed files & chunks --------------------------------
 
@@ -979,9 +989,6 @@ def prepare_review(args: argparse.Namespace) -> None:
     # -- dispatch plan ---------------------------------------------------
 
     dispatch = _build_dispatch(rules, chunk_paths, changed_files, scope, repo)
-
-    if getattr(args, "no_autofix", False):
-        dispatch = [{**entry, "autofix": False} for entry in dispatch]
 
     dispatch_path = work_dir / "dispatch.json"
     dispatch_path.write_text(json.dumps(dispatch, indent=2), encoding="utf-8")
@@ -1884,12 +1891,6 @@ def main() -> int:
         "--rules-dir",
         default=None,
         help="Directory containing review rule files (default: resolved from focused-review.json, then review/)",
-    )
-    prepare_parser.add_argument(
-        "--no-autofix",
-        action="store_true",
-        default=False,
-        help="Force all rules to report-only mode, ignoring per-rule autofix settings",
     )
     prepare_parser.set_defaults(func=prepare_review)
 

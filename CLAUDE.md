@@ -38,7 +38,7 @@ Copilot CLI plugin / Claude Code skill that runs parallel code reviews using com
 
 ```yaml
 ---
-autofix: false
+autofix: false                # ignored (kept for compatibility)
 model: haiku
 applies-to: "**/*Tests*.cs"  # optional glob, omit = all files
 source: "CLAUDE.md"
@@ -53,13 +53,13 @@ source: "CLAUDE.md"
 
 ## Release Workflow
 
-Any change to plugin files (skills, agents, scripts, defaults, plugin.json) requires a version bump and publish:
+Any change to plugin files (skills, agents, scripts, defaults, plugin.json) requires a version bump:
 
 1. Bump the `version` field in **both** `plugin.json` and `.claude-plugin/marketplace.json`
 2. Commit, push to `main`
-3. Run `copilot plugin marketplace publish` to update the marketplace
+3. Run `copilot plugin update focused-review` to update the local install
 
-Do this for every change — users install from the marketplace and won't get updates until a new version is published.
+Do this for every change — the local install won't pick up changes until updated.
 
 ## Working With This Codebase
 

@@ -25,7 +25,7 @@ fr = importlib.import_module("focused-review")
 
 
 def _make_rule(name: str) -> str:
-    return f"---\nautofix: false\nmodel: haiku\n---\n# {name}\n## Rule\nCheck."
+    return f"---\nmodel: haiku\n---\n# {name}\n## Rule\nCheck."
 
 
 def _mock_git_results(diff_text: str, changed_files: list[str]) -> list[MagicMock]:

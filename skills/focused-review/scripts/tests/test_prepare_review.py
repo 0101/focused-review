@@ -28,13 +28,11 @@ fr = importlib.import_module("focused-review")
 def _make_rule(
     name: str,
     model: str = "haiku",
-    autofix: bool = False,
     applies_to: str | None = None,
     source: str = "CLAUDE.md",
 ) -> str:
     """Build a rule markdown file with frontmatter."""
     lines = ["---"]
-    lines.append(f"autofix: {'true' if autofix else 'false'}")
     lines.append(f"model: {model}")
     if applies_to is not None:
         lines.append(f'applies-to: "{applies_to}"')
@@ -180,14 +178,13 @@ class TestReadRules:
         create_file(
             rules_dir,
             "test-rule.md",
-            _make_rule("Test Rule", model="haiku", autofix=True, applies_to="**/*.cs"),
+            _make_rule("Test Rule", model="haiku", applies_to="**/*.cs"),
         )
 
         rules = fr._read_rules(rules_dir, tmp_path)
         assert len(rules) == 1
         r = rules[0]
         assert r["model"] == "haiku"
-        assert r["autofix"] is True
         assert r["applies_to"] == "**/*.cs"
 
     def test_missing_directory_returns_empty(self, tmp_path: Path) -> None:
@@ -344,13 +341,11 @@ class TestBuildDispatch:
         name: str = "rule",
         applies_to: str | None = None,
         model: str = "haiku",
-        autofix: bool = False,
     ) -> dict[str, object]:
         return {
             "path": f"review/{name}.md",
             "name": name,
             "model": model,
-            "autofix": autofix,
             "applies_to": applies_to,
             "source": "CLAUDE.md",
         }
@@ -382,7 +377,7 @@ class TestBuildDispatch:
         assert "review/py-only.md" not in rule_paths
 
     def test_dispatch_contains_expected_fields(self, tmp_path: Path) -> None:
-        rules = [self._rule("test", model="sonnet", autofix=True)]
+        rules = [self._rule("test", model="sonnet")]
         chunk_path = tmp_path / "diff.patch"
         chunk_path.write_text(_make_diff(("file.cs", 5)), encoding="utf-8")
 
@@ -391,7 +386,6 @@ class TestBuildDispatch:
         entry = dispatch[0]
         assert entry["rule_path"] == "review/test.md"
         assert entry["model"] == "sonnet"
-        assert entry["autofix"] is True
         assert entry["scope"] == "branch"
         assert "chunk_path" in entry
         assert entry["chunk_index"] == 1

@@ -163,7 +163,7 @@ The Assessment reasoning must explain any severity change.
 
 The assessed report must be **self-contained** — downstream phases (Rebuttal, Presentation) read only this file. Pass through all fields from the consolidated report alongside your assessment.
 
-Write the output to `.agents/focused-review/assessed.md`:
+Write the output to `.agents/focused-review/assessed.md`. If the file already exists (stale from a previous run), delete it first with `powershell` (`Remove-Item`), then create the new file:
 
 ```markdown
 # Assessment Report

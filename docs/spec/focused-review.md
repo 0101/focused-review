@@ -91,7 +91,7 @@ The refresh flow's comparison and file writing are handled by the LLM orchestrat
 
 ```yaml
 ---
-autofix: false
+autofix: false                  # ignored (kept for compatibility)
 model: haiku
 applies-to: "**/*Tests*.cs"    # optional glob, omit = all files
 source: "CLAUDE.md"             # which instruction file produced this
@@ -156,7 +156,7 @@ $COPILOT_CUSTOM_INSTRUCTIONS_DIRS (env var, colon/semicolon-separated paths)
 - **Refresh presents a sane default** — add new, fix contradictions, leave rest — but user can override each decision
 - **Python for deterministic, performance-critical work** — discovery, diff splitting, dispatch planning
 - **LLM for everything requiring understanding** — rule extraction, comparison against existing rules, contradiction detection, file writing during refresh
-- **Rules default to report-only (no autofix)** — user must explicitly confirm auto-fix candidates during refresh
+- **Review pipeline is read-only** — the pipeline reports findings but never modifies source files; fix suggestions stay in findings
 - **Review agents inherit the orchestrator's model by default** — rules can override to `haiku` or `sonnet` for mechanical checks
 - **Generation agents use Sonnet** — better at structured extraction from prose
 - **Windows path compatibility required** — primary dev environment is Windows
