@@ -535,6 +535,8 @@ class TestGenerateConcernPrompts:
         assert "## Output Destination" in content
         assert "concern--bugs--opus.md" in content
         assert "create" in content
+        assert "edit" in content
+        assert "continuation" in content.lower()
 
     def test_dispatch_entry_includes_finding_path(self, tmp_path: Path) -> None:
         """Dispatch entries include the finding_path the prompt advertises."""
@@ -551,6 +553,130 @@ class TestGenerateConcernPrompts:
         assert "finding_path" in entries[0]
         assert "concern--bugs--opus.md" in entries[0]["finding_path"]
         assert "\\" not in entries[0]["finding_path"]
+
+    def test_prompt_contains_working_protocol(self, tmp_path: Path) -> None:
+        """Prompt includes the Working Protocol section for incremental review."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        work_dir = repo / ".agents" / "focused-review"
+        work_dir.mkdir(parents=True)
+
+        concerns = [self._concern("bugs")]
+        changed = ["src/Foo.cs"]
+
+        entries = fr._generate_concern_prompts(concerns, changed, work_dir, repo)
+
+        content = (repo / entries[0]["prompt_path"]).read_text(encoding="utf-8")
+        assert "## Working Protocol" in content
+        assert "### 1. Start Timer + Continuation Check" in content
+        assert "### 2. Plan Your Work (BEFORE reading any code)" in content
+        assert "### 3. Review One Group at a Time" in content
+        assert "### 4. React to Timer" in content
+        assert "### 5. Write Review Status" in content
+
+    def test_working_protocol_handles_partial_state(self, tmp_path: Path) -> None:
+        """Continuation Detection handles the case where only one file exists."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        work_dir = repo / ".agents" / "focused-review"
+        work_dir.mkdir(parents=True)
+
+        concerns = [self._concern("bugs")]
+        changed = ["src/Foo.cs"]
+
+        entries = fr._generate_concern_prompts(concerns, changed, work_dir, repo)
+
+        content = (repo / entries[0]["prompt_path"]).read_text(encoding="utf-8")
+        assert "only one exists" in content.lower()
+
+    def test_working_protocol_contains_soft_timeout(self, tmp_path: Path) -> None:
+        """Working Protocol injects the soft timeout value into the timer command."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        work_dir = repo / ".agents" / "focused-review"
+        work_dir.mkdir(parents=True)
+
+        concerns = [self._concern("bugs")]
+        changed = ["src/Foo.cs"]
+
+        entries = fr._generate_concern_prompts(concerns, changed, work_dir, repo)
+
+        content = (repo / entries[0]["prompt_path"]).read_text(encoding="utf-8")
+        assert f"time.sleep({fr.CONCERN_SOFT_TIMEOUT_SECS})" in content
+
+    def test_working_protocol_contains_plan_path(self, tmp_path: Path) -> None:
+        """Working Protocol references the correct plan file in scratchpad."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        work_dir = repo / ".agents" / "focused-review"
+        work_dir.mkdir(parents=True)
+
+        concerns = [self._concern("bugs")]
+        changed = ["src/Foo.cs"]
+
+        entries = fr._generate_concern_prompts(concerns, changed, work_dir, repo)
+
+        content = (repo / entries[0]["prompt_path"]).read_text(encoding="utf-8")
+        assert "scratchpad/bugs--opus--plan.md" in content
+
+    def test_working_protocol_contains_review_status_sentinels(
+        self, tmp_path: Path,
+    ) -> None:
+        """Working Protocol includes both complete and incomplete sentinel text."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        work_dir = repo / ".agents" / "focused-review"
+        work_dir.mkdir(parents=True)
+
+        concerns = [self._concern("bugs")]
+        changed = ["src/Foo.cs"]
+
+        entries = fr._generate_concern_prompts(concerns, changed, work_dir, repo)
+
+        content = (repo / entries[0]["prompt_path"]).read_text(encoding="utf-8")
+        assert "Review Status: This review is complete." in content
+        assert (
+            "Review Status: This review is incomplete, please invoke the agent "
+            "again to continue reviewing."
+        ) in content
+
+    def test_working_protocol_per_model_paths(self, tmp_path: Path) -> None:
+        """Each model variant gets its own report and plan paths."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        work_dir = repo / ".agents" / "focused-review"
+        work_dir.mkdir(parents=True)
+
+        concerns = [self._concern("bugs", models=["opus", "codex"])]
+        changed = ["src/Foo.cs"]
+
+        entries = fr._generate_concern_prompts(concerns, changed, work_dir, repo)
+
+        assert len(entries) == 2
+        for entry in entries:
+            content = (repo / entry["prompt_path"]).read_text(encoding="utf-8")
+            model = entry["model"]
+            assert f"concern--bugs--{model}.md" in content
+            assert f"bugs--{model}--plan.md" in content
+
+    @patch.object(fr, "CONCERN_SOFT_TIMEOUT_SECS", 120)
+    def test_working_protocol_respects_custom_soft_timeout(
+        self, tmp_path: Path,
+    ) -> None:
+        """Custom CONCERN_SOFT_TIMEOUT value is injected into the timer command."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        work_dir = repo / ".agents" / "focused-review"
+        work_dir.mkdir(parents=True)
+
+        concerns = [self._concern("bugs")]
+        changed = ["src/Foo.cs"]
+
+        entries = fr._generate_concern_prompts(concerns, changed, work_dir, repo)
+
+        content = (repo / entries[0]["prompt_path"]).read_text(encoding="utf-8")
+        assert "time.sleep(120)" in content
+        assert "time.sleep(600)" not in content
 
 
 # ---------------------------------------------------------------------------

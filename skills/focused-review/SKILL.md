@@ -106,6 +106,48 @@ If `dispatch.json` is empty (no rules matched), only run concerns. If `concern-d
 
 Rule agents write their findings directly to `.agents/focused-review/findings/`. The concern runner does the same. After all agents complete, verify the findings directory has the expected files before proceeding.
 
+**Concern continuation loop** — After the concern runner completes and rule findings are saved, check whether any concern agents need continuation. If `concern-dispatch.json` was empty (no concerns were dispatched), skip this loop entirely.
+
+1. **Classify results** — Run:
+   ```bash
+   python {script_path} list-findings --dispatch .agents/focused-review/concern-dispatch.json --work-dir .agents/focused-review --repo .
+   ```
+   Parse the JSON output — an array of entries with `exists`, `size`, `finding_path`, and optional `trace_path`.
+
+   Classify each entry:
+   - **Failed**: `exists` is `false` — the agent did not produce a finding file.
+   - **Complete or Incomplete**: `exists` is `true` — read the file at `finding_path` and check the **first line**:
+     - Starts with `"Review Status: This review is incomplete"` → **incomplete** (needs continuation)
+     - Starts with `"Review Status: This review is complete."` → **complete**
+     - Anything else → **complete** (legacy format, no sentinel)
+
+   If no entries are incomplete, proceed to Phase 2. If any entries failed, note them for reporting in step 5.
+
+2. **Build continuation dispatch** — Format the incomplete pairs as `concern:model`
+   comma-separated, then run:
+   ```bash
+   python {script_path} build-continuation --dispatch .agents/focused-review/concern-dispatch.json --incomplete "{pairs}" --output .agents/focused-review/concern-dispatch-continue.json
+   ```
+
+3. **Re-invoke** — Run the concern runner with the continuation dispatch:
+   ```bash
+   python {script_path} run-concerns --repo . --dispatch .agents/focused-review/concern-dispatch-continue.json --inherit-model {your_model_id}
+   ```
+   Use `mode="sync"` with `initial_wait: 300`.
+
+4. **Repeat** — Go back to step 1 (using the continuation dispatch for classification).
+   Run at most **3 continuation rounds** total (not counting the initial `run-concerns`
+   invocation). Stop early if all pairs are complete.
+
+5. **Report failures** — Before proceeding to Phase 2, if any (concern, model) pairs
+   were agent failures, tell the user:
+   ```
+   ⚠ {n} concern agent(s) failed to produce findings:
+   - {concern} ({model}): no output file. Trace: {trace_path}
+   ```
+   If no trace_path is provided for a failure, omit the trace pointer. These failures
+   are informational — they do not block the review.
+
 ### Step 3: Phase 2 — Consolidation
 
 Launch a `focused-review:review-consolidator` Task agent with this prompt:

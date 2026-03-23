@@ -54,8 +54,12 @@ DEFAULT_CONCERNS_DIR = "review/concerns/"
 BUILTIN_CONCERNS_DIR = Path(__file__).resolve().parent.parent / "defaults" / "concerns"
 
 COPILOT_CMD = os.environ.get("COPILOT_CMD", "copilot")
-CONCERN_TIMEOUT_SECS = int(os.environ.get("CONCERN_TIMEOUT", "1200"))
-CONCERN_RETRIES = int(os.environ.get("CONCERN_RETRIES", "2"))
+
+_COMPLETE_SENTINEL = "Review Status: This review is complete."
+_INCOMPLETE_SENTINEL = "Review Status: This review is incomplete"
+
+CONCERN_HARD_TIMEOUT_SECS = int(os.environ.get("CONCERN_HARD_TIMEOUT", "1200"))
+CONCERN_SOFT_TIMEOUT_SECS = int(os.environ.get("CONCERN_SOFT_TIMEOUT", "600"))
 CONCERN_MAX_WORKERS = int(os.environ.get("CONCERN_MAX_WORKERS", "4"))
 
 # Shorthand model names used in concern files → full CLI model identifiers.
@@ -681,16 +685,109 @@ def _generate_concern_prompts(
                 work_dir / "findings" / f"concern--{concern['name']}--{model}.md",
                 relative_to=repo,
             )
+            plan_rel = _posix(
+                work_dir / "scratchpad" / f"{concern['name']}--{model}--plan.md",
+                relative_to=repo,
+            )
             lines.extend([
                 "",
                 "---",
                 "",
                 "## Output Destination",
                 "",
-                f"Write your findings report to `{finding_rel}` using the `create` tool.",
+                f"Report file: `{finding_rel}`",
+                f"Plan file: `{plan_rel}`",
+                "",
+                "On a **fresh run** (files don't exist), use the `create` tool to "
+                "write your report. On a **continuation** (files already exist), use "
+                "the `edit` tool to update/append to the existing report.",
                 "Follow the Output Format above exactly.",
-                "If no findings, write a single line: `NO FINDINGS`.",
                 "Do NOT print your findings to stdout — write them to the file.",
+            ])
+
+            # Inject the Working Protocol so agents write incrementally
+            # and can be continued across multiple invocations.
+            soft_timeout = CONCERN_SOFT_TIMEOUT_SECS
+            lines.extend([
+                "",
+                "---",
+                "",
+                "## Working Protocol",
+                "",
+                "Follow this protocol exactly for every review invocation.",
+                "",
+                "### 1. Start Timer + Continuation Check",
+                "",
+                "Do these two things in your **very first tool call** (parallel):",
+                "",
+                "1. Start a background timer:",
+                f'   `python -c "import time; time.sleep({soft_timeout})"` '
+                "(async, non-detached)",
+                "2. Check if your **report file** and **plan file** already exist",
+                "",
+                "Then:",
+                "",
+                f"- **Neither exists** → fresh review. Go to step 2.",
+                "- **Both exist** → continuation. Read them, skip to step 3, "
+                "resume from unchecked groups.",
+                "- **Only one exists** → delete it, treat as fresh.",
+                "",
+                "### 2. Plan Your Work (BEFORE reading any code)",
+                "",
+                "**Your next tool call MUST create the plan file.** Do NOT read "
+                "any diffs or source files first. Use only the Changed Files list "
+                "above to create your plan.",
+                "",
+                "1. Group the changed files into logical clusters (by feature, "
+                "module, or directory).",
+                "2. Write the plan as a checklist to:",
+                f"   `{plan_rel}`",
+                "3. **Assess scope**: if you have many groups, you may not finish "
+                "them all. Prioritize groups most likely to contain issues for "
+                "your concern type. Put those first.",
+                "",
+                "### 3. Review One Group at a Time",
+                "",
+                "For each group in plan order:",
+                "",
+                "1. Read the diffs for this group. Trace into source files as "
+                "needed — go as deep as the code requires to confirm or rule "
+                "out a bug.",
+                "2. **When you're done reviewing this group**, write to your "
+                "report file before moving on:",
+                f"   - Found issues → append findings to `{finding_rel}` "
+                "(using the Output Format above).",
+                "   - No issues → append: `<!-- no findings: [group name] -->`",
+                "3. Mark the group `[x]` in your plan file.",
+                "4. Move to the next group.",
+                "",
+                "### 4. React to Timer",
+                "",
+                "When the timer notification arrives, **stop investigating "
+                "immediately**. Do not read any more files or run any more "
+                "searches. Your process will be killed shortly after this signal.",
+                "",
+                "Write to disk NOW:",
+                "",
+                "1. Any confirmed findings for the current group (full format).",
+                "2. Any hypothesis you are actively investigating — write it as "
+                "`### [Hypothesis]` with what you've checked so far and what "
+                "remains to verify. This will be picked up in the next session.",
+                "3. Mark the current group `[~]` (partially reviewed) in your "
+                "plan file.",
+                "4. Go to step 5.",
+                "",
+                "If all groups were reviewed before the timer → go to step 5.",
+                "",
+                "### 5. Write Review Status",
+                "",
+                "At the **very top** of your report file, write exactly one of:",
+                "",
+                f"- `{_COMPLETE_SENTINEL}`",
+                f"- `{_INCOMPLETE_SENTINEL}, please invoke the "
+                "agent again to continue reviewing.`",
+                "",
+                "This line MUST be the first line of your report file.",
             ])
 
             prompt_path.write_text("\n".join(lines), encoding="utf-8")
@@ -817,6 +914,7 @@ def prepare_review(args: argparse.Namespace) -> None:
 
     work_dir = repo / ".agents" / "focused-review"
     work_dir.mkdir(parents=True, exist_ok=True)
+    (work_dir / "scratchpad").mkdir(exist_ok=True)
 
     # -- clean stale phase artifacts from previous runs -------------------
     for stale in ("consolidated.md", "assessed.md"):
@@ -912,6 +1010,106 @@ def prepare_review(args: argparse.Namespace) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Continuation helpers
+# ---------------------------------------------------------------------------
+
+
+def _read_dispatch(path: Path) -> list[dict[str, str]]:
+    """Read and parse a JSON dispatch file."""
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def list_concern_findings(
+    dispatch_path: Path,
+    work_dir: Path,
+    repo: Path,
+) -> list[dict[str, object]]:
+    """List finding file metadata for each dispatched concern.
+
+    Returns a list of dicts with file existence and size info.
+    Does NOT read file content — classification is the orchestrator's job.
+    """
+    entries = _read_dispatch(dispatch_path)
+    results: list[dict[str, object]] = []
+    for entry in entries:
+        concern = entry["concern"]
+        model = entry["model"]
+        finding_rel = entry.get("finding_path", "")
+        finding_abs = (
+            Path(finding_rel) if Path(finding_rel).is_absolute()
+            else repo / finding_rel
+        ) if finding_rel else (
+            work_dir / "findings" / f"concern--{concern}--{model}.md"
+        )
+
+        info: dict[str, object] = {
+            "concern": concern,
+            "model": model,
+            "finding_path": _posix(finding_abs, relative_to=repo) if not Path(finding_rel).is_absolute() else str(finding_abs),
+            "exists": finding_abs.is_file(),
+            "size": finding_abs.stat().st_size if finding_abs.is_file() else 0,
+        }
+        trace_candidate = work_dir / "traces" / f"concern--{concern}--{model}.jsonl"
+        if trace_candidate.is_file():
+            info["trace_path"] = _posix(trace_candidate, relative_to=repo)
+        results.append(info)
+    return results
+
+
+def build_continuation_dispatch(
+    dispatch_path: Path,
+    incomplete_pairs: list[tuple[str, str]],
+    output_path: Path,
+) -> Path:
+    """Build a filtered dispatch file containing only incomplete (concern, model) pairs.
+
+    Reads the original dispatch, filters to entries matching incomplete_pairs,
+    writes to output_path. Returns output_path.
+    """
+    entries = _read_dispatch(dispatch_path)
+    pair_set = set(incomplete_pairs)
+    filtered = [
+        e for e in entries
+        if (e["concern"], e["model"]) in pair_set
+    ]
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(filtered, indent=2), encoding="utf-8")
+    return output_path
+
+
+# ---------------------------------------------------------------------------
+# Subcommand handlers: continuation
+# ---------------------------------------------------------------------------
+
+
+def _list_findings_cmd(args: argparse.Namespace) -> None:
+    """Handler for list-findings subcommand."""
+    repo = Path(args.repo).resolve()
+    work_dir = Path(args.work_dir).resolve()
+    dispatch_path = Path(args.dispatch).resolve()
+    result = list_concern_findings(dispatch_path, work_dir, repo)
+    print(json.dumps(result, indent=2))
+
+
+def _build_continuation_cmd(args: argparse.Namespace) -> None:
+    """Handler for build-continuation subcommand."""
+    dispatch_path = Path(args.dispatch).resolve()
+    output_path = Path(args.output).resolve()
+    pairs: list[tuple[str, str]] = []
+    for p in args.incomplete.split(","):
+        p = p.strip()
+        if not p:
+            continue
+        parts = p.split(":", 1)
+        if len(parts) != 2:
+            print(f"Warning: ignoring malformed pair '{p}' (expected concern:model)", file=sys.stderr)
+            continue
+        pairs.append((parts[0].strip(), parts[1].strip()))
+    build_continuation_dispatch(dispatch_path, pairs, output_path)
+    print(json.dumps({"written": str(output_path)}))
+
+
+# ---------------------------------------------------------------------------
 # Subcommand: run-concerns
 # ---------------------------------------------------------------------------
 
@@ -921,8 +1119,7 @@ def _run_single_concern(
     repo: Path,
     work_dir: Path,
     *,
-    timeout: int = CONCERN_TIMEOUT_SECS,
-    retries: int = CONCERN_RETRIES,
+    hard_timeout: int = CONCERN_HARD_TIMEOUT_SECS,
     inherit_model: str = "",
 ) -> dict[str, object]:
     """Launch one ``copilot -p`` session for a (concern × model) pair.
@@ -931,10 +1128,12 @@ def _run_single_concern(
     CLI, captures stdout, and writes findings to
     ``work_dir/findings/concern--{name}--{model}.md``.
 
-    Retries on non-zero exit or timeout up to *retries* times.
+    No retries — a single subprocess invocation with *hard_timeout*.
+    Continuation of incomplete reviews is handled by the orchestrator.
 
-    Returns a result dict with keys: ``concern``, ``model``, ``status``,
-    ``finding_path`` (on success), ``error`` (on failure), ``attempt``.
+    Returns a result dict with keys: ``concern``, ``model``, ``status``
+    (``exited`` | ``timed_out`` | ``error``), and ``finding_path`` if the
+    finding file exists on disk after the process finishes.
     """
     concern = entry["concern"]
     model = entry["model"]
@@ -957,7 +1156,7 @@ def _run_single_concern(
 
     traces_dir = work_dir / "traces"
     traces_dir.mkdir(parents=True, exist_ok=True)
-    trace_path = traces_dir / f"{finding_name}.md"
+    trace_path = traces_dir / f"{finding_name}.jsonl"
 
     if not prompt_abs.is_file():
         return {
@@ -965,90 +1164,84 @@ def _run_single_concern(
             "model": model,
             "status": "error",
             "error": f"Prompt file not found: {prompt_rel}",
-            "attempt": 0,
         }
 
     prompt_content = prompt_abs.read_text(encoding="utf-8")
 
     # Prompt passed as direct CLI argument — copilot CLI does not support
     # stdin piping via ``-p -``.
-    cmd = [COPILOT_CMD, "-p", prompt_content, "--allow-all-tools"]
+    cmd = [COPILOT_CMD, "-p", prompt_content, "--allow-all-tools",
+           "--output-format", "json"]
     if model == "inherit":
         if inherit_model:
             cmd.extend(["--model", inherit_model])
     else:
         cmd.extend(["--model", _resolve_model(model)])
 
-    last_error = ""
-    total_attempts = retries + 1
-    for attempt in range(1, total_attempts + 1):
-        try:
-            result = subprocess.run(
-                cmd,
-                cwd=repo,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                encoding="utf-8",
-                errors="replace",
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                # Always save the raw session trace for debugging.
-                trace_path.write_text(result.stdout, encoding="utf-8")
+    pre_mtime = finding_path.stat().st_mtime if finding_path.is_file() else 0
 
-                # The agent was instructed to write clean findings to
-                # finding_path via the create tool.  If it didn't,
-                # don't create a findings file — the trace is saved
-                # for debugging.  Report as a failure so downstream
-                # phases don't treat a missing report as "no findings".
-                if not finding_path.is_file():
-                    return {
-                        "concern": concern,
-                        "model": model,
-                        "status": "failed",
-                        "error": f"Agent did not write findings file. Check trace: {_posix(trace_path, relative_to=repo)}",
-                        "attempt": attempt,
-                    }
+    try:
+        result = subprocess.run(
+            cmd,
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            timeout=hard_timeout,
+            encoding="utf-8",
+            errors="replace",
+        )
+        # Always save the raw session trace for debugging.
+        if result.stdout.strip():
+            trace_path.write_text(result.stdout, encoding="utf-8")
 
+            if not finding_path.is_file():
                 return {
                     "concern": concern,
                     "model": model,
-                    "status": "success",
-                    "finding_path": _posix(finding_path, relative_to=repo),
-                    "attempt": attempt,
+                    "status": "failed",
+                    "error": f"Agent did not write findings file. Check trace: {_posix(trace_path, relative_to=repo)}",
                 }
-            last_error = result.stderr.strip() or f"Exit code {result.returncode}"
-            if result.returncode == 0 and not result.stdout.strip():
-                last_error = "Empty output"
-        except subprocess.TimeoutExpired:
-            last_error = f"Timed out after {timeout}s"
-        except FileNotFoundError:
-            return {
-                "concern": concern,
-                "model": model,
-                "status": "error",
-                "error": f"{COPILOT_CMD} is not installed or not on PATH",
-                "attempt": attempt,
-            }
-        except OSError as exc:
-            # On Windows, CreateProcess has a 32 766-char command-line limit.
-            # When the prompt exceeds this, subprocess.run raises OSError.
-            # Not retryable — the prompt won't shrink between attempts.
-            return {
-                "concern": concern,
-                "model": model,
-                "status": "error",
-                "error": f"OS error (prompt may exceed CLI argument limit): {exc}",
-                "attempt": attempt,
-            }
 
-    return {
-        "concern": concern,
-        "model": model,
-        "status": "failed",
-        "error": last_error,
-        "attempt": total_attempts,
-    }
+        post_mtime = finding_path.stat().st_mtime if finding_path.is_file() else 0
+        out: dict[str, object] = {
+            "concern": concern,
+            "model": model,
+            "status": "exited",
+            "returncode": result.returncode,
+            "finding_updated": post_mtime > pre_mtime,
+        }
+        if finding_path.is_file():
+            out["finding_path"] = _posix(finding_path, relative_to=repo)
+        return out
+
+    except subprocess.TimeoutExpired as exc:
+        # Save whatever stdout was captured before the kill for debugging.
+        if exc.stdout and exc.stdout.strip():
+            trace_path.write_text(exc.stdout, encoding="utf-8")
+        out = {
+            "concern": concern,
+            "model": model,
+            "status": "timed_out",
+        }
+        if finding_path.is_file():
+            out["finding_path"] = _posix(finding_path, relative_to=repo)
+        return out
+    except FileNotFoundError:
+        return {
+            "concern": concern,
+            "model": model,
+            "status": "error",
+            "error": f"{COPILOT_CMD} is not installed or not on PATH",
+        }
+    except OSError as exc:
+        # On Windows, CreateProcess has a 32 766-char command-line limit.
+        # When the prompt exceeds this, subprocess.run raises OSError.
+        return {
+            "concern": concern,
+            "model": model,
+            "status": "error",
+            "error": f"OS error (prompt may exceed CLI argument limit): {exc}",
+        }
 
 
 def run_concerns(args: argparse.Namespace) -> None:
@@ -1056,13 +1249,17 @@ def run_concerns(args: argparse.Namespace) -> None:
 
     Uses :class:`~concurrent.futures.ThreadPoolExecutor` for parallel
     execution.  Each worker invokes :func:`_run_single_concern` with
-    retry and timeout logic.
+    a hard timeout.
 
     Prints a JSON summary on stdout with per-entry results and counts.
     """
     repo = Path(args.repo).resolve()
     work_dir = repo / ".agents" / "focused-review"
-    dispatch_path = work_dir / "concern-dispatch.json"
+    dispatch_path = (
+        Path(args.dispatch).resolve()
+        if getattr(args, "dispatch", None)
+        else work_dir / "concern-dispatch.json"
+    )
 
     if not dispatch_path.is_file():
         print(
@@ -1071,9 +1268,7 @@ def run_concerns(args: argparse.Namespace) -> None:
         )
         sys.exit(1)
 
-    entries: list[dict[str, str]] = json.loads(
-        dispatch_path.read_text(encoding="utf-8")
-    )
+    entries = _read_dispatch(dispatch_path)
 
     if not entries:
         print(json.dumps({
@@ -1085,8 +1280,7 @@ def run_concerns(args: argparse.Namespace) -> None:
         return
 
     max_workers = args.max_workers
-    timeout = args.timeout
-    retries = args.retries
+    hard_timeout = args.hard_timeout
     inherit_model = getattr(args, "inherit_model", "") or ""
 
     results: list[dict[str, object]] = []
@@ -1098,8 +1292,7 @@ def run_concerns(args: argparse.Namespace) -> None:
                 entry,
                 repo,
                 work_dir,
-                timeout=timeout,
-                retries=retries,
+                hard_timeout=hard_timeout,
                 inherit_model=inherit_model,
             ): entry
             for entry in entries
@@ -1115,15 +1308,14 @@ def run_concerns(args: argparse.Namespace) -> None:
                     "model": entry.get("model", "unknown"),
                     "status": "error",
                     "error": f"Unexpected: {exc}",
-                    "attempt": 0,
                 }
             results.append(result)
             status = result["status"]
             concern = result["concern"]
             model = result["model"]
-            if status == "success":
+            if result.get("finding_path"):
                 print(
-                    f"  ✓ {concern} ({model}): {result.get('finding_path', '')}",
+                    f"  ✓ {concern} ({model}): {result['finding_path']}",
                     file=sys.stderr,
                 )
             else:
@@ -1132,7 +1324,7 @@ def run_concerns(args: argparse.Namespace) -> None:
                     file=sys.stderr,
                 )
 
-    success_count = sum(1 for r in results if r["status"] == "success")
+    success_count = sum(1 for r in results if r.get("finding_path"))
     failed_count = len(results) - success_count
 
     summary = {
@@ -1719,16 +1911,15 @@ def main() -> int:
         help=f"Maximum parallel copilot sessions (default: {CONCERN_MAX_WORKERS})",
     )
     concerns_parser.add_argument(
-        "--timeout",
+        "--hard-timeout",
         type=int,
-        default=CONCERN_TIMEOUT_SECS,
-        help=f"Timeout per copilot session in seconds (default: {CONCERN_TIMEOUT_SECS})",
+        default=CONCERN_HARD_TIMEOUT_SECS,
+        help=f"Hard timeout per copilot session in seconds (default: {CONCERN_HARD_TIMEOUT_SECS})",
     )
     concerns_parser.add_argument(
-        "--retries",
-        type=int,
-        default=CONCERN_RETRIES,
-        help=f"Number of retries per failed session (default: {CONCERN_RETRIES})",
+        "--dispatch",
+        default=None,
+        help="Path to an alternate dispatch JSON file (default: .agents/focused-review/concern-dispatch.json)",
     )
     concerns_parser.add_argument(
         "--inherit-model",
@@ -1736,6 +1927,50 @@ def main() -> int:
         help="Model ID to use for entries with model='inherit' (the orchestrator's own model)",
     )
     concerns_parser.set_defaults(func=run_concerns)
+
+    # list-findings subcommand
+    list_findings_parser = subparsers.add_parser(
+        "list-findings",
+        help="List finding file metadata for each dispatched concern",
+    )
+    list_findings_parser.add_argument(
+        "--dispatch",
+        required=True,
+        help="Path to dispatch JSON file",
+    )
+    list_findings_parser.add_argument(
+        "--work-dir",
+        default=".agents/focused-review",
+        help="Working directory (default: .agents/focused-review)",
+    )
+    list_findings_parser.add_argument(
+        "--repo",
+        default=".",
+        help="Path to the repository root (default: current directory)",
+    )
+    list_findings_parser.set_defaults(func=_list_findings_cmd)
+
+    # build-continuation subcommand
+    build_cont_parser = subparsers.add_parser(
+        "build-continuation",
+        help="Build a filtered dispatch file for incomplete concern/model pairs",
+    )
+    build_cont_parser.add_argument(
+        "--dispatch",
+        required=True,
+        help="Path to original dispatch JSON file",
+    )
+    build_cont_parser.add_argument(
+        "--incomplete",
+        required=True,
+        help="Comma-separated concern:model pairs (e.g. bugs:opus,security:gemini)",
+    )
+    build_cont_parser.add_argument(
+        "--output",
+        required=True,
+        help="Output path for filtered dispatch JSON",
+    )
+    build_cont_parser.set_defaults(func=_build_continuation_cmd)
 
     # parse-pr-url subcommand
     pr_url_parser = subparsers.add_parser(
