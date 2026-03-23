@@ -152,6 +152,26 @@ class TestGlobMatching:
         assert not fr._file_matches_glob("src/Foo.py", "!**/*.py")
         assert fr._file_matches_glob("src/Foo.cs", "!**/*.py")
 
+    def test_directory_prefix_with_doublestar(self) -> None:
+        pattern = "test/**/*.cs"
+        assert fr._file_matches_glob("test/File.cs", pattern)
+        assert fr._file_matches_glob("test/Sub/File.cs", pattern)
+        assert fr._file_matches_glob("test/A/B/File.cs", pattern)
+        assert fr._file_matches_glob("test/A/B/C/File.cs", pattern)
+        assert not fr._file_matches_glob("src/File.cs", pattern)
+        assert not fr._file_matches_glob("test/File.py", pattern)
+
+    def test_directory_prefix_with_doublestar_deep_dotted_path(self) -> None:
+        """Real-world pattern that triggered the original bug."""
+        assert fr._file_matches_glob(
+            "test/Microsoft.Copilot.Testing.Core.UnitTests/ContextFeedback/TrackerTests.cs",
+            "test/**/*.cs",
+        )
+
+    def test_negation_with_directory_prefix(self) -> None:
+        assert not fr._file_matches_glob("test/Sub/File.cs", "!test/**/*.cs")
+        assert fr._file_matches_glob("src/Code.cs", "!test/**/*.cs")
+
 
 # ---------------------------------------------------------------------------
 # Rule reader

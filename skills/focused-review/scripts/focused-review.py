@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import json
 import os
 import re
@@ -324,21 +325,28 @@ def _parse_frontmatter(content: str) -> tuple[dict[str, object], str]:
 def _file_matches_glob(filepath: str, glob_pattern: str) -> bool:
     """Return True if *filepath* matches *glob_pattern* (``**`` aware).
 
-    Handles the common case where ``**/*.ext`` should also match files
-    at the repository root (``PurePosixPath.match`` requires at least
-    one directory segment for ``**/``).
-
     Negation patterns (``!**/*Tests*.cs``) invert the match: returns
     True for files that do NOT match the inner pattern.
+
+    Uses ``PurePosixPath.full_match`` (Python 3.13+) for correct
+    recursive ``**`` handling, with ``fnmatch`` fallback for older
+    Python where ``PurePosixPath.match`` treats ``**`` as ``*``.
     """
     if glob_pattern.startswith("!"):
         return not _file_matches_glob(filepath, glob_pattern[1:])
-    path = PurePosixPath(filepath.replace("\\", "/"))
-    if path.match(glob_pattern):
+    filepath = filepath.replace("\\", "/")
+
+    # full_match (Python 3.13+) handles ** as zero-or-more directories
+    _full_match = getattr(PurePosixPath, "full_match", None)
+    if _full_match is not None:
+        return bool(PurePosixPath(filepath).full_match(glob_pattern))
+
+    # Fallback: fnmatch handles ** for depth >= 1
+    if fnmatch.fnmatch(filepath, glob_pattern):
         return True
-    # **/ means "zero or more dirs" in user intent — retry under a synthetic parent
-    if "**" in glob_pattern:
-        return PurePosixPath("_" / path).match(glob_pattern)
+    # ** means "zero or more dirs" — collapse **/ for depth-0 match
+    if "**/" in glob_pattern:
+        return fnmatch.fnmatch(filepath, glob_pattern.replace("**/", "", 1))
     return False
 
 
