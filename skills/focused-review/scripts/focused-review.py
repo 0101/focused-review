@@ -53,6 +53,7 @@ CONFIG_USER_LOCATIONS: list[str] = [
 DEFAULT_RULES_DIR = "review/"
 DEFAULT_CONCERNS_DIR = "review/concerns/"
 BUILTIN_CONCERNS_DIR = Path(__file__).resolve().parent.parent / "defaults" / "concerns"
+CONCERN_FRAMEWORK_PATH = Path(__file__).resolve().parent.parent / "defaults" / "concern-framework.md"
 
 COPILOT_CMD = os.environ.get("COPILOT_CMD", "copilot")
 CONCERN_TIMEOUT_SECS = int(os.environ.get("CONCERN_TIMEOUT", "1200"))
@@ -617,9 +618,9 @@ def _generate_concern_prompts(
 ) -> list[dict[str, str]]:
     """Generate one prompt file per ``(concern × model)`` pair.
 
-    Each prompt combines the concern body with the review context
-    (changed files list + diff locations).  Writes files to
-    ``work_dir/prompts/{concern}--{model}.md``.
+    Each prompt wraps the concern body with the concern-runner framework
+    (generic instructions, output format, phase awareness) and appends
+    review context (changed files list + diff locations).
 
     Returns a list of dispatch entries suitable for ``concern-dispatch.json``.
     """
@@ -628,6 +629,11 @@ def _generate_concern_prompts(
 
     # clean previous run
     _clean_dir(prompts_dir)
+
+    # Load the generic concern framework template
+    framework = ""
+    if CONCERN_FRAMEWORK_PATH.exists():
+        framework = CONCERN_FRAMEWORK_PATH.read_text(encoding="utf-8")
 
     prompt_entries: list[dict[str, str]] = []
 
@@ -648,12 +654,18 @@ def _generate_concern_prompts(
         body: str = str(concern.get("body", ""))
         models: list[str] = list(concern.get("models", ["opus"]))  # type: ignore[arg-type]
 
+        # Build the combined prompt: framework wrapping concern body
+        if framework:
+            combined_body = framework.replace("{concern_body}", body.strip())
+        else:
+            combined_body = body.strip()
+
         for model in models:
             prompt_name = f"{concern['name']}--{model}"
             prompt_path = prompts_dir / f"{prompt_name}.md"
 
             lines = [
-                body.strip(),
+                combined_body,
                 "",
                 "---",
                 "",
