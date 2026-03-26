@@ -122,17 +122,40 @@ Wait for completion. If the agent fails, report the error and skip to Step 6 wit
 
 **Skip this step for `full` scope** (no diff to assess against). Proceed directly to Step 6 using the consolidated report.
 
-Launch a `focused-review:review-assessor` Task agent with this prompt:
+Read `.agents/focused-review/consolidated.md`. Parse each finding section (headings starting with `### C-`). Count the total findings. If 0, skip to Step 6.
+
+For each finding, launch a `focused-review:review-assessor` Task agent. Derive the assessment ID from the finding ID: `C-01` → `A-01`, `C-02` → `A-02`, etc.
 
 ```
-consolidated_path: .agents/focused-review/consolidated.md
+finding_id: {e.g. C-01}
+assessment_id: {e.g. A-01}
+finding_text: {the full text of this one finding section, from ### C-XX to the next --- or end}
 diff_path: .agents/focused-review/diff.patch
 rules_dir: {rules_dir}
+output_path: .agents/focused-review/assessments/{assessment_id}.md
 ```
 
-This agent validates each finding: checks if truly introduced by the diff, constructs adversarial counter-arguments, and assigns verdicts (Confirmed / Questionable / Invalid). Writes `.agents/focused-review/assessed.md`.
+Launch assessors in parallel — **all in a single response** (up to 12; if more, use subsequent responses for remaining batches). Each assessor validates one finding independently.
 
-Wait for completion. If the agent fails, report the error and skip to Step 6 using the consolidated report as the data source.
+Wait for all assessors to complete. If individual assessors fail, continue with the rest.
+
+After all assessors complete, read every `.md` file in `.agents/focused-review/assessments/` (in ID order: A-01, A-02, ...). Assemble `.agents/focused-review/assessed.md` by:
+
+1. Counting verdicts from each file (look for `**Verdict:**` lines)
+2. Writing the header:
+
+```markdown
+# Assessment Report
+
+**Findings assessed:** {total}
+**Confirmed:** {count}
+**Questionable:** {count}
+**Invalid:** {count}
+
+---
+```
+
+3. Concatenating all individual assessment sections below the header, separated by `---`
 
 ### Step 5: Phase 4 — Rebuttal (optional)
 
