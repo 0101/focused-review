@@ -124,6 +124,8 @@ Wait for completion. If the agent fails, report the error and skip to Step 6 wit
 
 Read `.agents/focused-review/consolidated.md`. Parse each finding section (headings starting with `### C-`). Count the total findings. If 0, skip to Step 6.
 
+Derive the project context path: take the parent directory of `rules_dir` (e.g., if `rules_dir` is `review/rules/`, the parent is `review/`) and check if `project.md` exists there. If it does, use it as `project_context_path`. If not, omit the line from the assessor prompt.
+
 For each finding, launch a `focused-review:review-assessor` Task agent. Derive the assessment ID from the finding ID: `C-01` → `A-01`, `C-02` → `A-02`, etc.
 
 ```
@@ -132,10 +134,12 @@ assessment_id: {e.g. A-01}
 finding_text: {the full text of this one finding section, from ### C-XX to the next --- or end}
 diff_path: .agents/focused-review/diff.patch
 rules_dir: {rules_dir}
+concerns_dir: {concerns_dir}
+project_context_path: {path to review/project.md — omit this line if file doesn't exist}
 output_path: .agents/focused-review/assessments/{assessment_id}.md
 ```
 
-Launch assessors in parallel — **all in a single response** (up to 12; if more, use subsequent responses for remaining batches). Each assessor validates one finding independently.
+Launch assessors in parallel — **all in a single response** (up to 12; if more, use subsequent responses for remaining batches). Each assessor investigates one finding independently.
 
 Wait for all assessors to complete. If individual assessors fail, continue with the rest.
 

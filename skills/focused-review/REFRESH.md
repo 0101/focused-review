@@ -54,11 +54,55 @@ python -c "import json,os; from pathlib import Path; p=Path('{chosen_path}'); p.
 
 Where `{chosen_path}` is the path selected in Step 4 (expand `~` for user-wide paths), `{rules_dir_value}` is the directory from Step 2, and `{concerns_dir_value}` is the directory from Step 3.
 
-### Step 6: Confirm
+### Step 6: Generate project context
+
+Determine the review root directory — the parent of `rules_dir` (e.g., if `rules_dir` is `review/rules/`, the review root is `review/`). Check if `{review_root}/project.md` already exists.
+
+**If it exists:** Show the user the current content and ask if they want to update it. If no, skip to Step 7.
+
+**If it doesn't exist (or user wants to update):**
+
+Examine the repository to understand the project:
+
+1. **Detect project type** — look at project files (`.csproj`, `package.json`, `Cargo.toml`, `go.mod`, `pyproject.toml`, `*.sln`, etc.), directory structure, and framework indicators. Determine: is this a library, web API, GUI app, CLI tool, compiler/language tool, infrastructure/DevOps, data pipeline, etc.?
+
+2. **Identify priorities** — read any existing instruction files (CLAUDE.md, etc.) and the project structure. What does the project care about most? Consider: correctness, security, performance, clarity/readability, backward compatibility, API stability, test coverage, etc.
+
+3. **Note domain specifics** — what are the non-obvious things a reviewer should know about this codebase? Common patterns, architectural decisions, framework guarantees, known constraints.
+
+Draft a `project.md` and show it to the user:
+
+```markdown
+# Project Review Context
+
+## Project Type
+{what this project is — e.g., "ASP.NET Core web API with React frontend", "F# compiler and language service", "Python CLI tool for data processing"}
+
+## Priorities (highest first)
+1. {most important concern}
+2. {second}
+3. {third}
+{keep to 3-5 items}
+
+## Trade-off Guidance
+- {when X conflicts with Y, prefer X because...}
+- {when A conflicts with B, prefer A because...}
+{2-4 trade-off rules}
+
+## Domain Notes
+- {things about this codebase a reviewer should know}
+- {framework guarantees, architectural patterns, known constraints}
+- {common false-positive patterns specific to this project}
+```
+
+Ask the user to review and edit. After confirmation, write to `{review_root}/project.md`.
+
+### Step 7: Confirm
 
 Tell the user:
-- What was written and where
+- What was written and where (config file + project context if generated)
 - If a project-shared location was chosen (`.claude/`, `focused-review.json`, `.github/`), remind them to commit the file
+- If project context was generated, remind them to commit `{review_root}/project.md` too
 
 ---
 
@@ -326,3 +370,11 @@ The markdown template for each finding.
 ```
 
 After applying changes, tell the user what was done (files created, updated, deleted in both directories) and remind them to review and commit the changes.
+
+### Step 6: Check for project context
+
+Determine the review root directory — the parent of `rules_dir`. Check if `{review_root}/project.md` exists.
+
+If it doesn't exist, tell the user:
+
+> "No project context found. Run `/focused-review configure` to generate `{review_root}/project.md` — this tells the assessor what kind of project this is and what to prioritize (e.g., correctness vs clarity, security criticality). Reviews work without it, but assessment quality improves with project context."
