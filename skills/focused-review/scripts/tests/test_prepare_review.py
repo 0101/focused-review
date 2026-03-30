@@ -683,3 +683,166 @@ class TestPosixHelper:
         result = fr._posix(outside, relative_to=tmp_path)
         # Should not crash, just return posix of the full path
         assert "/" in result or result == "file.cs"
+
+
+# ---------------------------------------------------------------------------
+# _make_pathspecs
+# ---------------------------------------------------------------------------
+
+
+class TestMakePathspecs:
+
+    def test_plain_directory(self) -> None:
+        assert fr._make_pathspecs(["src/auth"]) == ["src/auth"]
+
+    def test_glob_pattern_wrapped(self) -> None:
+        assert fr._make_pathspecs(["**/*.cs"]) == [":(glob)**/*.cs"]
+
+    def test_backslashes_normalized(self) -> None:
+        assert fr._make_pathspecs(["src\\auth"]) == ["src/auth"]
+
+    def test_mixed_paths(self) -> None:
+        result = fr._make_pathspecs(["src/", "**/*.py", "tests/unit"])
+        assert result == ["src/", ":(glob)**/*.py", "tests/unit"]
+
+    def test_question_mark_is_glob(self) -> None:
+        assert fr._make_pathspecs(["src/?.cs"]) == [":(glob)src/?.cs"]
+
+    def test_bracket_is_glob(self) -> None:
+        assert fr._make_pathspecs(["src/[ab].cs"]) == [":(glob)src/[ab].cs"]
+
+    def test_empty_list(self) -> None:
+        assert fr._make_pathspecs([]) == []
+
+
+# ---------------------------------------------------------------------------
+# --path integration in prepare-review
+# ---------------------------------------------------------------------------
+
+
+class TestPrepareReviewPathFilter:
+
+    def _setup_repo_with_rules(
+        self, tmp_path: Path, rules: list[tuple[str, str]]
+    ) -> Path:
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        rules_dir = repo / "review"
+        rules_dir.mkdir()
+        for name, content in rules:
+            create_file(rules_dir, name, content)
+        return repo
+
+    def test_path_filter_restricts_diff_files(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """--path filters which files appear in the diff via git pathspecs."""
+        repo = self._setup_repo_with_rules(
+            tmp_path,
+            [("rule.md", _make_rule("Rule"))],
+        )
+
+        # Only src/A.cs should appear in diff when --path src/ is used.
+        # The mock simulates git already having filtered the diff.
+        diff = _make_diff(("src/A.cs", 10))
+
+        args = argparse.Namespace(
+            repo=str(repo), scope="branch", rules_dir="review/",
+            path=["src/"],
+        )
+
+        with patch.object(fr, "_run_git", side_effect=_mock_git_results(diff, ["src/A.cs"])):
+            fr.prepare_review(args)
+
+        captured = capsys.readouterr()
+        summary = json.loads(captured.out)
+        assert summary["changed_files"] == 1
+        assert summary["agents"] == 1
+
+    def test_path_filter_with_full_scope(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """--path restricts git ls-files output in full scope."""
+        repo = self._setup_repo_with_rules(
+            tmp_path,
+            [("rule.md", _make_rule("Rule"))],
+        )
+
+        ls_mock = MagicMock()
+        ls_mock.returncode = 0
+        ls_mock.stdout = "src/A.cs\nsrc/B.cs\n"
+
+        args = argparse.Namespace(
+            repo=str(repo), scope="full", rules_dir="review/",
+            path=["src/"],
+        )
+
+        with patch.object(fr, "_run_git", return_value=ls_mock):
+            fr.prepare_review(args)
+
+        captured = capsys.readouterr()
+        summary = json.loads(captured.out)
+        assert summary["changed_files"] == 2
+        assert summary["scope"] == "full"
+
+    def test_no_path_filter_default(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Without --path, all files are included (no pathspecs passed)."""
+        repo = self._setup_repo_with_rules(
+            tmp_path,
+            [("rule.md", _make_rule("Rule"))],
+        )
+
+        diff = _make_diff(("src/A.cs", 10), ("tests/B.cs", 10))
+
+        args = argparse.Namespace(
+            repo=str(repo), scope="branch", rules_dir="review/",
+            path=None,
+        )
+
+        with patch.object(
+            fr, "_run_git",
+            side_effect=_mock_git_results(diff, ["src/A.cs", "tests/B.cs"]),
+        ):
+            fr.prepare_review(args)
+
+        captured = capsys.readouterr()
+        summary = json.loads(captured.out)
+        assert summary["changed_files"] == 2
+
+    def test_path_filter_passes_pathspecs_to_git(self, tmp_path: Path) -> None:
+        """Verify that --path arguments end up as git pathspec arguments."""
+        repo = self._setup_repo_with_rules(
+            tmp_path,
+            [("rule.md", _make_rule("Rule"))],
+        )
+
+        diff = _make_diff(("src/A.cs", 10))
+        git_calls: list[list[str]] = []
+
+        def mock_run_git(cmd: list[str], cwd: object) -> MagicMock:
+            git_calls.append(cmd)
+            m = MagicMock()
+            m.returncode = 0
+            if "--name-only" in cmd:
+                m.stdout = "src/A.cs\n"
+            else:
+                m.stdout = diff
+            return m
+
+        args = argparse.Namespace(
+            repo=str(repo), scope="branch", rules_dir="review/",
+            path=["src/", "**/*.cs"],
+        )
+
+        with patch.object(fr, "_run_git", side_effect=mock_run_git):
+            fr.prepare_review(args)
+
+        # Both git diff calls should end with -- src/ :(glob)**/*.cs
+        for call in git_calls:
+            assert "--" in call, f"Expected pathspec separator in {call}"
+            idx = call.index("--")
+            pathspecs = call[idx + 1:]
+            assert "src/" in pathspecs
+            assert ":(glob)**/*.cs" in pathspecs

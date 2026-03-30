@@ -449,8 +449,13 @@ def _run_git(cmd: list[str], repo: Path) -> subprocess.CompletedProcess[str]:
         sys.exit(1)
 
 
-def _get_diff(scope: str, repo: Path) -> tuple[str, list[str]]:
-    """Run ``git diff`` for *scope* and return ``(diff_text, changed_files)``."""
+def _get_diff(
+    scope: str, repo: Path, pathspecs: list[str] | None = None,
+) -> tuple[str, list[str]]:
+    """Run ``git diff`` for *scope* and return ``(diff_text, changed_files)``.
+
+    When *pathspecs* is provided, the diff is restricted to matching paths.
+    """
     scope_args = {
         "branch": ["origin/main...HEAD"],
         "commit": ["HEAD~1..HEAD"],
@@ -462,8 +467,9 @@ def _get_diff(scope: str, repo: Path) -> tuple[str, list[str]]:
 
     base = ["git", "--no-pager", "diff", "--no-color"]
     extra = scope_args[scope]
+    path_args = ["--"] + pathspecs if pathspecs else []
 
-    diff_result = _run_git(base + extra, repo)
+    diff_result = _run_git(base + extra + path_args, repo)
     if diff_result.returncode != 0:
         print(
             json.dumps({"error": f"git diff failed: {diff_result.stderr.strip()}"}),
@@ -471,7 +477,7 @@ def _get_diff(scope: str, repo: Path) -> tuple[str, list[str]]:
         )
         sys.exit(1)
 
-    names_result = _run_git(base + ["--name-only"] + extra, repo)
+    names_result = _run_git(base + ["--name-only"] + extra + path_args, repo)
     changed = [f for f in names_result.stdout.splitlines() if f.strip()]
 
     return diff_result.stdout, changed
@@ -482,9 +488,33 @@ def _changed_files_from_diff(diff_text: str) -> list[str]:
     return [m.group(1) for m in re.finditer(r"^diff --git a/.+? b/(.+?)$", diff_text, re.MULTILINE)]
 
 
-def _all_tracked_files(repo: Path) -> list[str]:
-    """``git ls-files`` — for full-codebase scope."""
-    result = _run_git(["git", "--no-pager", "ls-files"], repo)
+def _make_pathspecs(paths: list[str]) -> list[str]:
+    """Convert user-provided path filters into git pathspec arguments.
+
+    Plain paths pass through unchanged (git treats them as prefix matches).
+    Paths with glob characters (``*``, ``?``, ``[``) are wrapped in
+    ``:(glob)`` so git interprets them correctly.
+    """
+    specs: list[str] = []
+    for p in paths:
+        p = p.replace("\\", "/")
+        if any(c in p for c in ("*", "?", "[")):
+            specs.append(f":(glob){p}")
+        else:
+            specs.append(p)
+    return specs
+
+
+def _all_tracked_files(repo: Path, pathspecs: list[str] | None = None) -> list[str]:
+    """``git ls-files`` — for full-codebase scope.
+
+    When *pathspecs* is provided, only files matching at least one spec
+    are returned (filtering is done by git itself).
+    """
+    cmd = ["git", "--no-pager", "ls-files"]
+    if pathspecs:
+        cmd += ["--"] + pathspecs
+    result = _run_git(cmd, repo)
     if result.returncode != 0:
         print(
             json.dumps({"error": f"git ls-files failed: {result.stderr.strip()}"}),
@@ -852,12 +882,14 @@ def prepare_review(args: argparse.Namespace) -> None:
 
     # -- determine changed files & chunks --------------------------------
 
+    pathspecs = _make_pathspecs(args.path) if getattr(args, "path", None) else None
+
     diff_text = ""
     if scope == "full":
-        changed_files = _all_tracked_files(repo)
+        changed_files = _all_tracked_files(repo, pathspecs)
         chunk_paths: list[Path] = []
     else:
-        diff_text, changed_files = _get_diff(scope, repo)
+        diff_text, changed_files = _get_diff(scope, repo, pathspecs)
         if not diff_text.strip():
             # Write empty concern-dispatch so downstream run-concerns
             # doesn't crash with FileNotFoundError.
@@ -1720,6 +1752,12 @@ def main() -> int:
         "--rules-dir",
         default=None,
         help="Directory containing review rule files (default: resolved from focused-review.json, then review/)",
+    )
+    prepare_parser.add_argument(
+        "--path",
+        nargs="*",
+        default=None,
+        help="Restrict review to files matching these paths (directories, globs). Multiple values allowed.",
     )
     prepare_parser.set_defaults(func=prepare_review)
 

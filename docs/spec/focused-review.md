@@ -80,7 +80,20 @@ Refresh scans instruction files, extracts rules, compares against existing rules
 /focused-review staged       # Staged changes
 /focused-review unstaged     # Unstaged changes
 /focused-review full         # Entire codebase (no diff, skips assessment)
+/focused-review full src/    # Only files under src/ (no diff)
+/focused-review branch src/  # Only changes in src/
+/focused-review staged **/*.cs  # Only staged changes to .cs files
 ```
+
+Free-text is also supported — the orchestrator infers scope and paths from natural language:
+
+```bash
+/focused-review review all the unit tests       # → full scope, test file globs
+/focused-review review the auth module          # → full scope, path to auth code
+/focused-review review changes in src/auth      # → ambiguous, will ask to clarify
+```
+
+When intent is ambiguous (e.g., "changes" without specifying branch/staged/unstaged), the orchestrator asks the user to clarify — unless an unattended directive is present (e.g., "CI run, don't ask questions"), in which case it defaults to `branch`.
 
 Runs the five-phase pipeline (see Review Pipeline below). Produces a report at `.agents/focused-review/review-{timestamp}.md` and prints a summary to the terminal.
 
@@ -318,6 +331,7 @@ Working directory (gitignored, ephemeral)
 - **Model selection favors `inherit`** — rules inherit the user's model by default. Only mechanical checks downgrade to `haiku`
 - **Post-mortem is suggest-only** — traces cause of false positives but does not edit files directly
 - **`full` scope skips assessment** — no diff to assess against; consolidated findings treated as Confirmed
+- **Path filters use git pathspecs** — `--path` args are passed to `git diff`/`git ls-files` directly; globs are wrapped in `:(glob)` syntax for correct matching
 - **Assessment investigates, not just challenges** — builds pro AND counter-arguments, reads source rules/concerns/project context
 - **Severity gates proportionality** — Critical/High findings reported regardless of fix cost. Low-severity findings with disproportionate fix cost are filtered as noise
 - **Markdown throughout** — no JSON interchange between phases, filenames encode provenance

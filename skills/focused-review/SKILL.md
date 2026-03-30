@@ -1,7 +1,7 @@
 ---
 name: review
 description: Run unified code reviews through a 5-phase discovery-consolidation-assessment pipeline
-argument-hint: "[branch|commit|staged|unstaged|full|refresh|configure|post-mortem|post-comments]"
+argument-hint: "[branch|commit|staged|unstaged|full|refresh|configure|post-mortem|post-comments] [path ...]"
 ---
 
 You are the orchestrator for the focused-review plugin. Your mode depends on the argument.
@@ -30,12 +30,50 @@ Parse the JSON output and store these values for use throughout:
 
 Parse the user's argument (available as `$ARGUMENTS`):
 
-- First, check if the argument starts with one of the known mode keywords below. If not, default to `branch`.
+### Step A: Check for non-review modes
+
 - `configure` or `refresh` → Read `REFRESH.md` from the same directory as this skill file and follow its instructions. Pass along the resolved **Script path**, **Rules directory**, **Concerns directory**, **Defaults directory**, and **Configured sources** values.
 - `post-comments` (followed by a PR URL) → Read `POST-COMMENTS.md` from the same directory as this skill file and follow its instructions. Pass along the resolved **Script path** and the **PR URL** (the remaining argument text after `post-comments`).
 - `post-mortem` (with optional finding numbers) → **Post-Mortem Mode**
-- `branch`, `commit`, `staged`, `unstaged`, `full` → **Review Mode** with that scope
-- Empty or missing → **Review Mode** with scope `branch`
+
+If none of the above match, proceed to Step B.
+
+### Step B: Resolve scope and paths for Review Mode
+
+The user's argument may contain an explicit scope keyword, free-text describing what to review, or both. Your job is to determine two things: **scope** (`branch`, `commit`, `staged`, `unstaged`, or `full`) and **paths** (optional list of directories/globs).
+
+**1. Explicit scope keyword** — if the argument starts with one of `branch`, `commit`, `staged`, `unstaged`, `full`, use it directly. Everything after the keyword is path filters.
+   - `/review branch src/` → scope `branch`, paths `["src/"]`
+   - `/review full` → scope `full`, no paths
+   - `/review staged **/*.cs` → scope `staged`, paths `["**/*.cs"]`
+
+**2. Empty or missing argument** — scope `branch`, no paths.
+
+**3. Free-text (no explicit scope keyword)** — infer the scope from intent:
+
+| User intent | Scope | Examples |
+|---|---|---|
+| Describes code to review, no mention of changes/diffs | `full` | "review all the unit tests", "review the auth module", "review src/services/" |
+| Mentions a path without qualifying it | `full` | "review path/to/something" |
+| Says "changes" but specifies a diff type | that type | "review unstaged changes", "review what I committed" |
+| Says "changes" without specifying a diff type | **ambiguous** — see below | "review changes in src/auth" |
+
+**Handling ambiguity:** When the user says "changes" but doesn't specify which kind (branch diff? staged? unstaged?), check for an **unattended directive** — phrases like "CI run", "don't ask questions", "unattended", "just do it". 
+
+- **If unattended:** pick `branch` (most common CI use case) and proceed.
+- **If interactive (no unattended directive):** ask the user to clarify. Present the options: branch diff (changes vs main), staged, unstaged. One question, multiple choice.
+
+**Path extraction:** After determining the scope, extract path filters from the remaining text. The user may describe paths in natural language ("the auth module in src/services/auth") — resolve these to actual directory or glob paths. If the user describes files by type or pattern ("all the unit tests", "*.cs files"), convert to appropriate globs (e.g., `**/*Tests*.cs`, `**/*.cs`).
+
+Examples of full resolution:
+- `review all the unit tests` → scope `full`, paths `["**/*Tests*", "**/*Test*", "**/*_test*", "**/test_*"]` (adapt globs to the repo's test naming convention)
+- `review branch` → scope `branch`, no paths
+- `review unstaged changes` → scope `unstaged`, no paths
+- `review path/to/something` → scope `full`, paths `["path/to/something"]`
+- `review changes in src/auth` (interactive) → ask user to clarify scope, paths `["src/auth"]`
+- `review changes in src/auth, CI run don't ask questions` → scope `branch`, paths `["src/auth"]`
+
+Store the resolved scope and paths for use in Step 1.
 
 ---
 
@@ -52,8 +90,10 @@ Rules and concerns run in parallel during Phase 1. Subsequent phases validate an
 Run the Python helper with the scope from the argument (default `branch`):
 
 ```bash
-python {script_path} prepare-review --repo . --scope {scope}
+python {script_path} prepare-review --repo . --scope {scope} {path_args}
 ```
+
+Where `{path_args}` is `--path {path1} {path2} ...` if paths were parsed in Mode Selection, or omitted entirely if no paths were specified.
 
 The script handles everything: git operations, diff generation, file discovery, rule matching, and chunking. It writes all artifacts to `.agents/focused-review/` and prints a JSON summary to stdout.
 
