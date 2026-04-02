@@ -708,7 +708,10 @@ class TestPrepareReviewWithConcerns:
         with patch.object(fr, "_run_git", side_effect=_mock_git_results(diff, ["src/Foo.cs", "src/Bar.cs"])):
             fr.prepare_review(args)
 
-        diffs_dir = repo / ".agents" / "focused-review" / "diffs"
+        captured = capsys.readouterr()
+        summary = json.loads(captured.out)
+        run_dir = repo / summary["run_dir"]
+        diffs_dir = run_dir / "diffs"
         assert diffs_dir.is_dir()
         patch_files = list(diffs_dir.glob("*.patch"))
         assert len(patch_files) == 2
@@ -724,7 +727,10 @@ class TestPrepareReviewWithConcerns:
         with patch.object(fr, "_run_git", side_effect=_mock_git_results(diff, ["src/Foo.cs"])):
             fr.prepare_review(args)
 
-        prompts_dir = repo / ".agents" / "focused-review" / "prompts"
+        captured = capsys.readouterr()
+        summary = json.loads(captured.out)
+        run_dir = repo / summary["run_dir"]
+        prompts_dir = run_dir / "prompts"
         assert prompts_dir.is_dir()
         prompt_files = sorted(f.name for f in prompts_dir.glob("*.md"))
         assert "bugs--opus.md" in prompt_files
@@ -741,7 +747,10 @@ class TestPrepareReviewWithConcerns:
         with patch.object(fr, "_run_git", side_effect=_mock_git_results(diff, ["src/Foo.cs"])):
             fr.prepare_review(args)
 
-        dispatch_path = repo / ".agents" / "focused-review" / "concern-dispatch.json"
+        captured = capsys.readouterr()
+        summary = json.loads(captured.out)
+        run_dir = repo / summary["run_dir"]
+        dispatch_path = run_dir / "concern-dispatch.json"
         assert dispatch_path.exists()
         dispatch = json.loads(dispatch_path.read_text(encoding="utf-8"))
         assert len(dispatch) == 2
@@ -793,7 +802,10 @@ class TestPrepareReviewWithConcerns:
         with patch.object(fr, "_run_git", side_effect=_mock_git_results(diff, ["src/Foo.cs"])):
             fr.prepare_review(args)
 
-        prompts_dir = repo / ".agents" / "focused-review" / "prompts"
+        captured = capsys.readouterr()
+        summary = json.loads(captured.out)
+        run_dir = repo / summary["run_dir"]
+        prompts_dir = run_dir / "prompts"
         bugs_prompt = prompts_dir / "bugs--opus.md"
         assert bugs_prompt.exists()
         content = bugs_prompt.read_text(encoding="utf-8")
@@ -815,12 +827,13 @@ class TestPrepareReviewWithConcerns:
             fr.prepare_review(args)
 
         # diffs dir should not be created (no diff text)
-        diffs_dir = repo / ".agents" / "focused-review" / "diffs"
+        captured = capsys.readouterr()
+        summary = json.loads(captured.out)
+        run_dir = repo / summary["run_dir"]
+        diffs_dir = run_dir / "diffs"
         assert not diffs_dir.exists()
 
         # But concerns should still be processed
-        captured = capsys.readouterr()
-        summary = json.loads(captured.out)
         assert summary["concerns_total"] == 2
         assert summary["concern_prompts"] == 2
 

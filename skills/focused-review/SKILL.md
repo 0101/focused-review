@@ -95,17 +95,19 @@ python {script_path} prepare-review --repo . --scope {scope} {path_args}
 
 Where `{path_args}` is `--path {path1} {path2} ...` if paths were parsed in Mode Selection, or omitted entirely if no paths were specified.
 
-The script handles everything: git operations, diff generation, file discovery, rule matching, and chunking. It writes all artifacts to `.agents/focused-review/` and prints a JSON summary to stdout.
+The script handles everything: git operations, diff generation, file discovery, rule matching, and chunking. It writes all artifacts to a timestamped run directory (`.agents/focused-review/{timestamp}/`) and prints a JSON summary to stdout.
 
 **Error handling:**
 - **No rules found**: Tell the user "No review rules found — collecting rules from instruction files" and automatically proceed with Refresh Mode in `REFRESH.md` (same directory as this skill file). After refresh completes, re-run this prepare-review step with the same scope.
 - **Other errors**: Report the error to the user and stop.
 
-Parse the JSON summary. If `agents` is 0 and `concern_prompts` is 0, tell the user no rules matched and no concerns apply, and stop.
+Parse the JSON summary. Store the `run_dir` field — this is the timestamped directory where all artifacts for this review run are stored. All downstream paths use this directory.
+
+If `agents` is 0 and `concern_prompts` is 0, tell the user no rules matched and no concerns apply, and stop.
 
 ### Step 2: Phase 1 — Discovery (parallel)
 
-Read `.agents/focused-review/dispatch.json` (rule dispatch) and `.agents/focused-review/concern-dispatch.json` (concern dispatch).
+Read `{run_dir}/dispatch.json` (rule dispatch) and `{run_dir}/concern-dispatch.json` (concern dispatch).
 
 **IMPORTANT: Do NOT read the rule files, diff/chunk files, or concern prompt files yourself.** The subagents and concern runner read their own files. You only need the metadata from dispatch.json (paths, model) to construct the agent prompts — never `view` or `cat` the rule or diff content.
 
@@ -118,11 +120,11 @@ rule_path: {entry.rule_path}
 chunk_path: {chunk_path_value}
 scope: {entry.scope}
 chunk: {chunk_index} of {total_chunks}
-findings_path: .agents/focused-review/findings/rule--{rule-name}.md
+findings_path: {run_dir}/findings/rule--{rule-name}.md
 ```
 
 Where:
-- `chunk_path_value` is `entry.chunk_path` when not null, or `.agents/focused-review/changed-files.txt` when null (for `full` scope)
+- `chunk_path_value` is `entry.chunk_path` when not null, or `{run_dir}/changed-files.txt` when null (for `full` scope)
 - `chunk` line: include as `{chunk_index} of {total_chunks}` when both are present. Omit the line entirely when `chunk_index` is null.
 - `{rule-name}` is the rule filename without extension from `rule_path` (e.g. `null-handling` from `review/rules/null-handling.md`). When a rule has multiple chunks, append the chunk index: `rule--null-handling--2.md`.
 
@@ -131,12 +133,12 @@ Use the model specified in each entry's `model` field. If `"inherit"`, pass **yo
 **Concern runner** — If `concern-dispatch.json` has entries, start the Python concern runner **in the same response** as the rule agent launches. Use the `powershell` tool with `mode="sync"` and `initial_wait: 300` (concern sessions can take several minutes):
 
 ```bash
-python {script_path} run-concerns --repo . --inherit-model {your_model_id}
+python {script_path} run-concerns --repo . --run-dir {run_dir} --inherit-model {your_model_id}
 ```
 
 Where `{your_model_id}` is the same model ID you used for `inherit` rules above (from your system prompt's `<model>` tag `id` attribute).
 
-This launches `copilot -p` sessions in parallel via ThreadPoolExecutor.It reads `concern-dispatch.json` internally and writes findings to `.agents/focused-review/findings/concern--{name}--{model}.md`.
+This launches `copilot -p` sessions in parallel via ThreadPoolExecutor. It reads `concern-dispatch.json` from the run directory and writes findings to `{run_dir}/findings/concern--{name}--{model}.md`.
 
 **Batching**: Max 12 Task agents per message. Include the `run-concerns` bash command in the same response as the first batch of rule agents. If rules need multiple batches (>12 entries), the concern runner is already running from the first batch — subsequent batches only contain rule agents.
 
@@ -144,17 +146,18 @@ Wait for all rule agents and the concern runner to complete before proceeding.
 
 If `dispatch.json` is empty (no rules matched), only run concerns. If `concern-dispatch.json` is empty (no concerns), only run rules.
 
-Rule agents write their findings directly to `.agents/focused-review/findings/`. The concern runner does the same. After all agents complete, verify the findings directory has the expected files before proceeding.
+Rule agents write their findings directly to `{run_dir}/findings/`. The concern runner does the same. After all agents complete, verify the findings directory has the expected files before proceeding.
 
 ### Step 3: Phase 2 — Consolidation
 
 Launch a `focused-review:review-consolidator` Task agent with this prompt:
 
 ```
-findings_dir: .agents/focused-review/findings
+findings_dir: {run_dir}/findings
+output_path: {run_dir}/consolidated.md
 ```
 
-This agent reads all finding files from Phase 1 (`rule--*.md` and `concern--*.md`), deduplicates semantically (same location + same issue = one finding), merges provenance, and writes `.agents/focused-review/consolidated.md` with up to 30 prioritized findings.
+This agent reads all finding files from Phase 1 (`rule--*.md` and `concern--*.md`), deduplicates semantically (same location + same issue = one finding), merges provenance, and writes `{run_dir}/consolidated.md` with up to 30 prioritized findings.
 
 Wait for completion. If the agent fails, report the error and skip to Step 6 with whatever findings are available. If the consolidated report shows 0 findings, skip to Step 6 and report "no findings".
 
@@ -162,7 +165,7 @@ Wait for completion. If the agent fails, report the error and skip to Step 6 wit
 
 **Skip this step for `full` scope** (no diff to assess against). Proceed directly to Step 6 using the consolidated report.
 
-Read `.agents/focused-review/consolidated.md`. Parse each finding section (headings starting with `### C-`). Count the total findings. If 0, skip to Step 6.
+Read `{run_dir}/consolidated.md`. Parse each finding section (headings starting with `### C-`). Count the total findings. If 0, skip to Step 6.
 
 Derive the project context path: take the parent directory of `rules_dir` (e.g., if `rules_dir` is `review/rules/`, the parent is `review/`) and check if `project.md` exists there. If it does, use it as `project_context_path`. If not, omit the line from the assessor prompt.
 
@@ -172,18 +175,18 @@ For each finding, launch a `focused-review:review-assessor` Task agent. Derive t
 finding_id: {e.g. C-01}
 assessment_id: {e.g. A-01}
 finding_text: {the full text of this one finding section, from ### C-XX to the next --- or end}
-diff_path: .agents/focused-review/diff.patch
+diff_path: {run_dir}/diff.patch
 rules_dir: {rules_dir}
 concerns_dir: {concerns_dir}
 project_context_path: {path to review/project.md — omit this line if file doesn't exist}
-output_path: .agents/focused-review/assessments/{assessment_id}.md
+output_path: {run_dir}/assessments/{assessment_id}.md
 ```
 
 Launch assessors in parallel — **all in a single response** (up to 12; if more, use subsequent responses for remaining batches). Each assessor investigates one finding independently.
 
 Wait for all assessors to complete. If individual assessors fail, continue with the rest.
 
-After all assessors complete, read every `.md` file in `.agents/focused-review/assessments/` (in ID order: A-01, A-02, ...). Assemble `.agents/focused-review/assessed.md` by:
+After all assessors complete, read every `.md` file in `{run_dir}/assessments/` (in ID order: A-01, A-02, ...). Assemble `{run_dir}/assessed.md` by:
 
 1. Counting verdicts from each file (look for `**Verdict:**` lines)
 2. Writing the header:
@@ -205,7 +208,7 @@ After all assessors complete, read every `.md` file in `.agents/focused-review/a
 
 **Skip this step for `full` scope** (no diff to assess against).
 
-Read `.agents/focused-review/assessed.md`. Find any findings with **Severity Critical or High** that received a verdict of **Invalid**.
+Read `{run_dir}/assessed.md`. Find any findings with **Severity Critical or High** that received a verdict of **Invalid**.
 
 If none exist, skip to Step 6.
 
@@ -223,9 +226,9 @@ Description: {description from finding}
 Assessment reasoning: {assessment reasoning from finding}
 Counter-arguments: {counter-arguments from finding}
 
-Diff path: .agents/focused-review/diff.patch
+Diff path: {run_dir}/diff.patch
 
-Write your rebuttal to .agents/focused-review/rebuttals/{A-XX}.md with:
+Write your rebuttal to {run_dir}/rebuttals/{A-XX}.md with:
 - Your counter-counter-arguments
 - Whether the assessor's dismissal holds up under scrutiny
 - Final recommendation: Reinstate (with what severity) or Uphold Invalid
@@ -236,25 +239,25 @@ After all rebuttals complete, read each rebuttal file. For any finding where the
 ### Step 6: Phase 5 — Presentation
 
 Determine the data source and type (check in order, use the first that exists):
-- If `.agents/focused-review/assessed.md` exists → `data_source_type: assessed`
-- Else if `.agents/focused-review/consolidated.md` exists → `data_source_type: consolidated`
-- Else → `data_source_type: raw_findings` (path: `.agents/focused-review/findings`)
+- If `{run_dir}/assessed.md` exists → `data_source_type: assessed`
+- Else if `{run_dir}/consolidated.md` exists → `data_source_type: consolidated`
+- Else → `data_source_type: raw_findings` (path: `{run_dir}/findings`)
 
 Build the `rebuttal_overrides` value: if Step 5 produced any "Reinstate" recommendations, format as a JSON list of `{"id": "A-XX", "severity": "High", "reasoning": "..."}`. Otherwise omit the line.
 
 Launch a `focused-review:review-reporter` Task agent:
 
 ```
-data_source: {path to assessed.md, consolidated.md, or findings/}
+data_source: {path to assessed.md, consolidated.md, or findings/ — all within run_dir}
 data_source_type: {assessed|consolidated|raw_findings}
-report_path: .agents/focused-review/review-{timestamp}.md
+report_path: {run_dir}/review.md
 scope: {scope}
 rule_count: {rule_count}
 concern_count: {concern_count}
 rebuttal_overrides: {JSON list or omit}
 ```
 
-Where `{timestamp}` is `YYYYMMDD-HHmmss`.
+The report is named `review.md` within the timestamped run directory.
 
 Wait for completion. **Relay the agent's text output directly to the user — copy-paste it verbatim.** Do not read the report file. Do not rephrase, reformat, or create your own summary table. The reporter agent's output already contains the report path, pipeline stats, findings table with "Found by" column, and rule quality notes. Your only job is to pass it through.
 
@@ -266,10 +269,10 @@ User-triggered analysis after reviewing a report. The user marks findings they c
 
 ### Step 1: Locate latest report
 
-Find the most recent `review-*.md` file in `.agents/focused-review/`:
+Find the most recent review report across all run directories in `.agents/focused-review/`:
 
 ```bash
-python -c "from pathlib import Path; files=sorted(Path('.agents/focused-review').glob('review-*.md')); print(str(files[-1]).replace(chr(92),'/') if files else 'NONE')"
+python -c "from pathlib import Path; dirs=sorted(d for d in Path('.agents/focused-review').iterdir() if d.is_dir()); reports=[(d / 'review.md') for d in dirs if (d / 'review.md').exists()]; print(str(reports[-1]).replace(chr(92),'/') if reports else 'NONE')"
 ```
 
 If NONE, tell the user no review report exists and stop.
@@ -325,7 +328,7 @@ For each source that produced one or more invalid findings, analyze the false-po
 
 ### Step 5: Write recommendation report
 
-Write to `.agents/focused-review/post-mortem-{timestamp}.md` where `{timestamp}` is `YYYYMMDD-HHmmss`:
+Write to the same run directory as the reviewed report — e.g. if the report is at `.agents/focused-review/20260402-103000/review.md`, write to `.agents/focused-review/20260402-103000/post-mortem.md`:
 
 ```markdown
 # Post-Mortem: Invalid Finding Analysis

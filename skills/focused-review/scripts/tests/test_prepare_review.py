@@ -5,7 +5,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
+import time
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
@@ -532,8 +534,11 @@ class TestPrepareReviewEndToEnd:
         assert summary["rules_total"] == 1
         assert summary["rules_matched"] == 1
 
-        # Verify dispatch.json was written
-        dispatch_path = repo / ".agents" / "focused-review" / "dispatch.json"
+        # Verify run_dir in summary and dispatch.json inside it
+        assert "run_dir" in summary
+        assert summary["run_dir"].startswith(".agents/focused-review/")
+        run_dir = repo / summary["run_dir"]
+        dispatch_path = run_dir / "dispatch.json"
         assert dispatch_path.exists()
         dispatch = json.loads(dispatch_path.read_text(encoding="utf-8"))
         assert len(dispatch) == 1
@@ -600,7 +605,10 @@ class TestPrepareReviewEndToEnd:
         with patch.object(fr, "_run_git", side_effect=_mock_git_results(diff, ["src/A.cs", "src/B.cs"])):
             fr.prepare_review(args)
 
-        changed_files_path = repo / ".agents" / "focused-review" / "changed-files.txt"
+        captured = capsys.readouterr()
+        summary = json.loads(captured.out)
+        run_dir = repo / summary["run_dir"]
+        changed_files_path = run_dir / "changed-files.txt"
         assert changed_files_path.exists()
         content = changed_files_path.read_text(encoding="utf-8")
         assert "src/A.cs" in content
@@ -633,6 +641,8 @@ class TestPrepareReviewEndToEnd:
         summary = json.loads(captured.out)
         assert summary["agents"] == 0
         assert summary["changed_files"] == 0
+        assert "run_dir" in summary
+        assert summary["run_dir"].startswith(".agents/focused-review/")
 
     def test_dispatch_chunk_paths_are_posix(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
@@ -650,7 +660,10 @@ class TestPrepareReviewEndToEnd:
         with patch.object(fr, "_run_git", side_effect=_mock_git_results(diff, ["src/Foo.cs"])):
             fr.prepare_review(args)
 
-        dispatch_path = repo / ".agents" / "focused-review" / "dispatch.json"
+        captured = capsys.readouterr()
+        summary = json.loads(captured.out)
+        run_dir = repo / summary["run_dir"]
+        dispatch_path = run_dir / "dispatch.json"
         dispatch = json.loads(dispatch_path.read_text(encoding="utf-8"))
         for entry in dispatch:
             if entry.get("chunk_path"):
@@ -660,6 +673,66 @@ class TestPrepareReviewEndToEnd:
             assert "\\" not in entry["rule_path"], (
                 f"Backslash found in rule_path: {entry['rule_path']}"
             )
+
+    def test_run_dir_in_summary(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """run_dir is in the JSON summary, follows timestamp pattern, and exists on disk."""
+        repo = self._setup_repo_with_rules(
+            tmp_path,
+            [("rule.md", _make_rule("Rule"))],
+        )
+
+        diff = _make_diff(("src/Foo.cs", 10))
+
+        args = argparse.Namespace(repo=str(repo), scope="branch", rules_dir="review/")
+
+        with patch.object(fr, "_run_git", side_effect=_mock_git_results(diff, ["src/Foo.cs"])):
+            fr.prepare_review(args)
+
+        captured = capsys.readouterr()
+        summary = json.loads(captured.out)
+
+        assert "run_dir" in summary
+        run_dir_str = summary["run_dir"]
+        assert run_dir_str.startswith(".agents/focused-review/")
+        # Timestamp directory name matches YYYYMMDD-HHMMSS
+        dir_name = run_dir_str.rsplit("/", 1)[-1]
+        assert re.match(r"^\d{8}-\d{6}$", dir_name), f"Unexpected dir name: {dir_name}"
+        # Directory exists on disk
+        assert (repo / run_dir_str).is_dir()
+
+    def test_consecutive_runs_get_different_dirs(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Two consecutive prepare_review runs create different timestamped dirs."""
+        repo = self._setup_repo_with_rules(
+            tmp_path,
+            [("rule.md", _make_rule("Rule"))],
+        )
+
+        diff = _make_diff(("src/Foo.cs", 10))
+
+        args = argparse.Namespace(repo=str(repo), scope="branch", rules_dir="review/")
+
+        with patch.object(fr, "_run_git", side_effect=_mock_git_results(diff, ["src/Foo.cs"])):
+            fr.prepare_review(args)
+
+        captured = capsys.readouterr()
+        summary1 = json.loads(captured.out)
+
+        # Small sleep to ensure a different timestamp
+        time.sleep(1.1)
+
+        with patch.object(fr, "_run_git", side_effect=_mock_git_results(diff, ["src/Foo.cs"])):
+            fr.prepare_review(args)
+
+        captured = capsys.readouterr()
+        summary2 = json.loads(captured.out)
+
+        assert summary1["run_dir"] != summary2["run_dir"]
+        assert (repo / summary1["run_dir"]).is_dir()
+        assert (repo / summary2["run_dir"]).is_dir()
 
 
 # ---------------------------------------------------------------------------

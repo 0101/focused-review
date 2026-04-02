@@ -7,7 +7,7 @@
     {
       "name": "focused-review",
       "description": "Auto-generates review rules from instruction files and runs parallel code reviews",
-      "version": "0.5.1",
+      "version": "0.6.0",
       "source": "."
     }
   ]

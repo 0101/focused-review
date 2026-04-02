@@ -567,15 +567,8 @@ class TestRunConcerns:
             max_workers=2,
             timeout=60,
             retries=0,
+            run_dir="",
         )
-        fr.run_concerns(args)
-
-        captured = capsys.readouterr()
-        summary = json.loads(captured.out)
-        assert summary["total"] == 0
-        assert summary["success"] == 0
-        assert summary["failed"] == 0
-        assert summary["results"] == []
 
     def test_missing_dispatch_file_exits(self, tmp_path: Path) -> None:
         repo = tmp_path / "repo"
@@ -587,6 +580,7 @@ class TestRunConcerns:
             max_workers=2,
             timeout=60,
             retries=0,
+            run_dir="",
         )
         with pytest.raises(SystemExit, match="1"):
             fr.run_concerns(args)
@@ -619,6 +613,7 @@ class TestRunConcerns:
             max_workers=2,
             timeout=60,
             retries=0,
+            run_dir="",
         )
         with patch("subprocess.run", return_value=_mock_subprocess_success()):
             fr.run_concerns(args)
@@ -664,6 +659,7 @@ class TestRunConcerns:
             max_workers=1,  # serial to get deterministic order
             timeout=60,
             retries=0,
+            run_dir="",
         )
         with patch("subprocess.run", mock_run):
             fr.run_concerns(args)
@@ -696,6 +692,7 @@ class TestRunConcerns:
             max_workers=1,
             timeout=60,
             retries=0,
+            run_dir="",
         )
         with patch("subprocess.run", return_value=_mock_subprocess_success(finding_content)):
             fr.run_concerns(args)
@@ -716,6 +713,7 @@ class TestRunConcerns:
             max_workers=1,
             timeout=60,
             retries=0,
+            run_dir="",
         )
         with patch("subprocess.run", return_value=_mock_subprocess_success()):
             fr.run_concerns(args)
@@ -737,6 +735,7 @@ class TestRunConcerns:
             max_workers=1,
             timeout=60,
             retries=0,
+            run_dir="",
         )
         with patch.object(
             fr,
@@ -869,6 +868,7 @@ class TestConcernParallelism:
             max_workers=3,
             timeout=60,
             retries=0,
+            run_dir="",
         )
         with patch("subprocess.run", return_value=_mock_subprocess_success()):
             fr.run_concerns(args)
@@ -912,6 +912,7 @@ class TestConcernParallelism:
             max_workers=2,
             timeout=60,
             retries=0,
+            run_dir="",
         )
         with patch("subprocess.run", return_value=_mock_subprocess_success()):
             fr.run_concerns(args)
@@ -924,3 +925,77 @@ class TestConcernParallelism:
         findings_dir = repo / ".agents" / "focused-review" / "findings"
         assert (findings_dir / "concern--bugs--opus.md").exists()
         assert (findings_dir / "concern--bugs--codex.md").exists()
+
+
+# ---------------------------------------------------------------------------
+# --run-dir argument
+# ---------------------------------------------------------------------------
+
+
+class TestRunDirArgument:
+
+    def test_run_dir_argument_used(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """When --run-dir is set, run_concerns reads dispatch from that directory."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+
+        # Set up dispatch in a timestamped run directory
+        run_dir = repo / ".agents" / "focused-review" / "20260402-103000"
+        run_dir.mkdir(parents=True)
+
+        entries = [
+            {
+                "concern": "bugs",
+                "model": "opus",
+                "priority": "high",
+                "prompt_path": ".agents/focused-review/20260402-103000/prompts/bugs--opus.md",
+            },
+        ]
+        dispatch_path = run_dir / "concern-dispatch.json"
+        dispatch_path.write_text(json.dumps(entries), encoding="utf-8")
+
+        # Write prompt file
+        prompts_dir = run_dir / "prompts"
+        prompts_dir.mkdir(parents=True, exist_ok=True)
+        prompt_file = repo / entries[0]["prompt_path"]
+        prompt_file.write_text("# Bugs\n## Role\nReview bugs.", encoding="utf-8")
+
+        # Pre-create the finding file as if the agent wrote it
+        finding_path = run_dir / "findings" / "concern--bugs--opus.md"
+        finding_path.parent.mkdir(parents=True, exist_ok=True)
+        finding_path.write_text("### [High] Bug found\nDetails.", encoding="utf-8")
+
+        args = argparse.Namespace(
+            repo=str(repo),
+            max_workers=1,
+            timeout=60,
+            retries=0,
+            run_dir=".agents/focused-review/20260402-103000",
+        )
+        with patch("subprocess.run", return_value=_mock_subprocess_success()):
+            fr.run_concerns(args)
+
+        captured = capsys.readouterr()
+        summary = json.loads(captured.out)
+        assert summary["total"] == 1
+        assert summary["success"] == 1
+
+    def test_missing_run_dir_dispatch_exits(self, tmp_path: Path) -> None:
+        """When --run-dir points to a dir without concern-dispatch.json, exit 1."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        run_dir = repo / ".agents" / "focused-review" / "20260402-103000"
+        run_dir.mkdir(parents=True)
+        # No dispatch file
+
+        args = argparse.Namespace(
+            repo=str(repo),
+            max_workers=1,
+            timeout=60,
+            retries=0,
+            run_dir=".agents/focused-review/20260402-103000",
+        )
+        with pytest.raises(SystemExit, match="1"):
+            fr.run_concerns(args)

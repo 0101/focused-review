@@ -39,14 +39,14 @@ https://{org}.visualstudio.com/{project}/_git/{repo}/pullrequest/{id}
 
 ## Step 2: Locate latest review report
 
-Find the most recent `review-*.md` file in `.agents/focused-review/`:
+Find the most recent review report across all run directories in `.agents/focused-review/`:
 
 ```bash
-python -c "from pathlib import Path; files=sorted(Path('.agents/focused-review').glob('review-*.md')); print(str(files[-1]).replace(chr(92),'/') if files else 'NONE')"
+python -c "from pathlib import Path; dirs=sorted(d for d in Path('.agents/focused-review').iterdir() if d.is_dir()); reports=[(d / 'review.md') for d in dirs if (d / 'review.md').exists()]; print(str(reports[-1]).replace(chr(92),'/') if reports else 'NONE')"
 ```
 
 - If `NONE`, tell the user: "No review report found. Run `/focused-review branch` first to generate a review, then re-run post-comments."
-- If multiple review files exist, list them and ask the user which one to use. Wait for their response.
+- If multiple run directories contain review reports, list them and ask the user which one to use. Wait for their response.
 
 Store the chosen report path as `report_path`.
 
@@ -88,7 +88,7 @@ For each finding, extract:
 
 ### 4b: Read the diff
 
-Read `.agents/focused-review/diff.patch`.
+Read the `diff.patch` from the same run directory as the report (e.g. if report is at `.agents/focused-review/20260402-103000/review.md`, read `.agents/focused-review/20260402-103000/diff.patch`).
 
 Parse the diff to build a map of which files and line ranges are covered by the PR diff. For each diff hunk, record:
 - File path (the `+++ b/{path}` line, without the `b/` prefix)
@@ -173,7 +173,7 @@ If there are no out-of-diff findings, omit the "Findings Outside PR Diff" sectio
 
 ## Step 6: Write `comments.json`
 
-Write the file to `.agents/focused-review/comments.json` using the `create` tool (or `edit` if it already exists).
+Write the file to the same run directory as the report (e.g. `.agents/focused-review/20260402-103000/comments.json`) using the `create` tool (or `edit` if it already exists).
 
 ### Schema for GitHub
 
@@ -282,13 +282,13 @@ If the user excludes findings, remove those entries from the inline_comments arr
 Run:
 
 ```bash
-python {script_path} post-comments --comments .agents/focused-review/comments.json
+python {script_path} post-comments --comments {run_dir}/comments.json
 ```
 
 If the user excluded findings, pass the excluded IDs:
 
 ```bash
-python {script_path} post-comments --comments .agents/focused-review/comments.json --exclude {comma_separated_ids}
+python {script_path} post-comments --comments {run_dir}/comments.json --exclude {comma_separated_ids}
 ```
 
 Wait for the command to complete. Parse the output (JSON with posting results).

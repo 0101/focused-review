@@ -162,7 +162,7 @@ class TestConfigFileResolution:
         summary = json.loads(captured.out)
         assert summary["agents"] == 1
 
-        dispatch_path = repo / ".agents" / "focused-review" / "dispatch.json"
+        dispatch_path = repo / summary["run_dir"] / "dispatch.json"
         dispatch = json.loads(dispatch_path.read_text(encoding="utf-8"))
         assert dispatch[0]["rule_path"] == "flag-rules/example.md"
 
@@ -220,7 +220,7 @@ class TestConfigResolutionIntegration:
         summary = json.loads(captured.out)
         assert summary["agents"] == 1
 
-        dispatch_path = repo / ".agents" / "focused-review" / "dispatch.json"
+        dispatch_path = repo / summary["run_dir"] / "dispatch.json"
         dispatch = json.loads(dispatch_path.read_text(encoding="utf-8"))
         assert dispatch[0]["rule_path"] == "custom-rules/example.md"
 
@@ -252,7 +252,7 @@ class TestConfigResolutionIntegration:
         summary = json.loads(captured.out)
         assert summary["agents"] == 1
 
-        dispatch_path = repo / ".agents" / "focused-review" / "dispatch.json"
+        dispatch_path = repo / summary["run_dir"] / "dispatch.json"
         dispatch = json.loads(dispatch_path.read_text(encoding="utf-8"))
         assert dispatch[0]["rule_path"] == "review/example.md"
 

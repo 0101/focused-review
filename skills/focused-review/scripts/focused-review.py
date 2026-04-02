@@ -8,13 +8,13 @@ import fnmatch
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 import urllib.error
 import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
 # ---------------------------------------------------------------------------
@@ -865,20 +865,12 @@ def prepare_review(args: argparse.Namespace) -> None:
         )
         sys.exit(1)
 
-    work_dir = repo / ".agents" / "focused-review"
-    work_dir.mkdir(parents=True, exist_ok=True)
+    base_dir = repo / ".agents" / "focused-review"
+    base_dir.mkdir(parents=True, exist_ok=True)
 
-    # -- clean stale phase artifacts from previous runs -------------------
-    for stale in ("consolidated.md", "assessed.md"):
-        stale_path = work_dir / stale
-        if stale_path.exists():
-            stale_path.unlink()
-    findings_dir = work_dir / "findings"
-    if findings_dir.exists():
-        shutil.rmtree(findings_dir)
-    rebuttals_dir = work_dir / "rebuttals"
-    if rebuttals_dir.exists():
-        shutil.rmtree(rebuttals_dir)
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    work_dir = base_dir / timestamp
+    work_dir.mkdir(parents=True, exist_ok=True)
 
     # -- determine changed files & chunks --------------------------------
 
@@ -896,6 +888,7 @@ def prepare_review(args: argparse.Namespace) -> None:
             concern_dispatch_path = work_dir / "concern-dispatch.json"
             concern_dispatch_path.write_text("[]", encoding="utf-8")
             summary = {
+                "run_dir": _posix(work_dir, relative_to=repo),
                 "dispatch_path": None,
                 "agents": 0,
                 "scope": scope,
@@ -948,6 +941,7 @@ def prepare_review(args: argparse.Namespace) -> None:
     dispatch_path.write_text(json.dumps(dispatch, indent=2), encoding="utf-8")
 
     summary = {
+        "run_dir": _posix(work_dir, relative_to=repo),
         "dispatch_path": _posix(dispatch_path, relative_to=repo),
         "agents": len(dispatch),
         "scope": scope,
@@ -1113,7 +1107,10 @@ def run_concerns(args: argparse.Namespace) -> None:
     Prints a JSON summary on stdout with per-entry results and counts.
     """
     repo = Path(args.repo).resolve()
-    work_dir = repo / ".agents" / "focused-review"
+    if args.run_dir:
+        work_dir = Path(args.run_dir) if Path(args.run_dir).is_absolute() else repo / args.run_dir
+    else:
+        work_dir = repo / ".agents" / "focused-review"
     dispatch_path = work_dir / "concern-dispatch.json"
 
     if not dispatch_path.is_file():
@@ -1793,6 +1790,11 @@ def main() -> int:
         "--inherit-model",
         default="",
         help="Model ID to use for entries with model='inherit' (the orchestrator's own model)",
+    )
+    concerns_parser.add_argument(
+        "--run-dir",
+        default="",
+        help="Run directory for this review session",
     )
     concerns_parser.set_defaults(func=run_concerns)
 

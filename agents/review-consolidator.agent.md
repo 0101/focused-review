@@ -7,7 +7,7 @@ You are the consolidation agent for the focused-review pipeline (Phase 2). Your 
 
 ## Input
 
-Parse the `findings_dir` field from your prompt. This directory contains markdown files from Phase 1 discovery:
+Parse the `findings_dir` and `output_path` fields from your prompt. The findings directory contains markdown files from Phase 1 discovery:
 - `rule--{name}.md` — output from review-runner agents (one per rule)
 - `concern--{name}--{model}.md` — output from concern agents (one per concern × model)
 
@@ -19,7 +19,7 @@ Read the directory listing and then read every file yourself using the view tool
 
 List all `*.md` files in the findings directory. Read each file. Skip any file whose entire content is `NO VIOLATIONS FOUND` or `NO FINDINGS`.
 
-If the findings directory is empty, or every file contains only `NO VIOLATIONS FOUND` / `NO FINDINGS`, write a minimal report to `.agents/focused-review/consolidated.md`:
+If the findings directory is empty, or every file contains only `NO VIOLATIONS FOUND` / `NO FINDINGS`, write a minimal report to the path specified by `output_path`:
 
 ```markdown
 # Consolidated Findings
@@ -117,7 +117,7 @@ Sort consolidated findings by:
 
 ### Step 6: Write consolidated report
 
-Write the output to `.agents/focused-review/consolidated.md`:
+Write the output to the path specified by `output_path` using the `create` tool (create parent directories if needed). If the file already exists, delete it first with `powershell` (`Remove-Item`), then create.
 
 ```markdown
 # Consolidated Findings
