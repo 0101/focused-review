@@ -49,7 +49,7 @@ def _make_concern(
 
 def _make_rule(name: str) -> str:
     """Build a minimal rule file (reused from other tests)."""
-    return f"---\nautofix: false\nmodel: haiku\n---\n# {name}\n## Rule\nCheck."
+    return f"---\nmodel: haiku\n---\n# {name}\n## Rule\nCheck."
 
 
 def _make_diff(*file_entries: tuple[str, int]) -> str:
@@ -106,12 +106,11 @@ class TestFrontmatterListParsing:
         assert meta["models"] == []
 
     def test_list_coexists_with_scalars(self) -> None:
-        content = "---\ntype: concern\nmodels: [opus]\npriority: high\nautofix: true\n---\nBody."
+        content = "---\ntype: concern\nmodels: [opus]\npriority: high\n---\nBody."
         meta, _body = fr._parse_frontmatter(content)
         assert meta["type"] == "concern"
         assert meta["models"] == ["opus"]
         assert meta["priority"] == "high"
-        assert meta["autofix"] is True
 
     def test_brace_glob_preserved_in_list(self) -> None:
         content = '---\napplies-to: ["**/*.{cs,fs}", "!**/*Tests*.cs"]\n---\nBody.'

@@ -112,7 +112,6 @@ Review rules live in the rules directory (`review/` by default, configurable via
 
 ```yaml
 ---
-autofix: false                  # ignored (kept for compatibility)
 model: haiku
 applies-to: "**/*Tests*.cs"    # optional glob, omit = all files
 source: "CLAUDE.md"             # which instruction file produced this

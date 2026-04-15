@@ -162,7 +162,7 @@ You need all three sets of content to compare what instructions say vs. what rul
 
 Analyze the instruction files against the existing rules. Produce a categorized action plan:
 
-- **New rules**: Instructions contain guidance that has no matching committed rule. For each, draft the full rule content in the standard format (YAML frontmatter with `autofix: false`, `model: haiku|sonnet|inherit`, `source: {instruction file}`, optional `applies-to` glob, then Markdown body with `# Rule Name`, `## Rule`, `## Why`, `## Requirements`, `## Wrong`, `## Correct` sections).
+- **New rules**: Instructions contain guidance that has no matching committed rule. For each, draft the full rule content in the standard format (YAML frontmatter with `model: haiku|sonnet|inherit`, `source: {instruction file}`, optional `applies-to` glob, then Markdown body with `# Rule Name`, `## Rule`, `## Why`, `## Requirements`, `## Wrong`, `## Correct` sections).
 
   **Choosing `model`** — default to `inherit` (uses whatever model the user runs with) and only downgrade for purely mechanical checks:
   - **inherit** (default): any rule that requires understanding context, reasoning about behavior, or making judgment calls. This includes: bug finding, correctness, concurrency, security, API design, code duplication, design patterns, architectural patterns, performance analysis, platform-specific concerns, interop, error handling, and convention enforcement that requires understanding intent. When in doubt, use `inherit`.
@@ -255,12 +255,12 @@ Show the user a **single unified numbered summary** of all proposed changes for 
 ## Refresh Summary
 
 ### New rules (will be added):
-1. rule-name-here — one-line description [autofix: no, model: haiku] (source: CLAUDE.md)
-2. another-rule — one-line description [autofix: yes, model: sonnet] (source: .claude/CLAUDE.md)
+1. rule-name-here — one-line description [model: haiku] (source: CLAUDE.md)
+2. another-rule — one-line description [model: sonnet] (source: .claude/CLAUDE.md)
 
 ### Built-in rules (will be added):
-3. code-duplication — flag new code that duplicates existing codebase patterns [autofix: no, model: sonnet] (built-in)
-4. bug-spotter — find bugs, logic errors, and correctness issues [autofix: no, model: inherit] (built-in)
+3. code-duplication — flag new code that duplicates existing codebase patterns [model: sonnet] (built-in)
+4. bug-spotter — find bugs, logic errors, and correctness issues [model: inherit] (built-in)
 
 ### New concerns (will be added):
 5. performance — detect performance regression patterns [models: opus, priority: standard] (source: CLAUDE.md)
@@ -272,7 +272,7 @@ Show the user a **single unified numbered summary** of all proposed changes for 
 9. general — fresh-eyes catch-all reviewer [models: opus, priority: standard] (built-in)
 
 ### Updated rules (will be updated):
-10. existing-rule — what changed [autofix: no, model: haiku] (source: CLAUDE.md)
+10. existing-rule — what changed [model: haiku] (source: CLAUDE.md)
 
 ### Orphaned rules (will be kept, no source match):
 11. old-rule — source file removed/changed
@@ -315,7 +315,6 @@ Each **rule file** must follow the standard format:
 
 ```yaml
 ---
-autofix: false
 model: inherit                 # inherit (default) | sonnet | haiku (deep → semantic → mechanical)
 applies-to: "glob/pattern"    # optional — omit if rule applies to all files
 source: "CLAUDE.md"            # which instruction file this came from

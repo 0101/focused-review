@@ -187,7 +187,6 @@ Final report with confirmed findings, questionable findings, and a provenance tr
 
 ```yaml
 ---
-autofix: false
 model: inherit                 # inherit | sonnet | haiku
 applies-to: "**/*Tests*.cs"   # optional glob, omit = all files
 source: "CLAUDE.md"            # which instruction file produced this

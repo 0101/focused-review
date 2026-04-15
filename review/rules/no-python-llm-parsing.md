@@ -1,5 +1,4 @@
 ---
-autofix: false
 model: inherit
 applies-to: "**/*.py"
 source: "CLAUDE.md"

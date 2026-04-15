@@ -1,5 +1,4 @@
 ---
-autofix: false
 model: sonnet
 source: "built-in"
 ---

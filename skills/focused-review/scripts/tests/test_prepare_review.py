@@ -84,9 +84,8 @@ def _mock_git_results(diff_text: str, changed_files: list[str]) -> list[MagicMoc
 class TestParseFrontmatter:
 
     def test_basic_frontmatter(self) -> None:
-        content = "---\nautofix: true\nmodel: haiku\n---\n# Rule Name\nBody text."
+        content = "---\nmodel: haiku\n---\n# Rule Name\nBody text."
         meta, body = fr._parse_frontmatter(content)
-        assert meta["autofix"] is True
         assert meta["model"] == "haiku"
         assert "# Rule Name" in body
 
@@ -103,15 +102,15 @@ class TestParseFrontmatter:
         assert meta["source"] == "CLAUDE.md"
 
     def test_boolean_false(self) -> None:
-        content = "---\nautofix: false\n---\nBody."
+        content = "---\nmodel: inherit\n---\nBody."
         meta, _body = fr._parse_frontmatter(content)
-        assert meta["autofix"] is False
+        assert meta["model"] == "inherit"
 
     def test_comments_skipped(self) -> None:
-        content = "---\n# this is a comment\nautofix: true\n---\nBody."
+        content = "---\n# this is a comment\nmodel: haiku\n---\nBody."
         meta, _body = fr._parse_frontmatter(content)
         assert "# this is a comment" not in meta
-        assert meta["autofix"] is True
+        assert meta["model"] == "haiku"
 
 
 # ---------------------------------------------------------------------------
@@ -216,7 +215,7 @@ class TestReadRules:
     def test_rule_name_from_heading(self, tmp_path: Path) -> None:
         rules_dir = tmp_path / "review"
         rules_dir.mkdir()
-        content = "---\nautofix: false\n---\n# My Custom Rule Name\nBody."
+        content = "---\nmodel: inherit\n---\n# My Custom Rule Name\nBody."
         create_file(rules_dir, "custom.md", content)
 
         rules = fr._read_rules(rules_dir, tmp_path)
@@ -226,7 +225,7 @@ class TestReadRules:
         """When a rule omits the 'model' field, it defaults to 'inherit'."""
         rules_dir = tmp_path / "review"
         rules_dir.mkdir()
-        content = "---\nautofix: false\n---\n# No Model Rule\nBody."
+        content = "---\n---\n# No Model Rule\nBody."
         create_file(rules_dir, "no-model.md", content)
 
         rules = fr._read_rules(rules_dir, tmp_path)
@@ -235,7 +234,7 @@ class TestReadRules:
     def test_rule_name_fallback_to_stem(self, tmp_path: Path) -> None:
         rules_dir = tmp_path / "review"
         rules_dir.mkdir()
-        content = "---\nautofix: false\n---\nNo heading here, just text."
+        content = "---\nmodel: inherit\n---\nNo heading here, just text."
         create_file(rules_dir, "my-rule.md", content)
 
         rules = fr._read_rules(rules_dir, tmp_path)
