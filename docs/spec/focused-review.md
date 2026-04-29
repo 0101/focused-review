@@ -74,8 +74,9 @@ Refresh scans instruction files, extracts rules, compares against existing rules
 ### 3. Day-to-Day Review
 
 ```bash
-/focused-review              # Diff against origin/main (default)
+/focused-review              # Diff against origin/main (or configured base)
 /focused-review branch       # Same as above
+/focused-review branch against origin/dev  # Diff against origin/dev
 /focused-review commit       # Last commit only
 /focused-review staged       # Staged changes
 /focused-review unstaged     # Unstaged changes
@@ -253,11 +254,14 @@ What this project is — e.g., "ASP.NET Core web API", "F# compiler", "Python CL
 ```json
 {
   "rules_dir": "review/rules/",
-  "concerns_dir": "review/concerns/"
+  "concerns_dir": "review/concerns/",
+  "base_branch": "origin/main"
 }
 ```
 
-Locations searched (in order): `.claude/focused-review.json`, `focused-review.json`, `.github/focused-review.json`, `~/.claude/focused-review.json`, `~/.copilot/focused-review.json`. First found wins. If none found, defaults to `review/rules/` and `review/concerns/`.
+Locations searched (in order): `.claude/focused-review.json`, `focused-review.json`, `.github/focused-review.json`, `~/.claude/focused-review.json`, `~/.copilot/focused-review.json`. First found wins. If none found, defaults to `review/rules/`, `review/concerns/`, and `origin/main`.
+
+The `base_branch` key sets the base ref for `branch` scope diffs (e.g., `origin/dev`, `upstream/release/1.2`). Accepts any git ref valid in `git diff <base>...HEAD`. Can be overridden per-invocation via the CLI `--base` argument or natural language ("review against origin/dev").
 
 ## Technical Approach
 

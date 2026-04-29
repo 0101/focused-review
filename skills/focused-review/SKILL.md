@@ -40,9 +40,9 @@ If none of the above match, proceed to Step B.
 
 ### Step B: Resolve scope and paths for Review Mode
 
-The user's argument may contain an explicit scope keyword, free-text describing what to review, or both. Your job is to determine two things: **scope** (`branch`, `commit`, `staged`, `unstaged`, or `full`) and **paths** (optional list of directories/globs).
+The user's argument may contain an explicit scope keyword, free-text describing what to review, or both. Your job is to determine three things: **scope** (`branch`, `commit`, `staged`, `unstaged`, or `full`), **paths** (optional list of directories/globs), and **base ref** (optional, for `branch` scope only — overrides the configured base).
 
-**1. Explicit scope keyword** — if the argument starts with one of `branch`, `commit`, `staged`, `unstaged`, `full`, use it directly. Everything after the keyword is path filters.
+**1. Explicit scope keyword** — if the argument starts with one of `branch`, `commit`, `staged`, `unstaged`, `full`, use it directly. Everything after the keyword is path filters (and optionally a base ref).
    - `/review branch src/` → scope `branch`, paths `["src/"]`
    - `/review full` → scope `full`, no paths
    - `/review staged **/*.cs` → scope `staged`, paths `["**/*.cs"]`
@@ -63,6 +63,8 @@ The user's argument may contain an explicit scope keyword, free-text describing 
 - **If unattended:** pick `branch` (most common CI use case) and proceed.
 - **If interactive (no unattended directive):** ask the user to clarify. Present the options: branch diff (changes vs main), staged, unstaged. One question, multiple choice.
 
+**Base ref extraction:** If the user mentions comparing against a specific branch or ref (e.g., "against origin/dev", "compared to develop", "vs upstream/release"), extract it as the **base ref**. This only applies to `branch` scope. If not mentioned, omit it — the Python script resolves the base from `focused-review.json` config (key: `"base_branch"`), falling back to `origin/main`.
+
 **Path extraction:** After determining the scope, extract path filters from the remaining text. The user may describe paths in natural language ("the auth module in src/services/auth") — resolve these to actual directory or glob paths. If the user describes files by type or pattern ("all the unit tests", "*.cs files"), convert to appropriate globs (e.g., `**/*Tests*.cs`, `**/*.cs`).
 
 Examples of full resolution:
@@ -72,8 +74,10 @@ Examples of full resolution:
 - `review path/to/something` → scope `full`, paths `["path/to/something"]`
 - `review changes in src/auth` (interactive) → ask user to clarify scope, paths `["src/auth"]`
 - `review changes in src/auth, CI run don't ask questions` → scope `branch`, paths `["src/auth"]`
+- `review branch against origin/dev` → scope `branch`, no paths, base ref `origin/dev`
+- `review changes vs develop` → scope `branch`, base ref `develop`
 
-Store the resolved scope and paths for use in Step 1.
+Store the resolved scope, paths, and base ref for use in Step 1.
 
 ---
 
@@ -90,10 +94,12 @@ Rules and concerns run in parallel during Phase 1. Subsequent phases validate an
 Run the Python helper with the scope from the argument (default `branch`):
 
 ```bash
-python {script_path} prepare-review --repo . --scope {scope} {path_args}
+python {script_path} prepare-review --repo . --scope {scope} {path_args} {base_args}
 ```
 
-Where `{path_args}` is `--path {path1} {path2} ...` if paths were parsed in Mode Selection, or omitted entirely if no paths were specified.
+Where:
+- `{path_args}` is `--path {path1} {path2} ...` if paths were parsed in Mode Selection, or omitted entirely if no paths were specified.
+- `{base_args}` is `--base {base_ref}` if the user specified a base ref in Mode Selection, or omitted entirely to use the configured default (from `focused-review.json` `"base_branch"` key, falling back to `origin/main`).
 
 The script handles everything: git operations, diff generation, file discovery, rule matching, and chunking. It writes all artifacts to a timestamped run directory (`.agents/focused-review/{timestamp}/`) and prints a JSON summary to stdout.
 

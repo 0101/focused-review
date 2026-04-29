@@ -428,3 +428,217 @@ class TestResolveConfigSubcommand:
 
         captured = capsys.readouterr()
         assert "error" in captured.err.lower()
+
+
+# ---------------------------------------------------------------------------
+# base_branch config resolution
+# ---------------------------------------------------------------------------
+
+
+def _write_config_full(
+    repo: Path, rel_path: str, data: dict[str, object]
+) -> Path:
+    """Write arbitrary config JSON."""
+    config_path = repo / rel_path
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(json.dumps(data), encoding="utf-8")
+    return config_path
+
+
+class TestBaseBranchConfig:
+    """base_branch resolution from config and CLI."""
+
+    def test_default_base_branch_when_no_config(self, tmp_path: Path) -> None:
+        repo = _setup_repo(tmp_path)
+        with patch.object(fr, "CONFIG_SCAN_LOCATIONS", ["nonexistent.json"]), \
+             patch.object(fr, "CONFIG_USER_LOCATIONS", []):
+            result = fr._resolve_config(str(repo))
+        assert result["base_branch"] == "origin/main"
+
+    def test_base_branch_from_config(self, tmp_path: Path) -> None:
+        repo = _setup_repo(tmp_path)
+        _write_config_full(repo, ".claude/focused-review.json", {
+            "rules_dir": "review/",
+            "base_branch": "origin/dev",
+        })
+        result = fr._resolve_config(str(repo))
+        assert result["base_branch"] == "origin/dev"
+
+    def test_empty_base_branch_falls_back_to_default(self, tmp_path: Path) -> None:
+        repo = _setup_repo(tmp_path)
+        _write_config_full(repo, ".claude/focused-review.json", {
+            "rules_dir": "review/",
+            "base_branch": "",
+        })
+        result = fr._resolve_config(str(repo))
+        assert result["base_branch"] == "origin/main"
+
+    def test_whitespace_base_branch_falls_back_to_default(self, tmp_path: Path) -> None:
+        repo = _setup_repo(tmp_path)
+        _write_config_full(repo, ".claude/focused-review.json", {
+            "rules_dir": "review/",
+            "base_branch": "   ",
+        })
+        result = fr._resolve_config(str(repo))
+        assert result["base_branch"] == "origin/main"
+
+    def test_base_branch_in_resolve_config_output(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        repo = _setup_repo(tmp_path)
+        _write_config_full(repo, ".claude/focused-review.json", {
+            "rules_dir": "review/",
+            "base_branch": "upstream/develop",
+        })
+        with patch("sys.argv", [
+            "focused-review", "resolve-config", "--repo", str(repo),
+        ]):
+            fr.main()
+
+        captured = capsys.readouterr()
+        result = json.loads(captured.out)
+        assert result["base_branch"] == "upstream/develop"
+
+    def test_base_branch_default_in_resolve_config_output(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        repo = _setup_repo(tmp_path)
+        with patch.object(fr, "CONFIG_SCAN_LOCATIONS", ["nonexistent.json"]), \
+             patch.object(fr, "CONFIG_USER_LOCATIONS", []):
+            with patch("sys.argv", [
+                "focused-review", "resolve-config", "--repo", str(repo),
+            ]):
+                fr.main()
+
+        captured = capsys.readouterr()
+        result = json.loads(captured.out)
+        assert result["base_branch"] == "origin/main"
+
+
+class TestGetDiffBaseBranch:
+    """_get_diff uses base_branch only for branch scope."""
+
+    def test_branch_scope_uses_custom_base(self, tmp_path: Path) -> None:
+        diff_mock = MagicMock()
+        diff_mock.returncode = 0
+        diff_mock.stdout = _make_diff("file.cs", 5)
+
+        names_mock = MagicMock()
+        names_mock.returncode = 0
+        names_mock.stdout = "file.cs"
+
+        with patch.object(fr, "_run_git", side_effect=[diff_mock, names_mock]) as mock_git:
+            fr._get_diff("branch", tmp_path, base_branch="origin/dev")
+
+        # First call should be the diff call with origin/dev...HEAD
+        diff_call_args = mock_git.call_args_list[0][0][0]
+        assert "origin/dev...HEAD" in diff_call_args
+
+    def test_branch_scope_default_base(self, tmp_path: Path) -> None:
+        diff_mock = MagicMock()
+        diff_mock.returncode = 0
+        diff_mock.stdout = _make_diff("file.cs", 5)
+
+        names_mock = MagicMock()
+        names_mock.returncode = 0
+        names_mock.stdout = "file.cs"
+
+        with patch.object(fr, "_run_git", side_effect=[diff_mock, names_mock]) as mock_git:
+            fr._get_diff("branch", tmp_path)
+
+        diff_call_args = mock_git.call_args_list[0][0][0]
+        assert "origin/main...HEAD" in diff_call_args
+
+    def test_commit_scope_ignores_base_branch(self, tmp_path: Path) -> None:
+        diff_mock = MagicMock()
+        diff_mock.returncode = 0
+        diff_mock.stdout = _make_diff("file.cs", 5)
+
+        names_mock = MagicMock()
+        names_mock.returncode = 0
+        names_mock.stdout = "file.cs"
+
+        with patch.object(fr, "_run_git", side_effect=[diff_mock, names_mock]) as mock_git:
+            fr._get_diff("commit", tmp_path, base_branch="origin/dev")
+
+        diff_call_args = mock_git.call_args_list[0][0][0]
+        assert "HEAD~1..HEAD" in diff_call_args
+        assert "origin/dev" not in " ".join(diff_call_args)
+
+    def test_staged_scope_ignores_base_branch(self, tmp_path: Path) -> None:
+        diff_mock = MagicMock()
+        diff_mock.returncode = 0
+        diff_mock.stdout = _make_diff("file.cs", 5)
+
+        names_mock = MagicMock()
+        names_mock.returncode = 0
+        names_mock.stdout = "file.cs"
+
+        with patch.object(fr, "_run_git", side_effect=[diff_mock, names_mock]) as mock_git:
+            fr._get_diff("staged", tmp_path, base_branch="origin/dev")
+
+        diff_call_args = mock_git.call_args_list[0][0][0]
+        assert "--cached" in diff_call_args
+        assert "origin/dev" not in " ".join(diff_call_args)
+
+
+class TestPrepareReviewBaseBranch:
+    """prepare_review passes base_branch through to summary."""
+
+    def test_cli_base_overrides_config(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        repo = _setup_repo(tmp_path)
+        _write_config_full(repo, ".claude/focused-review.json", {
+            "rules_dir": "review/",
+            "base_branch": "origin/develop",
+        })
+
+        diff = _make_diff("src/Foo.cs", 50)
+        args = argparse.Namespace(
+            repo=str(repo), scope="branch", rules_dir=None,
+            path=None, base="origin/feature",
+        )
+        with patch.object(fr, "_run_git", side_effect=_mock_git_results(diff, ["src/Foo.cs"])):
+            fr.prepare_review(args)
+
+        captured = capsys.readouterr()
+        summary = json.loads(captured.out)
+        assert summary["base_branch"] == "origin/feature"
+
+    def test_config_base_used_when_no_cli(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        repo = _setup_repo(tmp_path)
+        _write_config_full(repo, ".claude/focused-review.json", {
+            "rules_dir": "review/",
+            "base_branch": "origin/develop",
+        })
+
+        diff = _make_diff("src/Foo.cs", 50)
+        args = argparse.Namespace(
+            repo=str(repo), scope="branch", rules_dir=None, path=None,
+        )
+        with patch.object(fr, "_run_git", side_effect=_mock_git_results(diff, ["src/Foo.cs"])):
+            fr.prepare_review(args)
+
+        captured = capsys.readouterr()
+        summary = json.loads(captured.out)
+        assert summary["base_branch"] == "origin/develop"
+
+    def test_default_base_when_no_config_no_cli(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        repo = _setup_repo(tmp_path)
+        diff = _make_diff("src/Foo.cs", 50)
+        args = argparse.Namespace(
+            repo=str(repo), scope="branch", rules_dir="review/", path=None,
+        )
+        with patch.object(fr, "CONFIG_SCAN_LOCATIONS", ["nonexistent.json"]), \
+             patch.object(fr, "CONFIG_USER_LOCATIONS", []):
+            with patch.object(fr, "_run_git", side_effect=_mock_git_results(diff, ["src/Foo.cs"])):
+                fr.prepare_review(args)
+
+        captured = capsys.readouterr()
+        summary = json.loads(captured.out)
+        assert summary["base_branch"] == "origin/main"

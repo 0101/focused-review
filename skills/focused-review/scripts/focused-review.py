@@ -52,6 +52,7 @@ CONFIG_USER_LOCATIONS: list[str] = [
 
 DEFAULT_RULES_DIR = "review/"
 DEFAULT_CONCERNS_DIR = "review/concerns/"
+DEFAULT_BASE_BRANCH = "origin/main"
 BUILTIN_CONCERNS_DIR = Path(__file__).resolve().parent.parent / "defaults" / "concerns"
 CONCERN_FRAMEWORK_PATH = Path(__file__).resolve().parent.parent / "defaults" / "concern-framework.md"
 
@@ -119,11 +120,18 @@ def _resolve_config(repo: str = ".") -> dict[str, object]:
                 sources: list[str] = data.get("sources", [])
                 concerns_raw = data.get("concerns_dir", DEFAULT_CONCERNS_DIR)
                 concerns_dir = str(concerns_raw).replace("\\", "/")
+                base_branch_raw = data.get("base_branch", DEFAULT_BASE_BRANCH)
+                base_branch = (
+                    str(base_branch_raw).strip()
+                    if isinstance(base_branch_raw, str) and str(base_branch_raw).strip()
+                    else DEFAULT_BASE_BRANCH
+                )
                 config_path = str(candidate).replace("\\", "/")
                 return {
                     "rules_dir": rules_dir,
                     "sources": sources,
                     "concerns_dir": concerns_dir,
+                    "base_branch": base_branch,
                     "config_file": config_path,
                 }
             except (json.JSONDecodeError, AttributeError):
@@ -133,6 +141,7 @@ def _resolve_config(repo: str = ".") -> dict[str, object]:
         "rules_dir": DEFAULT_RULES_DIR,
         "sources": [],
         "concerns_dir": DEFAULT_CONCERNS_DIR,
+        "base_branch": DEFAULT_BASE_BRANCH,
         "config_file": None,
     }
 
@@ -451,13 +460,15 @@ def _run_git(cmd: list[str], repo: Path) -> subprocess.CompletedProcess[str]:
 
 def _get_diff(
     scope: str, repo: Path, pathspecs: list[str] | None = None,
+    *, base_branch: str = DEFAULT_BASE_BRANCH,
 ) -> tuple[str, list[str]]:
     """Run ``git diff`` for *scope* and return ``(diff_text, changed_files)``.
 
     When *pathspecs* is provided, the diff is restricted to matching paths.
+    *base_branch* controls the ref used for ``branch`` scope (default: ``origin/main``).
     """
     scope_args = {
-        "branch": ["origin/main...HEAD"],
+        "branch": [f"{base_branch}...HEAD"],
         "commit": ["HEAD~1..HEAD"],
         "staged": ["--cached"],
         "unstaged": [],
@@ -854,6 +865,10 @@ def prepare_review(args: argparse.Namespace) -> None:
     raw_rules_dir = args.rules_dir if args.rules_dir is not None else str(config["rules_dir"])
     rules_dir = repo / Path(raw_rules_dir.replace("\\", "/"))
     scope: str = args.scope
+    base_branch: str = (
+        getattr(args, "base", None)
+        or str(config["base_branch"])
+    )
 
     rules = _read_rules(rules_dir, repo)
     if not rules:
@@ -881,7 +896,7 @@ def prepare_review(args: argparse.Namespace) -> None:
         changed_files = _all_tracked_files(repo, pathspecs)
         chunk_paths: list[Path] = []
     else:
-        diff_text, changed_files = _get_diff(scope, repo, pathspecs)
+        diff_text, changed_files = _get_diff(scope, repo, pathspecs, base_branch=base_branch)
         if not diff_text.strip():
             # Write empty concern-dispatch so downstream run-concerns
             # doesn't crash with FileNotFoundError.
@@ -892,6 +907,7 @@ def prepare_review(args: argparse.Namespace) -> None:
                 "dispatch_path": None,
                 "agents": 0,
                 "scope": scope,
+                "base_branch": base_branch,
                 "rules_total": len(rules),
                 "rules_matched": 0,
                 "changed_files": 0,
@@ -945,6 +961,7 @@ def prepare_review(args: argparse.Namespace) -> None:
         "dispatch_path": _posix(dispatch_path, relative_to=repo),
         "agents": len(dispatch),
         "scope": scope,
+        "base_branch": base_branch,
         "rules_total": len(rules),
         "rules_matched": len({d["rule_path"] for d in dispatch}),
         "changed_files": len(changed_files),
@@ -1755,6 +1772,12 @@ def main() -> int:
         nargs="*",
         default=None,
         help="Restrict review to files matching these paths (directories, globs). Multiple values allowed.",
+    )
+    prepare_parser.add_argument(
+        "--base",
+        default=None,
+        help="Base ref for branch scope diff (default: resolved from focused-review.json, then origin/main). "
+             "Accepts any git ref: origin/main, origin/dev, upstream/release/1.2, etc.",
     )
     prepare_parser.set_defaults(func=prepare_review)
 
