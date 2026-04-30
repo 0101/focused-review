@@ -111,13 +111,16 @@ Parse the JSON summary. Store the `run_dir` field — this is the timestamped di
 
 If `agents` is 0 and `concern_prompts` is 0, tell the user no rules matched and no concerns apply, and stop.
 
-### Step 2: Phase 1 — Discovery (parallel)
+### Step 2: Phase 1 — Discovery (parallel, capped at 12 concurrent)
 
 Read `{run_dir}/dispatch.json` (rule dispatch) and `{run_dir}/concern-dispatch.json` (concern dispatch).
 
 **IMPORTANT: Do NOT read the rule files, diff/chunk files, or concern prompt files yourself.** The subagents and concern runner read their own files. You only need the metadata from dispatch.json (paths, model) to construct the agent prompts — never `view` or `cat` the rule or diff content.
 
-**In a single response**, launch all of the following in parallel:
+**Concurrency cap: 12 agents at a time.** The concern runner counts as 4 agents (it runs 4 concurrent copilot sessions internally). This means:
+- **First batch**: up to 8 rule agents + the concern runner (8 + 4 = 12)
+- **Subsequent batches**: up to 12 rule agents each (concern runner is already running)
+- **CRITICAL: Wait for the current batch to fully complete before launching the next batch.** Do NOT launch a new batch while the previous one is still running. This prevents process accumulation that can cause out-of-memory.
 
 **Rule agents** — For each entry in `dispatch.json`, launch a `review-runner` Task agent. Each agent's prompt must contain exactly:
 
@@ -136,7 +139,7 @@ Where:
 
 Use the model specified in each entry's `model` field. If `"inherit"`, pass **your own model** (the model you are currently running as — check your system prompt's `<model>` tag for the `id` attribute) to the Task tool's `model` parameter. This ensures subagents run at the same quality level as the orchestrator.
 
-**Concern runner** — If `concern-dispatch.json` has entries, start the Python concern runner **in the same response** as the rule agent launches. Use the `powershell` tool with `mode="sync"` and `initial_wait: 300` (concern sessions can take several minutes):
+**Concern runner** — If `concern-dispatch.json` has entries, start the Python concern runner in the **first batch** alongside rule agents. Use the `powershell` tool with `mode="sync"` and `initial_wait: 300` (concern sessions can take several minutes):
 
 ```bash
 python {script_path} run-concerns --repo . --run-dir {run_dir} --inherit-model {your_model_id}
@@ -146,13 +149,15 @@ Where `{your_model_id}` is the same model ID you used for `inherit` rules above 
 
 This launches `copilot -p` sessions in parallel via ThreadPoolExecutor. It reads `concern-dispatch.json` from the run directory and writes findings to `{run_dir}/findings/concern--{name}--{model}.md`.
 
-**Batching**: Max 12 Task agents per message. Include the `run-concerns` bash command in the same response as the first batch of rule agents. If rules need multiple batches (>12 entries), the concern runner is already running from the first batch — subsequent batches only contain rule agents.
+**Batch execution procedure:**
 
-Wait for all rule agents and the concern runner to complete before proceeding.
+1. **Batch 1**: Launch up to 8 rule agents + the concern runner (if applicable) in a single response. If there are no concerns, launch up to 12 rule agents.
+2. **Wait** for all agents in batch 1 to complete.
+3. **Batch 2+**: Launch the next 12 rule agents. Wait for completion. Repeat until all rule agents have run.
 
 If `dispatch.json` is empty (no rules matched), only run concerns. If `concern-dispatch.json` is empty (no concerns), only run rules.
 
-Rule agents write their findings directly to `{run_dir}/findings/`. The concern runner does the same. After all agents complete, verify the findings directory has the expected files before proceeding.
+Rule agents write their findings directly to `{run_dir}/findings/`. The concern runner does the same. After all batches complete, verify the findings directory has the expected files before proceeding.
 
 ### Step 3: Phase 2 — Consolidation
 
