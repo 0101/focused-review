@@ -1,6 +1,6 @@
 ---
 type: concern
-models: [opus, codex, gemini]
+models: [opus, gpt, gemini]
 priority: standard
 ---
 # Architecture Reviewer

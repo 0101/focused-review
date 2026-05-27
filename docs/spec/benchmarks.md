@@ -52,6 +52,6 @@ Results on 8 dotnet/runtime PRs:
 
 These are technical decisions from the pipeline implementation. Preserved here as reference:
 
-- **Model name mapping** — Concern files use shorthand names (opus, codex, gemini); `_resolve_model()` maps to full CLI identifiers. Case-insensitive lookup.
+- **Model name mapping** — Concern files use shorthand names (opus, gpt, codex, gemini); `_resolve_model()` maps to full CLI identifiers. Case-insensitive lookup.
 - **Prompt as direct CLI argument** — `copilot -p <prompt>` passes prompt as argument (not stdin). Subject to OS argument length limits.
 - **OSError handling** — `_run_single_concern` catches `OSError` for oversized prompts (Windows 32K CreateProcess limit). No retry.

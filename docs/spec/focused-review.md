@@ -211,7 +211,7 @@ Code example showing compliant code.
 ```yaml
 ---
 type: concern
-models: [opus, codex, gemini]
+models: [opus, gpt, gemini]
 priority: high                 # high | standard
 applies-to: "**/*.cs"         # optional
 ---

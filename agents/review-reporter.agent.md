@@ -122,7 +122,7 @@ After writing the report, output **exactly** the following (the orchestrator wil
 | 2 | ❓ | Medium | rule:null-handling | path:88 | Brief description |
 ```
 
-The `Found by` column uses short labels: `bugs(opus,gemini)` for concern:bugs found by opus and gemini, `arch(codex)` for concern:architecture found by codex, `rule:name` for rules. Group models under the same concern name.
+The `Found by` column uses short labels: `bugs(opus,gemini)` for concern:bugs found by opus and gemini, `arch(gpt)` for concern:architecture found by gpt, `rule:name` for rules. Group models under the same concern name.
 
 If there are zero confirmed and questionable findings, output: `✅ No actionable findings.`
 

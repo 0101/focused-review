@@ -64,9 +64,10 @@ CONCERN_MAX_WORKERS = int(os.environ.get("CONCERN_MAX_WORKERS", "4"))
 # Shorthand model names used in concern files → full CLI model identifiers.
 # Unknown names pass through unchanged so users can specify full names directly.
 MODEL_MAP: dict[str, str] = {
-    "opus": "claude-opus-4.6",
+    "opus": "claude-opus-4.6-1m",
     "sonnet": "claude-sonnet-4.6",
     "haiku": "claude-haiku-4.5",
+    "gpt": "gpt-5.5",
     "codex": "gpt-5.3-codex",
     "gemini": "gemini-3-pro-preview",
 }

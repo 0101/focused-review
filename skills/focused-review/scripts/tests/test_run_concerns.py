@@ -112,13 +112,16 @@ class TestResolveModel:
     """Tests for the model name resolution mapping."""
 
     def test_opus_maps_to_full_name(self) -> None:
-        assert fr._resolve_model("opus") == "claude-opus-4.6"
+        assert fr._resolve_model("opus") == "claude-opus-4.6-1m"
 
     def test_sonnet_maps_to_full_name(self) -> None:
         assert fr._resolve_model("sonnet") == "claude-sonnet-4.6"
 
     def test_haiku_maps_to_full_name(self) -> None:
         assert fr._resolve_model("haiku") == "claude-haiku-4.5"
+
+    def test_gpt_maps_to_full_name(self) -> None:
+        assert fr._resolve_model("gpt") == "gpt-5.5"
 
     def test_codex_maps_to_full_name(self) -> None:
         assert fr._resolve_model("codex") == "gpt-5.3-codex"
@@ -128,7 +131,7 @@ class TestResolveModel:
 
     def test_unknown_model_passes_through(self) -> None:
         """Unknown names pass through unchanged (user may specify full CLI name)."""
-        assert fr._resolve_model("claude-opus-4.6") == "claude-opus-4.6"
+        assert fr._resolve_model("claude-opus-4.6-1m") == "claude-opus-4.6-1m"
 
     def test_arbitrary_model_passes_through(self) -> None:
         assert fr._resolve_model("some-future-model-v2") == "some-future-model-v2"
@@ -139,11 +142,14 @@ class TestResolveModel:
 
     def test_case_insensitive_opus(self) -> None:
         """Model lookup is case-insensitive."""
-        assert fr._resolve_model("Opus") == "claude-opus-4.6"
-        assert fr._resolve_model("OPUS") == "claude-opus-4.6"
+        assert fr._resolve_model("Opus") == "claude-opus-4.6-1m"
+        assert fr._resolve_model("OPUS") == "claude-opus-4.6-1m"
 
     def test_case_insensitive_codex(self) -> None:
         assert fr._resolve_model("Codex") == "gpt-5.3-codex"
+
+    def test_case_insensitive_gpt(self) -> None:
+        assert fr._resolve_model("GPT") == "gpt-5.5"
 
 
 # ---------------------------------------------------------------------------
@@ -496,7 +502,7 @@ class TestRunSingleConcernRetry:
         assert "--model" in cmd
         model_idx = cmd.index("--model")
         # Shorthand "opus" should be resolved to full CLI name
-        assert cmd[model_idx + 1] == "claude-opus-4.6"
+        assert cmd[model_idx + 1] == "claude-opus-4.6-1m"
 
     def test_inherit_model_without_flag_omits_model(self, tmp_path: Path) -> None:
         """When model is 'inherit' and no inherit_model provided, --model is omitted."""
@@ -538,14 +544,14 @@ class TestRunSingleConcernRetry:
         with patch("subprocess.run", mock_run):
             fr._run_single_concern(
                 entries[0], repo, work_dir, retries=0,
-                inherit_model="claude-opus-4.6",
+                inherit_model="claude-opus-4.6-1m",
             )
 
         call_args = mock_run.call_args
         cmd = call_args[0][0]
         assert "--model" in cmd
         model_idx = cmd.index("--model")
-        assert cmd[model_idx + 1] == "claude-opus-4.6"
+        assert cmd[model_idx + 1] == "claude-opus-4.6-1m"
 
 
 # ---------------------------------------------------------------------------
