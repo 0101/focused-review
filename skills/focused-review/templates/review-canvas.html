@@ -12,6 +12,11 @@
     {{RUN_ID}}                      scalar; the run id, embedded in a data attribute.
                                     Fill this FIRST (before injecting any escaped content),
                                     so escaped finding text can never forge it.
+    {{PARENT_ORIGIN}}               scalar; the trusted Treemon parent origin, embedded in a
+                                    data attribute (data-parent-origin). Pinned as the
+                                    postMessage target origin and validated on inbound
+                                    messages, so the action-bar channel is origin-validated
+                                    (never the wildcard "*"). Default http://localhost:5000.
     <!-- FR:META -->                header meta line (scope · date · rule/concern counts).
     <!-- FR:SUMMARY_BADGES -->      confirmed/questionable/invalid count badges.
     <!-- FR:CONFIRMED_COUNT -->     integer shown in the Confirmed section header.
@@ -472,6 +477,13 @@
     var el = document.querySelector("[data-run-id]");
     return el ? el.getAttribute("data-run-id") : "";
   }
+  function getParentOrigin() {
+    // Trusted Treemon parent origin, baked into data-parent-origin by render-review.
+    // Pins the outbound postMessage target and gates inbound messages so the action
+    // channel is origin-validated instead of a wildcard broadcast.
+    var el = document.querySelector("[data-parent-origin]");
+    return el ? el.getAttribute("data-parent-origin") : "";
+  }
   function instructions() {
     var box = document.querySelector("[data-instructions]");
     return box ? box.value.trim() : "";
@@ -533,7 +545,7 @@
       run_id: getRunId(),
       record_ids: ids,
       instructions: instructions()
-    }, "*");
+    }, getParentOrigin());
 
     if (action === NS + "disregard") {
       ids.forEach(function (id) { state.disregarded.add(id); });
@@ -604,6 +616,11 @@
   // Treemon morphs document.body in place on every re-render; restore state afterwards.
   // The exact post-morph signal is treated defensively (window message and/or DOM event).
   window.addEventListener("message", function (e) {
+    // Origin-validated inbound channel (counterpart to the pinned postMessage target):
+    // only honor morph signals from the trusted Treemon parent window + origin, so an
+    // untrusted framing parent cannot drive the canvas re-render path.
+    if (e.origin !== getParentOrigin()) return;
+    if (e.source !== window.parent) return;
     var a = e && e.data && e.data.action;
     if (a === "morph-complete" || a === "content-updated") restoreState();
   });
@@ -617,7 +634,7 @@
 })();
 </script>
 </head>
-<body data-run-id="{{RUN_ID}}">
+<body data-run-id="{{RUN_ID}}" data-parent-origin="{{PARENT_ORIGIN}}">
 
 <div class="header">
   <h1>Focused Review</h1>

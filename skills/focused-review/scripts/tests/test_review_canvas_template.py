@@ -23,6 +23,7 @@ RESERVED_ACTIONS = ["navigate-canvas-doc", "morph-complete", "content-updated"]
 # Placeholders Python fills in `render-review`.
 PLACEHOLDERS = [
     "{{RUN_ID}}",
+    "{{PARENT_ORIGIN}}",
     "<!-- FR:META -->",
     "<!-- FR:SUMMARY_BADGES -->",
     "<!-- FR:CONFIRMED_COUNT -->",
@@ -44,10 +45,37 @@ NAMESPACED_ACTIONS = [
     "focused-review.document",
 ]
 
+# The trusted Treemon parent-app origin the canvas pins its postMessage channel to
+# (mirrors DEFAULT_PARENT_ORIGIN in focused-review.py); the fixture bakes it in by hand.
+TRUSTED_PARENT_ORIGIN = "http://localhost:5000"
+
 
 def _strip_html_comments(text: str) -> str:
     """Remove <!-- ... --> comments so doc-comments don't trip content assertions."""
     return re.sub(r"<!--.*?-->", "", text, flags=re.DOTALL)
+
+
+def _executable_js(html_text: str) -> list[str]:
+    """Return the action-bar script's executable lines (comments + blanks stripped).
+
+    HTML comments are removed first so the doc-comment's literal ``<script>`` mention
+    cannot confuse extraction; then JS block/line comments and blank lines are dropped
+    and each surviving line's internal whitespace is collapsed. The template and the
+    fixture must share byte-identical executable JS — only their comments and their
+    filled-in attribute values (run id, parent origin) are allowed to differ — so a
+    browser test of the fixture genuinely exercises the template's behaviour. (Safe
+    line-comment stripping relies on the action-bar JS holding no ``//`` string
+    literals, which the no-URL-in-JS design guarantees.)
+    """
+    no_html_comments = _strip_html_comments(html_text)
+    body = re.search(r"<script>(.*?)</script>", no_html_comments, re.DOTALL).group(1)
+    body = re.sub(r"/\*.*?\*/", "", body, flags=re.DOTALL)
+    lines = []
+    for raw in body.splitlines():
+        line = re.sub(r"\s+", " ", re.sub(r"//.*$", "", raw)).strip()
+        if line:
+            lines.append(line)
+    return lines
 
 
 @pytest.fixture(scope="module")
@@ -156,6 +184,50 @@ def test_template_action_buttons_namespaced(template_text: str, action: str):
 @pytest.mark.parametrize("reserved", RESERVED_ACTIONS)
 def test_template_avoids_reserved_action_buttons(template_text: str, reserved: str):
     assert f'data-action="{reserved}"' not in template_text
+
+
+# ── origin-validated postMessage channel (C-03 outbound / C-15 inbound) ──────
+
+
+def test_template_outbound_postmessage_pins_parent_origin(template_text: str):
+    # C-03: the action post must target the trusted parent origin, never the wildcard
+    # "*" (which would broadcast run_id + free-text instructions to any framing parent).
+    assert '}, "*")' not in template_text, "outbound postMessage still uses wildcard origin"
+    assert "}, getParentOrigin());" in template_text
+    assert "function getParentOrigin()" in template_text
+    assert "[data-parent-origin]" in template_text
+
+
+def test_template_inbound_listener_validates_origin(template_text: str):
+    # C-15: the inbound message listener must reject foreign origins before restoring
+    # state, the counterpart contract to the pinned outbound target.
+    assert "e.origin !== getParentOrigin()" in template_text
+
+
+def test_template_body_carries_parent_origin_placeholder(template_text: str):
+    # Threaded as data, mirroring data-run-id, so the executable JS stays identical to
+    # the fixture's (only the filled-in origin differs).
+    assert 'data-parent-origin="{{PARENT_ORIGIN}}"' in template_text
+
+
+def test_fixture_outbound_postmessage_pins_parent_origin(fixture_text: str):
+    assert '}, "*")' not in fixture_text, "fixture outbound postMessage still uses wildcard origin"
+    assert "}, getParentOrigin());" in fixture_text
+
+
+def test_fixture_inbound_listener_validates_origin(fixture_text: str):
+    assert "e.origin !== getParentOrigin()" in fixture_text
+
+
+def test_fixture_embeds_trusted_parent_origin(fixture_text: str):
+    assert f'data-parent-origin="{TRUSTED_PARENT_ORIGIN}"' in fixture_text
+
+
+def test_fixture_executable_js_identical_to_template(template_text: str, fixture_text: str):
+    # The fixture is the hand-filled twin of the template; their action-bar JS must stay
+    # byte-identical (modulo comments + filled attribute values) so the origin-validation
+    # fix can never drift between the two ends of the channel.
+    assert _executable_js(fixture_text) == _executable_js(template_text)
 
 
 # ── fixture: fully hand-filled and exercises the contract ────────────────────

@@ -49,6 +49,7 @@ The canvas posts `{ action, run_id, record_ids: [...], instructions }`:
 - Actions are **namespaced** — `focused-review.fix` / `.disregard` / `.document` (avoid Treemon's reserved `navigate-canvas-doc` / `morph-complete` / `content-updated`).
 - `record_ids` are **stable** `record_id`s, never positional display numbers.
 - The orchestrator calls Python to **validate/expand** the action against `records.json` (confirm `run_id`, confirm ids exist, resolve to file/line/title/suggestion), then **requires human confirmation** before executing. Nothing auto-runs.
+- The channel is **origin-pinned**: the outbound post targets the trusted parent origin (never `"*"`) and the inbound `message` listener (Treemon's morph-restore signal) validates `event.origin` + `event.source`, so a hostile framing parent can neither read the `run_id`/`instructions` payload nor drive the re-render path. The origin is threaded into the template via `{{PARENT_ORIGIN}}` (`render-review --parent-origin`, default `http://localhost:5000`).
 - `fix` → propose fixing the selected findings with the instructions. `disregard` → mark as persisted run state (re-applied across re-renders). `document` → write a tracking doc.
 
 ### Graceful degradation
@@ -97,12 +98,12 @@ Enforced rules (what the renderer depends on, so it's validated strictly):
 
 ## Security Model
 
-Reviewed content is **untrusted** (diffs may come from untrusted PR contributors). Treemon serves the canvas over `http://127.0.0.1:5002` in an iframe with `sandbox="allow-scripts allow-same-origin allow-forms allow-popups"`; the parent app is a different origin (`localhost:5000`), so injected JS cannot reach the parent DOM — `postMessage` (origin-validated, `action` string required, 64 KB cap) is the only channel. Treemon injects its own inline `<script>` tags and sets no CSP header. Defenses:
+Reviewed content is **untrusted** (diffs may come from untrusted PR contributors). Treemon serves the canvas over `http://127.0.0.1:5002` in an iframe with `sandbox="allow-scripts allow-same-origin allow-forms allow-popups"`; the parent app is a different origin (`localhost:5000`), so injected JS cannot reach the parent DOM — `postMessage` (origin-validated against the trusted parent origin `http://localhost:5000`, `action` string required, 64 KB cap) is the only channel. Treemon injects its own inline `<script>` tags and sets no CSP header. Defenses:
 
 - **`html.escape`** every structured text field.
 - **`nh3`** sanitizes each detail sidecar (allowlist tags/attrs incl. an SVG allowlist; strip `<script>`/`on*`/`javascript:`/`animate`/`set`/`foreignObject`/external `href`; keep inline `style`). **Fail-closed**: no `nh3` → plain escaped text only, never raw HTML.
 - **CSP `<meta>`**: `script-src`/`style-src` must be `'unsafe-inline'` (Treemon injects inline scripts; template + sidecars use inline styles), so CSP cannot restrict scripts — that is `nh3`'s job. CSP locks `img-src`/`font-src`/`connect-src` to `'self' data:`, blocking the `url()`/beacon/fetch **exfil** vector for HTML and SVG alike. Split of duties: **CSP = exfil, `nh3` = script.** (Neither filters layout CSS, so inline-`style` UI-redress within the iframe is an accepted residual risk — see the Phase 4 decisions.)
-- **postMessage = privilege boundary**: namespaced actions, stable id validation via Python, **human confirmation** before any execution.
+- **postMessage = privilege boundary**: the channel is **origin-pinned** — the action bar targets the trusted parent origin (`{{PARENT_ORIGIN}}`, default `http://localhost:5000`) instead of the wildcard `"*"`, and the inbound `message` listener rejects any `event.origin`/`event.source` that is not the embedding parent before re-rendering; plus namespaced actions, stable id validation via Python, **human confirmation** before any execution.
 
 ## Key Design Decisions
 
@@ -181,6 +182,12 @@ Phase 3 implements steps 1 and 3 above. Phase 4 (`focused-review-icp`) added ste
 - **`render_canvas_html`/`_canvas_finding_block` stay pure** — the `disregarded` set is threaded as data (mirroring the Phase 4 `details` dict), no file IO inside the renderer; the CLI handler owns reading `run-state.json`. The new `disregarded`/`dimmed` params default empty, so existing callers/tests are unaffected.
 
 
+#### Phase 6 decisions (security fix — origin-validated postMessage channel, `focused-review-di6`)
+
+- **The action-bar channel is origin-pinned, not wildcard.** The quality-gate review (findings C-03 Medium / C-15 Low) flagged the prototype's `window.parent.postMessage(payload, "*")` — which broadcasts the `run_id` + free-text `instructions` to **any** framing parent — and its inbound `message` listener that re-rendered on **any** sender. Fix: a new `{{PARENT_ORIGIN}}` placeholder is threaded into `<body data-parent-origin>` (filled by `render_canvas_html`, exposed as `render-review --parent-origin`, default `http://localhost:5000` — the Treemon parent app's origin, distinct from the canvas iframe's `127.0.0.1:5002`). The JS reads it via a `getParentOrigin()` helper (mirroring `getRunId()`) and (a) pins it as the outbound `postMessage` target origin and (b) drops inbound messages whose `event.origin !== getParentOrigin()` or `event.source !== window.parent` before calling `restoreState()`.
+- **Threaded as data so the fixture stays a faithful twin.** The origin lives in a DOM attribute, not a JS string literal, so the template's and fixture's executable JS remain byte-identical — `test_review_canvas_template.py::test_fixture_executable_js_identical_to_template` now enforces that (comments and filled-in attribute values may differ; statements may not), locking both ends of the channel against drift. The value is `html.escape`d for the attribute context exactly like `{{RUN_ID}}`. No version bump — same `0.7.0` release.
+
+
 ### HTML template — `skills/focused-review/templates/review-canvas.html`
 
 Static, version-controlled page shell (head, CSS class palette for detail HTML, CSP `<meta>`, morph-safe action-bar script) with placeholders Python fills with pre-rendered rows/accordions/panels.
@@ -188,6 +195,7 @@ Static, version-controlled page shell (head, CSS class palette for detail HTML, 
 **Placeholder contract** (built in Phase 1; `render-review` fills it). Block-injection sites are **HTML comments** — `html.escape` turns `<` into `&lt;`, so escaped finding text can never forge a `<!-- FR:* -->` marker:
 
 - `{{RUN_ID}}` — scalar in `<body data-run-id>`. Fill **first** (before injecting escaped content) so finding text can't forge it; a single-pass regex substitution over the whole set is safest.
+- `{{PARENT_ORIGIN}}` — scalar in `<body data-parent-origin>`; the trusted Treemon parent origin the action bar pins as its `postMessage` target and validates inbound `message` events against. Threaded as data (mirroring `{{RUN_ID}}`, `html.escape`d for the attribute) so the executable JS stays identical to the fixture; `render-review` fills it from `--parent-origin` (default `http://localhost:5000`).
 - `<!-- FR:META -->`, `<!-- FR:SUMMARY_BADGES -->` — header meta line + count badges.
 - `<!-- FR:CONFIRMED_COUNT -->` / `<!-- FR:CONFIRMED_ROWS -->`, `<!-- FR:QUESTIONABLE_COUNT -->` / `<!-- FR:QUESTIONABLE_ROWS -->` — section counts + one `.finding` block per finding.
 - `<!-- FR:INVALID_SUMMARY -->` / `<!-- FR:INVALID_ROWS -->`, `<!-- FR:QUALITY_SUMMARY -->` / `<!-- FR:QUALITY_NOTES -->` — collapsibles.

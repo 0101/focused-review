@@ -378,6 +378,20 @@ class TestCanvasRender:
         out = _canvas(_render_envelope())
         assert 'data-run-id="20260203-100000"' in out
 
+    def test_parent_origin_default_embedded_in_body(self) -> None:
+        out = _canvas(_render_envelope())
+        # render_canvas_html pins the default trusted parent origin into the body, and
+        # the action bar targets it via getParentOrigin() instead of the wildcard "*".
+        assert 'data-parent-origin="http://localhost:5000"' in out
+        assert '}, "*")' not in out
+
+    def test_parent_origin_override_embedded_in_body(self) -> None:
+        template = fr.CANVAS_TEMPLATE_PATH.read_text(encoding="utf-8")
+        out = fr.render_canvas_html(
+            _render_envelope(), template, parent_origin="https://treemon.example:8443"
+        )
+        assert 'data-parent-origin="https://treemon.example:8443"' in out
+
     def test_exclusive_accordion_and_details(self) -> None:
         out = _canvas(_render_envelope())
         assert 'name="findings"' in out
@@ -458,6 +472,17 @@ class TestEscaping:
         out = _canvas(self._xss_env())
         assert "<script>evil()</script>" not in out
         assert 'data-run-id="rid&quot;&gt;&lt;script&gt;evil()&lt;/script&gt;"' in out
+
+    def test_parent_origin_escaped_for_attribute_context(self) -> None:
+        # The parent origin lands in the data-parent-origin attribute, so a hostile
+        # value must be escaped exactly like the run id (defense even though callers
+        # pass a trusted origin).
+        template = fr.CANVAS_TEMPLATE_PATH.read_text(encoding="utf-8")
+        out = fr.render_canvas_html(
+            _render_envelope(), template, parent_origin='"><script>evil()</script>'
+        )
+        assert "<script>evil()</script>" not in out
+        assert 'data-parent-origin="&quot;&gt;&lt;script&gt;evil()&lt;/script&gt;"' in out
 
     def test_aria_label_attribute_escaped(self) -> None:
         out = _canvas(self._xss_env())
@@ -582,6 +607,25 @@ class TestRenderReviewCLI:
         canvas = tmp_path / ".agents" / "canvas" / "focused-review.html"
         assert canvas.is_file()
         assert "data-run-id" in canvas.read_text(encoding="utf-8")
+
+    def test_canvas_pins_default_parent_origin(self, tmp_path: Path) -> None:
+        records = self._write_records(tmp_path)
+        canvas_out = tmp_path / "canvas" / "focused-review.html"
+        # _render_args builds a Namespace without parent_origin, so this exercises the
+        # getattr fallback to DEFAULT_PARENT_ORIGIN (the real CLI default).
+        fr.render_review(_render_args(records, canvas_out=str(canvas_out)))
+        canvas = canvas_out.read_text(encoding="utf-8")
+        assert 'data-parent-origin="http://localhost:5000"' in canvas
+        assert '}, "*")' not in canvas
+
+    def test_canvas_parent_origin_cli_override(self, tmp_path: Path) -> None:
+        records = self._write_records(tmp_path)
+        canvas_out = tmp_path / "canvas" / "focused-review.html"
+        fr.render_review(
+            _render_args(records, canvas_out=str(canvas_out), parent_origin="http://localhost:7001")
+        )
+        canvas = canvas_out.read_text(encoding="utf-8")
+        assert 'data-parent-origin="http://localhost:7001"' in canvas
 
     def test_default_review_out_in_run_dir(self, tmp_path: Path) -> None:
         records = self._write_records(tmp_path)

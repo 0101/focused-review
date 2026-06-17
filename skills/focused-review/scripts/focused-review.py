@@ -99,6 +99,14 @@ CANVAS_TEMPLATE_PATH = Path(__file__).resolve().parent.parent / "templates" / "r
 # Treemon when it is running; written unconditionally so it is ready as a tab.
 DEFAULT_CANVAS_RELPATH = os.path.join(".agents", "canvas", "focused-review.html")
 
+# Trusted Treemon parent-app origin pinned into the canvas action-bar channel.
+# Treemon serves the canvas iframe over http://127.0.0.1:5002, but the embedding
+# parent app is a *different* origin (http://localhost:5000). render-review bakes
+# this into the canvas data-parent-origin attribute so the action bar posts to —
+# and accepts morph signals from — only that origin instead of the wildcard "*"
+# (origin-validated channel; see docs/spec/canvas-review-report.md security model).
+DEFAULT_PARENT_ORIGIN = "http://localhost:5000"
+
 COPILOT_CMD = os.environ.get("COPILOT_CMD", "copilot")
 CONCERN_TIMEOUT_SECS = int(os.environ.get("CONCERN_TIMEOUT", "1200"))
 CONCERN_RETRIES = int(os.environ.get("CONCERN_RETRIES", "2"))
@@ -2979,6 +2987,7 @@ def render_canvas_html(
     template: str,
     details: dict[str, str] | None = None,
     disregarded: set[str] | None = None,
+    parent_origin: str = DEFAULT_PARENT_ORIGIN,
 ) -> str:
     """Fill the canvas template with pre-rendered, escaped markup.
 
@@ -2987,6 +2996,11 @@ def render_canvas_html(
     ``{{RUN_ID}}`` is escaped for an attribute context; escaped finding text can
     never forge a ``<!-- FR:* -->`` marker because ``html.escape`` turns ``<``
     into ``&lt;``.
+
+    ``parent_origin`` is baked into ``{{PARENT_ORIGIN}}`` (the canvas
+    ``data-parent-origin`` attribute): the action bar pins it as the postMessage
+    target origin and validates it on inbound messages, so the channel is
+    origin-validated rather than a wildcard ``"*"`` broadcast.
 
     ``details`` maps a finding's ``record_id`` to its already-nh3-sanitized
     rich-detail fragment (built by the render-review CLI handler, which owns the
@@ -3024,6 +3038,7 @@ def render_canvas_html(
 
     replacements = {
         "{{RUN_ID}}": html.escape(str(run.get("run_id", "")), quote=True),
+        "{{PARENT_ORIGIN}}": html.escape(str(parent_origin), quote=True),
         "<!-- FR:META -->": meta,
         "<!-- FR:SUMMARY_BADGES -->": badges,
         "<!-- FR:CONFIRMED_COUNT -->": str(len(confirmed)),
@@ -3117,6 +3132,9 @@ def render_review(args: argparse.Namespace) -> None:
     review_out = args.review_out or os.path.join(run_dir, "review.md")
     canvas_out = args.canvas_out or os.path.join(args.repo, DEFAULT_CANVAS_RELPATH)
     template_path = args.template or str(CANVAS_TEMPLATE_PATH)
+    # Trusted parent origin pinned into the canvas postMessage channel (getattr keeps
+    # callers that build a bare Namespace working; falls back to the safe default).
+    parent_origin = getattr(args, "parent_origin", None) or DEFAULT_PARENT_ORIGIN
 
     # All-or-nothing: read everything that can fail BEFORE writing any artifact,
     # so a missing/unreadable --template fails the whole render (like the
@@ -3152,7 +3170,7 @@ def render_review(args: argparse.Namespace) -> None:
     # HTML escaping); the canvas is ALWAYS written (gitignored, inert when
     # Treemon is down).
     review_md = render_review_markdown(data)
-    canvas_html = render_canvas_html(data, template, details, disregarded)
+    canvas_html = render_canvas_html(data, template, details, disregarded, parent_origin)
     _write_text(review_out, review_md)
     _write_text(canvas_out, canvas_html)
 
@@ -3686,6 +3704,14 @@ def main() -> int:
         "--template",
         default=None,
         help="Canvas template path (default: the packaged review-canvas.html)",
+    )
+    render_parser.add_argument(
+        "--parent-origin",
+        default=DEFAULT_PARENT_ORIGIN,
+        help=(
+            "Trusted Treemon parent-app origin pinned into the canvas postMessage "
+            "channel; replaces the wildcard target origin (default: %(default)s)"
+        ),
     )
     render_parser.set_defaults(func=render_review)
 

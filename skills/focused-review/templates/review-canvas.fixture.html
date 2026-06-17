@@ -380,6 +380,13 @@
     var el = document.querySelector("[data-run-id]");
     return el ? el.getAttribute("data-run-id") : "";
   }
+  function getParentOrigin() {
+    // Trusted Treemon parent origin, baked into data-parent-origin by render-review.
+    // Pins the outbound postMessage target and gates inbound messages so the action
+    // channel is origin-validated instead of a wildcard broadcast.
+    var el = document.querySelector("[data-parent-origin]");
+    return el ? el.getAttribute("data-parent-origin") : "";
+  }
   function instructions() {
     var box = document.querySelector("[data-instructions]");
     return box ? box.value.trim() : "";
@@ -439,7 +446,7 @@
       run_id: getRunId(),
       record_ids: ids,
       instructions: instructions()
-    }, "*");
+    }, getParentOrigin());
 
     if (action === NS + "disregard") {
       ids.forEach(function (id) { state.disregarded.add(id); });
@@ -500,6 +507,11 @@
   }
 
   window.addEventListener("message", function (e) {
+    // Origin-validated inbound channel (counterpart to the pinned postMessage target):
+    // only honor morph signals from the trusted Treemon parent window + origin, so an
+    // untrusted framing parent cannot drive the canvas re-render path.
+    if (e.origin !== getParentOrigin()) return;
+    if (e.source !== window.parent) return;
     var a = e && e.data && e.data.action;
     if (a === "morph-complete" || a === "content-updated") restoreState();
   });
@@ -513,7 +525,7 @@
 })();
 </script>
 </head>
-<body data-run-id="test-run-20260616-112540">
+<body data-run-id="test-run-20260616-112540" data-parent-origin="http://localhost:5000">
 
 <div class="header">
   <h1>Focused Review</h1>
