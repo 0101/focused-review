@@ -39,6 +39,32 @@ INSTRUCTION_PATTERNS: list[str] = [
 
 DIFF_TARGET_CHUNK_LINES = 3000
 
+# ---------------------------------------------------------------------------
+# records.json envelope schema (Phase 2)
+#
+# The reporter agent serializes the final compiled review as a single JSON
+# envelope ({run_dir}/records.json). Python validates it mechanically — it never
+# interprets prose — and downstream render-review (Phase 3) templates it into
+# review.md / terminal / canvas. See docs/spec/canvas-review-report.md.
+# ---------------------------------------------------------------------------
+
+RECORDS_SCHEMA_VERSION = 1
+
+# Enum values validated strictly because the renderer depends on them:
+# severity → CSS severity class, verdict → section grouping, fix_complexity →
+# ordinal sort, type → "found by" tag styling. Sourced from the discovery /
+# assessor / consolidator agent contracts.
+VALID_SEVERITIES = ("Critical", "High", "Medium", "Low")
+VALID_FIX_COMPLEXITIES = ("quickfix", "moderate", "complex")
+VALID_VERDICTS = ("Confirmed", "Questionable", "Invalid")
+VALID_FINDING_TYPES = ("rule", "concern", "mixed")
+# Mirrors the prepare-review --scope choices.
+VALID_RUN_SCOPES = ("branch", "commit", "staged", "unstaged", "full")
+# Findings that are shown in the numbered (actionable) sections must carry a
+# positional display_number; Invalid findings render in a separate table keyed
+# by assessment id, so their display_number is optional.
+_VERDICTS_REQUIRING_DISPLAY_NUMBER = ("Confirmed", "Questionable")
+
 CONFIG_FILENAME = "focused-review.json"
 CONFIG_SCAN_LOCATIONS: list[str] = [
     os.path.join(".claude", CONFIG_FILENAME),
@@ -1712,6 +1738,576 @@ def post_comments(args: argparse.Namespace) -> None:
 
 
 # ---------------------------------------------------------------------------
+# records.json validation (Phase 2)
+#
+# `validate_records` is a pure function: it takes the parsed JSON and returns a
+# list of structured, per-record error dicts (empty list == valid). Each error
+# carries enough context — a JSON-ish `path`, the offending `field`, and the
+# finding's stable identifiers (`record_id` / `assessment_id`) plus its
+# positional `display_number` when known — for the orchestrator to relay an
+# actionable message back to the reporter on a retry.
+# ---------------------------------------------------------------------------
+
+# Sentinel distinguishing "key absent" from an explicit JSON ``null``.
+_MISSING = object()
+
+
+def _json_type_name(value: object) -> str:
+    """Return the JSON type name for *value* (for human-readable messages)."""
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, int):
+        return "integer"
+    if isinstance(value, float):
+        return "number"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, list):
+        return "array"
+    if isinstance(value, dict):
+        return "object"
+    return type(value).__name__
+
+
+def _is_int(value: object) -> bool:
+    """True for a real integer (``bool`` is a subclass of ``int`` — exclude it)."""
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _is_nonempty_str(value: object) -> bool:
+    """True for a non-blank string."""
+    return isinstance(value, str) and value.strip() != ""
+
+
+def _records_error(
+    scope: str,
+    index: int | None,
+    path: str,
+    field: str | None,
+    message: str,
+    *,
+    record_id: str | None = None,
+    assessment_id: str | None = None,
+    display_number: int | None = None,
+) -> dict[str, object]:
+    """Build one structured validation error.
+
+    ``scope`` is one of ``envelope`` / ``run`` / ``finding`` /
+    ``rebuttal_override`` / ``rule_quality_note``; ``index`` is the position
+    within that array (``None`` for the singleton envelope/run scopes).
+    """
+    return {
+        "scope": scope,
+        "index": index,
+        "path": path,
+        "field": field,
+        "record_id": record_id,
+        "assessment_id": assessment_id,
+        "display_number": display_number,
+        "message": message,
+    }
+
+
+def _finding_identity(rec: dict) -> tuple[str | None, str | None, int | None]:
+    """Best-effort extraction of a finding's stable ids for error attribution."""
+    rid = rec.get("record_id")
+    rid = rid if _is_nonempty_str(rid) else None
+    aid = rec.get("assessment_id")
+    aid = aid if _is_nonempty_str(aid) else None
+    dnum = rec.get("display_number")
+    dnum = dnum if _is_int(dnum) else None
+    return rid, aid, dnum
+
+
+def _validate_run(run: dict, errors: list[dict]) -> None:
+    """Validate the ``run`` metadata object (counts cross-checked separately)."""
+
+    def add(field: str | None, message: str) -> None:
+        path = "run" if field is None else f"run.{field}"
+        errors.append(_records_error("run", None, path, field, message))
+
+    for field in ("run_id", "date"):
+        if not _is_nonempty_str(run.get(field, _MISSING)):
+            add(field, f"{field} is required and must be a non-empty string")
+
+    scope = run.get("scope", _MISSING)
+    if scope is _MISSING:
+        add("scope", "scope is required and must be one of " + ", ".join(VALID_RUN_SCOPES))
+    elif scope not in VALID_RUN_SCOPES:
+        add("scope", f"scope must be one of {', '.join(VALID_RUN_SCOPES)} (got {scope!r})")
+
+    for field in (
+        "rule_count",
+        "concern_count",
+        "consolidated_count",
+        "confirmed",
+        "questionable",
+        "invalid",
+    ):
+        value = run.get(field, _MISSING)
+        if not _is_int(value) or value < 0:
+            add(field, f"{field} is required and must be an integer >= 0")
+
+
+def _validate_run_counts(run: dict, findings: list, errors: list[dict]) -> None:
+    """Cross-check ``run`` tallies against the verdicts present in ``findings``.
+
+    Only runs when every finding is an object (otherwise a structural error was
+    already reported). Catches truncation and miscounts — both real reporter
+    failure modes the spec calls out.
+    """
+    if not all(isinstance(rec, dict) for rec in findings):
+        return
+
+    tally = {verdict: 0 for verdict in VALID_VERDICTS}
+    for rec in findings:
+        verdict = rec.get("verdict")
+        if verdict in tally:
+            tally[verdict] += 1
+
+    def add(field: str, message: str) -> None:
+        errors.append(_records_error("run", None, f"run.{field}", field, message))
+
+    # Only cross-check the per-verdict tallies when every finding has a valid
+    # verdict. A finding with a bad/missing verdict drops out of the tally and
+    # would otherwise produce a *misleading* "run.confirmed is N but M findings
+    # have verdict 'Confirmed'" error — pointing the reporter at the wrong field
+    # and risking a wasted retry. The real (verdict) error is reported per-finding.
+    if all(rec.get("verdict") in tally for rec in findings):
+        for field, verdict in (
+            ("confirmed", "Confirmed"),
+            ("questionable", "Questionable"),
+            ("invalid", "Invalid"),
+        ):
+            value = run.get(field)
+            if _is_int(value) and value >= 0 and value != tally[verdict]:
+                add(
+                    field,
+                    f"run.{field} is {value} but {tally[verdict]} finding(s) have "
+                    f"verdict '{verdict}'",
+                )
+
+    # Length-based, independent of verdicts — always safe to check, and the
+    # primary signal for a truncated findings array.
+    consolidated = run.get("consolidated_count")
+    if _is_int(consolidated) and consolidated >= 0 and consolidated != len(findings):
+        add(
+            "consolidated_count",
+            f"run.consolidated_count is {consolidated} but findings[] has "
+            f"{len(findings)} entr(ies)",
+        )
+
+
+def _validate_provenance(prov: object, base_path: str, add) -> None:
+    """Validate a finding's ``provenance`` list.
+
+    Each entry is either a non-empty source label string or an object carrying a
+    non-empty ``source`` field — both encodings give the renderer a label to show
+    in the "Found by" column. ``add`` is the finding-scoped error accumulator.
+    """
+    if not isinstance(prov, list) or len(prov) == 0:
+        add("provenance", "provenance is required and must be a non-empty array")
+        return
+    for j, entry in enumerate(prov):
+        entry_path = f"{base_path}.provenance[{j}]"
+        if _is_nonempty_str(entry):
+            continue
+        if isinstance(entry, dict):
+            if not _is_nonempty_str(entry.get("source")):
+                add(
+                    "provenance",
+                    f"provenance[{j}] object must have a non-empty 'source' string",
+                )
+            continue
+        add(
+            "provenance",
+            f"provenance[{j}] must be a non-empty string or an object with a "
+            f"'source' field (got {_json_type_name(entry)})",
+        )
+
+
+def _validate_finding(
+    rec: object,
+    index: int,
+    errors: list[dict],
+    seen_record_ids: set,
+    seen_assessment_ids: set,
+    seen_display_numbers: set,
+) -> None:
+    """Validate a single finding object and accumulate structured errors."""
+    base_path = f"findings[{index}]"
+    if not isinstance(rec, dict):
+        errors.append(
+            _records_error(
+                "finding",
+                index,
+                base_path,
+                None,
+                f"finding must be a JSON object, got {_json_type_name(rec)}",
+            )
+        )
+        return
+
+    rid, aid, dnum = _finding_identity(rec)
+
+    def add(field: str | None, message: str) -> None:
+        path = base_path if field is None else f"{base_path}.{field}"
+        errors.append(
+            _records_error(
+                "finding",
+                index,
+                path,
+                field,
+                message,
+                record_id=rid,
+                assessment_id=aid,
+                display_number=dnum,
+            )
+        )
+
+    def require_nonempty_str(field: str) -> None:
+        if not _is_nonempty_str(rec.get(field, _MISSING)):
+            add(field, f"{field} is required and must be a non-empty string")
+
+    def require_str(field: str) -> None:
+        value = rec.get(field, _MISSING)
+        if value is _MISSING or not isinstance(value, str):
+            add(field, f'{field} is required and must be a string (use "" when absent)')
+
+    def require_enum(field: str, allowed: tuple) -> None:
+        value = rec.get(field, _MISSING)
+        if value is _MISSING:
+            add(field, f"{field} is required and must be one of " + ", ".join(allowed))
+        elif value not in allowed:
+            add(field, f"{field} must be one of {', '.join(allowed)} (got {value!r})")
+
+    # Stable identifier — required, unique.
+    record_id = rec.get("record_id", _MISSING)
+    if not _is_nonempty_str(record_id):
+        add("record_id", "record_id is required and must be a non-empty string")
+    elif record_id in seen_record_ids:
+        add("record_id", f"duplicate record_id {record_id!r} (record_ids must be unique)")
+    else:
+        seen_record_ids.add(record_id)
+
+    require_nonempty_str("title")
+    require_nonempty_str("file")
+    require_str("description")
+    require_str("assessment")
+    require_str("suggestion")
+
+    require_enum("original_severity", VALID_SEVERITIES)
+    require_enum("severity", VALID_SEVERITIES)
+    require_enum("fix_complexity", VALID_FIX_COMPLEXITIES)
+    require_enum("verdict", VALID_VERDICTS)
+    require_enum("type", VALID_FINDING_TYPES)
+
+    # introduced_by — optional display metadata; only type-checked when present
+    # (the spec keeps it free-form: "type-checked only, no enum").
+    introduced_by = rec.get("introduced_by", _MISSING)
+    if introduced_by is not _MISSING and not isinstance(introduced_by, str):
+        add("introduced_by", "introduced_by must be a string when present")
+
+    # has_detail — required boolean; gates the optional detail sidecar.
+    has_detail = rec.get("has_detail", _MISSING)
+    if not isinstance(has_detail, bool):
+        add("has_detail", "has_detail is required and must be a boolean")
+
+    # assessment_id — nullable; the detail sidecar is located by it AND the
+    # Invalid-findings table is keyed by it, so a non-null assessment_id must be
+    # a non-empty string, unique across findings, and present when has_detail.
+    assessment_id = rec.get("assessment_id", None)
+    if assessment_id is not None and not _is_nonempty_str(assessment_id):
+        add("assessment_id", "assessment_id must be a non-empty string or null")
+    elif _is_nonempty_str(assessment_id):
+        if assessment_id in seen_assessment_ids:
+            add(
+                "assessment_id",
+                f"duplicate assessment_id {assessment_id!r} (assessment ids must be unique)",
+            )
+        else:
+            seen_assessment_ids.add(assessment_id)
+    if has_detail is True and not _is_nonempty_str(assessment_id):
+        add(
+            "assessment_id",
+            "assessment_id must be a non-empty string when has_detail is true "
+            "(the detail sidecar is located by assessment id)",
+        )
+
+    # line — nullable; an integer line number otherwise.
+    line = rec.get("line", None)
+    if line is not None and not (_is_int(line) and line >= 0):
+        add("line", "line must be an integer >= 0 or null")
+
+    # display_number — positional. Required and unique for the numbered
+    # (actionable) Confirmed/Questionable sections; optional for Invalid findings
+    # (which render in a separate table keyed by assessment_id), so an Invalid
+    # finding's number does not participate in the uniqueness set.
+    verdict = rec.get("verdict")
+    requires_number = verdict in _VERDICTS_REQUIRING_DISPLAY_NUMBER
+    display_number = rec.get("display_number", None)
+    if display_number is None:
+        if requires_number:
+            add(
+                "display_number",
+                "display_number is required (integer >= 1) for "
+                "Confirmed/Questionable findings",
+            )
+    elif not _is_int(display_number) or display_number < 1:
+        add("display_number", "display_number must be an integer >= 1 or null")
+    elif requires_number:
+        if display_number in seen_display_numbers:
+            add(
+                "display_number",
+                f"duplicate display_number {display_number} (display numbers must be unique)",
+            )
+        else:
+            seen_display_numbers.add(display_number)
+
+    _validate_provenance(rec.get("provenance", _MISSING), base_path, add)
+
+
+def _validate_rebuttal_override(
+    item: object, index: int, errors: list[dict], known_record_ids: set | None
+) -> None:
+    """Validate one rebuttal-override entry."""
+    base_path = f"rebuttal_overrides[{index}]"
+    if not isinstance(item, dict):
+        errors.append(
+            _records_error(
+                "rebuttal_override",
+                index,
+                base_path,
+                None,
+                f"rebuttal override must be a JSON object, got {_json_type_name(item)}",
+            )
+        )
+        return
+
+    raw_rid = item.get("record_id")
+    rid_ident = raw_rid if _is_nonempty_str(raw_rid) else None
+
+    def add(field: str | None, message: str) -> None:
+        path = base_path if field is None else f"{base_path}.{field}"
+        errors.append(
+            _records_error(
+                "rebuttal_override", index, path, field, message, record_id=rid_ident
+            )
+        )
+
+    if not _is_nonempty_str(raw_rid):
+        add("record_id", "record_id is required and must be a non-empty string")
+    elif known_record_ids is not None and raw_rid not in known_record_ids:
+        add("record_id", f"record_id {raw_rid!r} does not match any finding")
+
+    for field in ("original_severity", "severity"):
+        value = item.get(field, _MISSING)
+        if value is _MISSING:
+            add(field, f"{field} is required and must be one of " + ", ".join(VALID_SEVERITIES))
+        elif value not in VALID_SEVERITIES:
+            add(field, f"{field} must be one of {', '.join(VALID_SEVERITIES)} (got {value!r})")
+
+    if not _is_nonempty_str(item.get("reasoning", _MISSING)):
+        add("reasoning", "reasoning is required and must be a non-empty string")
+
+
+def _validate_rule_quality_note(item: object, index: int, errors: list[dict]) -> None:
+    """Validate one rule-quality-note entry."""
+    base_path = f"rule_quality_notes[{index}]"
+    if not isinstance(item, dict):
+        errors.append(
+            _records_error(
+                "rule_quality_note",
+                index,
+                base_path,
+                None,
+                f"rule quality note must be a JSON object, got {_json_type_name(item)}",
+            )
+        )
+        return
+
+    def add(field: str, message: str) -> None:
+        errors.append(
+            _records_error("rule_quality_note", index, f"{base_path}.{field}", field, message)
+        )
+
+    for field in ("rule", "observation", "suggestion"):
+        if not _is_nonempty_str(item.get(field, _MISSING)):
+            add(field, f"{field} is required and must be a non-empty string")
+
+
+def validate_records(data: object) -> list[dict]:
+    """Validate a parsed ``records.json`` envelope against the schema.
+
+    Returns a list of structured, per-record error dicts; an empty list means
+    the envelope is valid. Never raises on malformed *data* — every problem is
+    reported as an error entry so the caller can relay it back to the reporter.
+    """
+    errors: list[dict] = []
+
+    if not isinstance(data, dict):
+        errors.append(
+            _records_error(
+                "envelope",
+                None,
+                "$",
+                None,
+                f"records.json root must be a JSON object, got {_json_type_name(data)}",
+            )
+        )
+        return errors
+
+    def add_envelope(field: str | None, message: str) -> None:
+        path = "$" if field is None else field
+        errors.append(_records_error("envelope", None, path, field, message))
+
+    # schema_version --------------------------------------------------------
+    schema_version = data.get("schema_version", _MISSING)
+    if schema_version is _MISSING:
+        add_envelope("schema_version", "schema_version is required")
+    elif not _is_int(schema_version):
+        add_envelope(
+            "schema_version",
+            f"schema_version must be the integer {RECORDS_SCHEMA_VERSION} "
+            f"(got {_json_type_name(schema_version)})",
+        )
+    elif schema_version != RECORDS_SCHEMA_VERSION:
+        add_envelope(
+            "schema_version",
+            f"unsupported schema_version {schema_version}; this tool supports "
+            f"{RECORDS_SCHEMA_VERSION}",
+        )
+
+    # run -------------------------------------------------------------------
+    run = data.get("run", _MISSING)
+    if run is _MISSING:
+        add_envelope("run", "run is required and must be an object")
+    elif not isinstance(run, dict):
+        add_envelope("run", f"run must be an object, got {_json_type_name(run)}")
+    else:
+        _validate_run(run, errors)
+
+    # findings --------------------------------------------------------------
+    findings = data.get("findings", _MISSING)
+    record_ids: set = set()
+    findings_is_list = isinstance(findings, list)
+    if findings is _MISSING:
+        add_envelope("findings", "findings is required and must be an array")
+    elif not findings_is_list:
+        add_envelope("findings", f"findings must be an array, got {_json_type_name(findings)}")
+    else:
+        assessment_ids: set = set()
+        display_numbers: set = set()
+        for i, rec in enumerate(findings):
+            _validate_finding(rec, i, errors, record_ids, assessment_ids, display_numbers)
+
+    # rebuttal_overrides ----------------------------------------------------
+    overrides = data.get("rebuttal_overrides", _MISSING)
+    if overrides is _MISSING:
+        add_envelope(
+            "rebuttal_overrides",
+            "rebuttal_overrides is required and must be an array (use [] when none)",
+        )
+    elif not isinstance(overrides, list):
+        add_envelope(
+            "rebuttal_overrides",
+            f"rebuttal_overrides must be an array, got {_json_type_name(overrides)}",
+        )
+    else:
+        known = record_ids if findings_is_list else None
+        for i, item in enumerate(overrides):
+            _validate_rebuttal_override(item, i, errors, known)
+
+    # rule_quality_notes ----------------------------------------------------
+    notes = data.get("rule_quality_notes", _MISSING)
+    if notes is _MISSING:
+        add_envelope(
+            "rule_quality_notes",
+            "rule_quality_notes is required and must be an array (use [] when none)",
+        )
+    elif not isinstance(notes, list):
+        add_envelope(
+            "rule_quality_notes",
+            f"rule_quality_notes must be an array, got {_json_type_name(notes)}",
+        )
+    else:
+        for i, item in enumerate(notes):
+            _validate_rule_quality_note(item, i, errors)
+
+    # run/findings count cross-checks (only when both are well-formed) ------
+    if isinstance(run, dict) and findings_is_list:
+        _validate_run_counts(run, findings, errors)
+
+    return errors
+
+
+def load_and_validate_records(path: str | os.PathLike) -> tuple[object, list[dict]]:
+    """Load *path* and validate it.
+
+    Returns ``(data, errors)``. On a read/parse failure, ``data`` is ``None`` and
+    ``errors`` holds a single envelope-scoped error.
+    """
+    try:
+        with open(path, encoding="utf-8") as f:
+            raw = f.read()
+    except FileNotFoundError:
+        return None, [
+            _records_error("envelope", None, "$", None, f"records.json not found: {path}")
+        ]
+    except OSError as exc:
+        return None, [
+            _records_error("envelope", None, "$", None, f"could not read records.json: {exc}")
+        ]
+
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        return None, [
+            _records_error("envelope", None, "$", None, f"records.json is not valid JSON: {exc}")
+        ]
+
+    return data, validate_records(data)
+
+
+def validate_records_command(args: argparse.Namespace) -> None:
+    """CLI: validate ``records.json`` and emit a structured result.
+
+    On success, prints a small summary JSON to stdout (exit 0). On failure,
+    prints the structured per-record errors as JSON to stderr and exits 1, so the
+    orchestrator can relay them to the reporter for a retry.
+    """
+    path: str = args.records
+    data, errors = load_and_validate_records(path)
+
+    if errors:
+        payload = {
+            "valid": False,
+            "schema_version": RECORDS_SCHEMA_VERSION,
+            "records_path": str(path),
+            "error_count": len(errors),
+            "errors": errors,
+        }
+        print(json.dumps(payload, indent=2), file=sys.stderr)
+        sys.exit(1)
+
+    run = data.get("run", {}) if isinstance(data, dict) else {}
+    findings = data.get("findings", []) if isinstance(data, dict) else []
+    summary = {
+        "valid": True,
+        "schema_version": RECORDS_SCHEMA_VERSION,
+        "records_path": str(path),
+        "run_id": run.get("run_id") if isinstance(run, dict) else None,
+        "findings": len(findings),
+        "confirmed": run.get("confirmed") if isinstance(run, dict) else None,
+        "questionable": run.get("questionable") if isinstance(run, dict) else None,
+        "invalid": run.get("invalid") if isinstance(run, dict) else None,
+    }
+    print(json.dumps(summary))
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -1863,6 +2459,18 @@ def main() -> int:
         help="Comma-separated list of finding IDs to exclude",
     )
     post_parser.set_defaults(func=post_comments)
+
+    # validate-records subcommand
+    validate_parser = subparsers.add_parser(
+        "validate-records",
+        help="Validate a records.json envelope against the schema",
+    )
+    validate_parser.add_argument(
+        "--records",
+        required=True,
+        help="Path to the records.json file to validate",
+    )
+    validate_parser.set_defaults(func=validate_records_command)
 
     args = parser.parse_args()
     args.func(args)

@@ -80,6 +80,21 @@ If the reporter's `records.json` fails validation: Python returns an actionable 
 
 It is an envelope (not a bare array) because run metadata, rule-quality notes, and rebuttal overrides are cross-cutting. Stable `record_id` / `assessment_id` are distinct from positional `display_number`; both `original_severity` and final `severity` are kept so the renderer shows the final verdict with an audit trail.
 
+#### Validation contract (Phase 2 — `validate_records` / `validate-records`)
+
+`focused-review.py` validates the parsed envelope with stdlib `json` + field checks (no third-party schema lib). `validate_records(data)` returns a list of **structured per-record errors** (empty = valid; it never raises). `load_and_validate_records(path)` adds file-not-found / JSON-decode handling (both reported as one `envelope`-scoped error). The `validate-records --records PATH` subcommand prints a summary JSON to **stdout** on success (exit 0) and the structured errors as JSON to **stderr** on failure (exit 1) — Phase 3's `render-review` reuses `load_and_validate_records` and emits the same error shape.
+
+Each error is `{scope, index, path, field, record_id, assessment_id, display_number, message}` where `scope` ∈ `envelope`/`run`/`finding`/`rebuttal_override`/`rule_quality_note`, `path` is a JSON-ish locator (e.g. `findings[2].severity`), and finding errors carry the finding's stable ids so the orchestrator can hand the reporter an actionable, per-record retry message.
+
+Enforced rules (what the renderer depends on, so it's validated strictly):
+- **Top-level**: all five keys required (`schema_version` must equal `1`; `run` object; `findings`/`rebuttal_overrides`/`rule_quality_notes` arrays — the latter two may be `[]`).
+- **Strict enums**: `severity`/`original_severity` ∈ {Critical, High, Medium, Low}; `fix_complexity` ∈ {quickfix, moderate, complex}; `verdict` ∈ {Confirmed, Questionable, Invalid}; `type` ∈ {rule, concern, mixed}; `run.scope` ∈ {branch, commit, staged, unstaged, full}.
+- **Stable ids**: `record_id` required, non-empty, **unique**. `assessment_id` is nullable but, when present, must be **unique** (it keys the Invalid-findings table and locates the detail sidecar). `display_number` required (int ≥ 1, **unique among Confirmed/Questionable**) for the numbered sections, optional/nullable for Invalid (which render in a separate table keyed by `assessment_id`, so an Invalid finding's number doesn't join the uniqueness set).
+- **Nullable**: `assessment_id` (non-empty string or null; **required non-empty when `has_detail` is true**, since the detail sidecar is located by it) and `line` (int ≥ 0 or null). `has_detail` is a required boolean. `introduced_by` is optional (type-checked only, no enum — it's display metadata).
+- **provenance**: required, non-empty array; each entry is a non-empty source-label string **or** an object with a non-empty `source` field (both give the "Found by" renderer a label).
+- **Text fields** `description`/`assessment`/`suggestion`: required strings, may be `""` (avoids hard-failing on legitimately empty content).
+- **Count cross-checks**: `run.confirmed`/`questionable`/`invalid` must equal the verdict tallies in `findings[]` (suppressed when any finding has a malformed verdict, so the reporter sees the real per-finding error instead of a misleading count error), and `run.consolidated_count` must equal `len(findings)` — together these catch reporter miscounts and **truncated JSON** (a serialization failure mode the spec calls out).
+
 ## Security Model
 
 Reviewed content is **untrusted** (diffs may come from untrusted PR contributors). Treemon serves the canvas over `http://127.0.0.1:5002` in an iframe with `sandbox="allow-scripts allow-same-origin allow-forms allow-popups"`; the parent app is a different origin (`localhost:5000`), so injected JS cannot reach the parent DOM — `postMessage` (origin-validated, `action` string required, 64 KB cap) is the only channel. Treemon injects its own inline `<script>` tags and sets no CSP header. Defenses:
