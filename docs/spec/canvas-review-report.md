@@ -154,6 +154,14 @@ Phase 3 implements steps 1 and 3 above. Phase 4 (`focused-review-icp`) added ste
 - **`record_id` is a per-run sequential token (`r1`, `r2`, …)** assigned to every finding (incl. Invalid, for stable canvas-action targeting); `assessment_id` stays the `A-XX` (null when unassessed). `has_detail` is set by probing `{run_dir}/assessments/{assessment_id}-detail.html` existence — `false` everywhere until the Phase 5b assessor sidecar lands.
 - **Reporter emits no user-facing text.** Its stdout is a short internal confirmation (records path + verdict counts); the user-facing summary and the relay-verbatim guarantee are render-review's terminal output, owned by Phase 6 (mirrors the Phase 3 "no relay trailer" decision).
 
+#### Phase 5b decisions (implemented — assessor optional sidecar)
+
+- **`rich_html` is a new optional assessor input, default-off.** The assessor authors `{assessment_id}-detail.html` (a new, additive Step 8 in `agents/review-assessor.agent.md`) **only** when the flag is set. Phase 6 (`focused-review-3z4`) wires the orchestrator to detect `nh3`/`rich_html` before assessment and pass it into the assessor prompts; until then the flag is absent, no sidecar is written, and `has_detail` stays `false` everywhere (consistent with the Phase 5a note).
+- **The assessor writes the *inner* fragment — it must not wrap it in `<div class="rich-detail">`.** `_canvas_finding_block` already wraps the sanitized fragment in the `.rich-detail` div, so a self-wrap would double the wrapper and its divider. The prompt states this explicitly.
+- **Sidecar path is the `output_path` sibling**, `{run_dir}/assessments/{assessment_id}-detail.html`, matching the Phase 4 resolver — so no new `run_dir`/path field is threaded into the assessor prompt; it derives the location from `output_path` + `assessment_id`, and overwrites on a re-run (`Remove-Item` then `create`, like the markdown).
+- **Palette + allowlist guidance mirrors the source of truth, it is not a second copy of it.** The prompt lists the Phase 1 template's palette classes (`.code-block`/`.highlight-line`/`.callout`/`.before-after`/`.flow`) and the Phase 4 `nh3` allowlist (HTML+SVG tags, inline `style` kept; `script`/`on*`/`<style>`/`foreignObject`/animation/external `href`/`src` stripped) so the assessor stays inside what the renderer keeps. The authoritative definitions remain the template CSS and the `_DETAIL_*` sets; the prompt guidance is balanced ("author a visual only when it clarifies a non-obvious finding").
+- **Primary `A-XX.md` markdown is unchanged.** The sidecar is purely additive; `assessed.md` / rebuttal / `post-mortem` / `post-comments` keep reading the markdown, and the reporter sets `has_detail` by probing the sidecar's presence on disk (Phase 5a).
+
 
 ### HTML template — `skills/focused-review/templates/review-canvas.html`
 
