@@ -244,6 +244,23 @@ def test_fixture_embeds_trusted_parent_origin(fixture_text: str):
     assert f'data-parent-origin="{TRUSTED_PARENT_ORIGIN}"' in fixture_text
 
 
+def test_origin_helper_normalizes_value(template_text: str, fixture_text: str):
+    # getParentOrigin() must trim + strip trailing slashes so a misconfigured
+    # --parent-origin like "http://host:5000/" can't break the inbound e.origin
+    # comparison (e.origin is never trailing-slashed) or the postMessage target.
+    for text in (template_text, fixture_text):
+        assert ".trim()" in text
+        assert r".replace(/\/+$/" in text
+
+
+def test_instructions_input_has_accessible_name(template_text: str, fixture_text: str):
+    # The free-text action-bar input needs an accessible name (not just placeholder text),
+    # matching the aria-labels already on the row/section checkboxes.
+    for text in (template_text, fixture_text):
+        assert 'class="instructions-input"' in text
+        assert 'aria-label="Instructions for the selected findings"' in text
+
+
 def test_fixture_executable_js_identical_to_template(template_text: str, fixture_text: str):
     # The fixture is the hand-filled twin of the template; their action-bar JS must stay
     # byte-identical (modulo comments + filled attribute values) so the origin-validation

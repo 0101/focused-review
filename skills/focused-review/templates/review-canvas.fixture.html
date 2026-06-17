@@ -385,7 +385,11 @@
     // Pins the outbound postMessage target and gates inbound messages so the action
     // channel is origin-validated instead of a wildcard broadcast.
     var el = document.querySelector("[data-parent-origin]");
-    return el ? el.getAttribute("data-parent-origin") : "";
+    var raw = el ? el.getAttribute("data-parent-origin") : "";
+    // Normalize to a bare origin: inbound e.origin is never trailing-slashed and a
+    // postMessage target origin must be slash-free, so a misconfigured value such as
+    // "http://host:5000/" can't silently break the action / morph-restore channel.
+    return raw.trim().replace(/\/+$/, "");
   }
   function instructions() {
     var box = document.querySelector("[data-instructions]");
@@ -750,6 +754,7 @@ replaceChild(view-dashboard)</div>
 <div class="action-bar">
   <span class="selection-count" data-sel-count>0 selected</span>
   <input type="text" class="instructions-input" data-instructions
+         aria-label="Instructions for the selected findings"
          placeholder="Instructions (e.g., 'fix with minimal changes', 'disregard these for now')">
   <button class="action-btn action-fix" data-action="focused-review.fix" disabled>🔧 Fix selected</button>
   <button class="action-btn action-disregard" data-action="focused-review.disregard" disabled>👁 Disregard</button>
