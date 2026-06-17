@@ -18,6 +18,7 @@ Parse these named fields from your prompt:
 - `rule_count` — number of rules dispatched (integer)
 - `concern_count` — number of concerns dispatched (integer)
 - `rebuttal_overrides` — (optional) JSON list of `{id, severity, reasoning}` for findings a rebuttal reinstated. `id` is an assessment id (`A-XX`).
+- `validation_errors` — (optional) present only on a **retry**: the structured per-record error JSON Python's `render-review` emitted when your previous `records.json` failed validation (each error carries `record_id` / `assessment_id` / `path` / `field` / `message`). When present, treat it as authoritative — fix **exactly** the listed fields/records (a count mismatch, a bad enum, a truncated array, a duplicate id, …) and rewrite a complete, well-formed `records.json`.
 
 ## Output contract: `records.json`
 

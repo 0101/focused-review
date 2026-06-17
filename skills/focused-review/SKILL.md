@@ -176,6 +176,14 @@ Wait for completion. If the agent fails, report the error and skip to Step 6 wit
 
 **Skip this step for `full` scope** (no diff to assess against). Proceed directly to Step 6 using the consolidated report.
 
+**Detect the rich-detail capability first (before launching any assessors).** Run the Python capability check so assessors know whether the canvas can safely embed a sanitized rich HTML/SVG detail sidecar:
+
+```bash
+python {script_path} capabilities
+```
+
+Parse the JSON output and store the `rich_html` boolean. It is `true` only when the `nh3` sanitizer is importable — without it `render-review` fails closed to plain escaped text, so a sidecar would be ignored. You pass this value into **every** assessor prompt below as `rich_html`. If the command errors or you can't parse it, treat `rich_html` as `false`.
+
 Read `{run_dir}/consolidated.md`. Parse each finding section (headings starting with `### C-`). Count the total findings. If 0, skip to Step 6.
 
 Derive the project context path: take the parent directory of `rules_dir` (e.g., if `rules_dir` is `review/rules/`, the parent is `review/`) and check if `project.md` exists there. If it does, use it as `project_context_path`. If not, omit the line from the assessor prompt.
@@ -191,6 +199,7 @@ rules_dir: {rules_dir}
 concerns_dir: {concerns_dir}
 project_context_path: {path to review/project.md — omit this line if file doesn't exist}
 output_path: {run_dir}/assessments/{assessment_id}.md
+rich_html: {true|false — the value from the capability check above}
 ```
 
 Launch assessors in parallel — **all in a single response** (up to 12; if more, use subsequent responses for remaining batches). Each assessor investigates one finding independently.
@@ -256,21 +265,75 @@ Determine the data source and type (check in order, use the first that exists):
 
 Build the `rebuttal_overrides` value: if Step 5 produced any "Reinstate" recommendations, format as a JSON list of `{"id": "A-XX", "severity": "High", "reasoning": "..."}`. Otherwise omit the line.
 
+The reporter no longer hand-authors `review.md`. It writes a structured **`records.json` envelope** to disk; Python's `render-review` then turns that single source into `review.md`, the terminal summary, and the always-on interactive canvas — so they never drift. You orchestrate three sub-steps: **6a** run the reporter, **6b** render (with a bounded retry and a never-fail fallback), **6c** relay.
+
+#### Step 6a: Run the reporter
+
 Launch a `focused-review:review-reporter` Task agent:
 
 ```
 data_source: {path to assessed.md, consolidated.md, or findings/ — all within run_dir}
 data_source_type: {assessed|consolidated|raw_findings}
-report_path: {run_dir}/review.md
+run_dir: {run_dir}
+run_id: {the basename of run_dir, e.g. 20260203-100000}
 scope: {scope}
 rule_count: {rule_count}
 concern_count: {concern_count}
 rebuttal_overrides: {JSON list or omit}
 ```
 
-The report is named `review.md` within the timestamped run directory.
+The reporter writes `{run_dir}/records.json` and returns only a short internal confirmation (records path + verdict counts). **This confirmation is NOT the user-facing result — do not relay it.** The user-facing summary comes from `render-review` in Step 6c.
 
-Wait for completion. **Relay the agent's text output directly to the user — copy-paste it verbatim.** Do not read the report file. Do not rephrase, reformat, or create your own summary table. The reporter agent's output already contains the report path, pipeline stats, findings table with "Found by" column, and rule quality notes. Your only job is to pass it through.
+#### Step 6b: Render the report (always)
+
+Run `render-review` to produce all three artifacts from the envelope:
+
+```bash
+python {script_path} render-review --records {run_dir}/records.json --repo .
+```
+
+- **On success (exit 0):** the command writes `{run_dir}/review.md` and the always-on canvas at `.agents/canvas/focused-review.html`, and prints the **terminal summary to stdout**. Capture that stdout exactly — it is the user-facing result for Step 6c.
+- **On validation failure (exit 1):** the command writes nothing and prints structured per-record errors as JSON to **stderr** (each error has `record_id` / `assessment_id` / `path` / `field` / `message`). Do **not** relay these to the user — hand them back to the reporter and retry, per "Retry and fallback" below.
+
+**Retry and fallback (validation failures only — the pipeline never hard-fails on a bad serialization):**
+
+1. Read the JSON error payload from `render-review`'s stderr.
+2. Re-launch the `focused-review:review-reporter` agent with the **same inputs as Step 6a plus** the errors so it can fix the envelope and rewrite `records.json`:
+
+   ```
+   ... (every field from Step 6a, unchanged) ...
+   validation_errors: {the JSON errors from render-review's stderr — fix exactly these fields and rewrite records.json}
+   ```
+
+   Then re-run the Step 6b `render-review` command. Retry **at most twice** (i.e. no more than two reporter re-runs after the first attempt).
+3. **If it still fails validation after 2 retries, fall back to the legacy hand-authored markdown path** (the canvas is skipped this run — never block the result on a bad serialization). Launch a `general-purpose` Task agent to author `review.md` and the user-facing summary directly from the data source:
+
+   ```
+   You are the focused-review fallback reporter. The structured records.json path failed validation repeatedly, so author the legacy Markdown report directly. Read {data_source} (a {data_source_type} source).
+
+   Apply rebuttal_overrides (if any: {JSON list}) — for each, set the finding's verdict to Confirmed at the given severity and append the reasoning.
+
+   1. Write {run_dir}/review.md with the `create` tool using this shape:
+      # Unified Review Report
+      **Scope:** {scope}
+      **Date:** {ISO timestamp}
+      **Pipeline:** Discovery ({rule_count} rules, {concern_count} concerns) -> Consolidation -> Assessment
+      ## Summary  (a | Verdict | Count | table: Confirmed / Questionable / Invalid)
+      ## Confirmed Findings  (### {n}. [{severity}] {title}; File `path:line`; Fix complexity; Found by {sources}; description; > Assessment:; Suggestion:)
+      ## Questionable Findings  (same shape)
+      a <details> block listing invalid findings in a table (ID | Severity | File | Title | Reason)
+      ## Rule Quality Notes  (only if any; bullet per rule: observation — suggestion)
+      Group findings by file path then line; omit any empty section.
+   2. Then output ONLY the user-facing summary for the orchestrator to relay verbatim: the report path line, a one-line pipeline summary, a findings table (| # | Verdict | Severity | Found by | File | Issue |) of all Confirmed+Questionable findings (or "No actionable findings."), and any Rule Quality Notes. No preamble, no commentary.
+   ```
+
+   Relay that agent's output verbatim (Step 6c). Tell the user the interactive canvas was skipped for this run because the structured render failed.
+
+#### Step 6c: Relay the result
+
+**Relay the terminal summary captured from `render-review` (Step 6b) directly to the user — copy-paste it verbatim.** Do not read `review.md`. Do not rephrase, reformat, or create your own summary table. The terminal summary already contains the report path, pipeline stats, the findings table with the "Found by" column, and rule-quality notes. Your only job is to pass it through. (On the fallback path, relay the fallback agent's summary verbatim instead.)
+
+The canvas at `.agents/canvas/focused-review.html` is **always written** (it's gitignored and inert when Treemon is down). If the Treemon canvas pane is available in this session, it appears as a live **focused-review** tab; mention to the user that the interactive review pane is open. If Treemon isn't running, the file is written but inert and `review.md` + the terminal summary carry the full result. (Handling the canvas's `postMessage` action bar — `focused-review.fix` / `.disregard` / `.document` — is wired in a separate task and is out of scope here.)
 
 ---
 
