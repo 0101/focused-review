@@ -1,0 +1,675 @@
+<!DOCTYPE html>
+<html lang="en">
+<!--
+  Focused Review canvas — static page shell.
+
+  This is a VERSION-CONTROLLED TEMPLATE. Python's `render-review` subcommand fills the
+  placeholders below with PRE-RENDERED, server-side HTML. There is NO client-side
+  rendering and NO `window.__REVIEW_DATA__` data blob — Python builds every row,
+  accordion and detail panel and html.escape()s every structured text field.
+
+  Placeholders (fill order matters — see notes):
+    {{RUN_ID}}                      scalar; the run id, embedded in a data attribute.
+                                    Fill this FIRST (before injecting any escaped content),
+                                    so escaped finding text can never forge it.
+    <!-- FR:META -->                header meta line (scope · date · rule/concern counts).
+    <!-- FR:SUMMARY_BADGES -->      confirmed/questionable/invalid count badges.
+    <!-- FR:CONFIRMED_COUNT -->     integer shown in the Confirmed section header.
+    <!-- FR:CONFIRMED_ROWS -->      one ".finding" block per confirmed finding (see shape below).
+    <!-- FR:QUESTIONABLE_COUNT -->  integer shown in the Questionable section header.
+    <!-- FR:QUESTIONABLE_ROWS -->   one ".finding" block per questionable finding.
+    <!-- FR:INVALID_SUMMARY -->     e.g. "9 findings filtered as invalid".
+    <!-- FR:INVALID_ROWS -->        <tr>…</tr> rows for the invalid-findings table.
+    <!-- FR:QUALITY_SUMMARY -->     e.g. "Rule Quality Notes (2)".
+    <!-- FR:QUALITY_NOTES -->       ".quality-item" blocks.
+
+  The HTML-comment placeholders are forge-proof: html.escape() turns "<" into "&lt;",
+  so escaped finding text can never reproduce a "<!-- FR:* -->" marker. Replace each
+  marker exactly once (a single-pass regex substitution is safest).
+
+  Per-finding ".finding" block shape (Python emits this into the *_ROWS placeholders):
+
+    <div class="finding" data-record-id="STABLE_RECORD_ID">
+      <input type="checkbox" class="row-cb" aria-label="Select finding N: TITLE">
+      <details class="finding-d" name="findings">
+        <summary class="finding-summary">
+          <span class="caret" aria-hidden="true"></span>
+          <span class="num">N</span>
+          <span class="sev sev-high">High</span>
+          <span class="found-by"><span class="found-tag found-tag-concern">bugs(opus)</span></span>
+          <span class="title">TITLE</span>
+        </summary>
+        <div class="detail-content">
+          <div class="detail-section">
+            <div class="detail-label">Location</div>
+            <span class="detail-file">path:line</span> · fix_complexity
+          </div>
+          <div class="detail-section">
+            <div class="detail-label">Description</div>
+            <p>…escaped description…</p>
+          </div>
+          <div class="detail-assessment">
+            <div class="detail-label">Assessment</div>
+            <p>…escaped assessment…</p>
+          </div>
+          <div class="detail-suggestion">
+            <div class="detail-label">Suggestion</div>
+            <p>…escaped suggestion…</p>
+          </div>
+          <!-- OPTIONAL, only when has_detail: nh3-sanitized A-XX-detail.html fragment.
+               Wrap it in <div class="rich-detail">…</div>. It may use the rich-detail
+               palette classes (.code-block/.highlight-line/.callout/.before-after/.flow)
+               and an SVG allowlist. -->
+        </div>
+      </details>
+    </div>
+
+  `name="findings"` makes the finding accordions a native exclusive group (one open at a
+  time). The checkbox sits OUTSIDE <summary> on purpose, so selecting a finding never
+  toggles its accordion.
+-->
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!--
+  Content Security Policy (delivered via <meta> because Treemon sets no CSP header).
+  Division of duties: CSP = exfiltration, nh3 = script.
+    * script-src/style-src keep 'unsafe-inline' — Treemon injects inline scripts
+      (link interceptor, idiomorph, morph controller) and the template + assessor
+      sidecars use inline styles. CSP therefore cannot restrict scripts; nh3 does that.
+    * img/font/connect-src are locked to 'self' data: — this blocks the real residual
+      threat from sanitized-but-untrusted detail HTML/SVG: a url(http://evil/…) beacon,
+      an <img> tracker, or a fetch()/XHR exfil. Applies to HTML and SVG alike.
+-->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'unsafe-inline' 'self'; style-src 'unsafe-inline' 'self'; img-src 'self' data:; font-src 'self' data:; connect-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none'">
+<title>Focused Review</title>
+<style>
+  :root {
+    /* Column widths shared by the list header and each finding row so they align. */
+    --col-cb: 34px;
+    --col-caret: 16px;
+    --col-num: 30px;
+    --col-sev: 74px;
+    --col-found: 200px;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: #1e1e2e;
+    color: #cdd6f4;
+    font-family: system-ui, -apple-system, sans-serif;
+    font-size: 14px;
+    padding: 20px;
+    line-height: 1.5;
+    padding-bottom: 80px;
+  }
+
+  /* ── Header ─────────────────────────────────────────────────────────────── */
+  .header { margin-bottom: 20px; }
+  .header h1 { font-size: 18px; color: #89b4fa; margin-bottom: 4px; }
+  .header .meta { color: #6c7086; font-size: 13px; }
+  .summary-badges { display: flex; gap: 12px; margin-top: 10px; flex-wrap: wrap; }
+  .summary-badge {
+    padding: 4px 12px;
+    border-radius: 6px;
+    font-size: 13px;
+    font-weight: 600;
+  }
+  .summary-badge .count { font-size: 16px; margin-right: 4px; }
+  .badge-confirmed { background: #a6e3a122; color: #a6e3a1; }
+  .badge-questionable { background: #f9e2af22; color: #f9e2af; }
+  .badge-invalid { background: #6c708622; color: #6c7086; }
+
+  /* ── List header (column titles) ────────────────────────────────────────── */
+  .review-list { width: 100%; }
+  .list-header {
+    display: grid;
+    grid-template-columns: var(--col-cb) var(--col-caret) var(--col-num) var(--col-sev) var(--col-found) 1fr;
+    gap: 0 10px;
+    padding: 8px 10px;
+    color: #a6adc8;
+    font-size: 13px;
+    font-weight: 600;
+    border-bottom: 2px solid #45475a;
+    position: sticky;
+    top: 0;
+    background: #1e1e2e;
+    z-index: 10;
+  }
+
+  /* ── Section (Confirmed / Questionable) ─────────────────────────────────── */
+  .section-header {
+    display: grid;
+    grid-template-columns: var(--col-cb) 1fr;
+    gap: 0 10px;
+    align-items: center;
+    padding: 14px 10px 6px;
+    border-bottom: 1px solid #45475a;
+    color: #6c7086;
+    font-size: 13px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    user-select: none;
+  }
+  .section-empty .section-header { opacity: 0.6; }
+
+  /* ── Finding row ────────────────────────────────────────────────────────── */
+  .finding {
+    display: grid;
+    grid-template-columns: var(--col-cb) 1fr;
+    gap: 0 10px;
+    align-items: start;
+    border-bottom: 1px solid #31324488;
+  }
+  .finding > .row-cb { margin-top: 9px; justify-self: center; }
+  .finding-d { min-width: 0; }   /* let long titles/code shrink and scroll, not overflow */
+
+  .finding-summary {
+    display: grid;
+    grid-template-columns: var(--col-caret) var(--col-num) var(--col-sev) var(--col-found) 1fr;
+    gap: 0 10px;
+    align-items: start;
+    padding: 7px 10px 7px 0;
+    cursor: pointer;
+    list-style: none;
+    user-select: none;
+    transition: background 0.1s;
+  }
+  .finding-summary::-webkit-details-marker { display: none; }
+  .finding-summary::marker { content: ''; }
+  .finding-summary:hover { background: #313244; }
+  .finding-d[open] > .finding-summary { background: #313244; }
+  .finding-d[open] > .finding-summary .title { color: #89b4fa; }
+
+  .caret { color: #6c7086; font-size: 11px; line-height: 1.7; text-align: center; }
+  .caret::before { content: '▸'; }
+  .finding-d[open] > .finding-summary .caret::before { content: '▾'; }
+
+  .num { text-align: center; color: #6c7086; }
+  .title { color: #cdd6f4; }
+
+  /* Severity pills */
+  .sev {
+    display: inline-block;
+    padding: 1px 8px;
+    border-radius: 10px;
+    font-size: 12px;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  .sev-critical { background: #f38ba833; color: #f38ba8; }
+  .sev-high { background: #fab38733; color: #fab387; }
+  .sev-medium { background: #f9e2af33; color: #f9e2af; }
+  .sev-low { background: #a6adc833; color: #a6adc8; }
+
+  /* Found-by tags */
+  .found-by { display: flex; flex-wrap: wrap; gap: 3px; }
+  .found-tag {
+    display: inline-block;
+    padding: 1px 6px;
+    border-radius: 8px;
+    font-size: 11px;
+    white-space: nowrap;
+  }
+  .found-tag-concern { background: #cba6f722; color: #cba6f7; }
+  .found-tag-rule { background: #89b4fa22; color: #89b4fa; }
+
+  /* Checkboxes */
+  .row-cb, .section-cb {
+    accent-color: #89b4fa;
+    width: 15px;
+    height: 15px;
+    cursor: pointer;
+  }
+
+  /* Dimmed (disregarded) */
+  .finding.dimmed { opacity: 0.35; }
+  .finding.dimmed .title { text-decoration: line-through; }
+
+  /* ── Detail panel (server-rendered structural fields) ───────────────────── */
+  .detail-content {
+    background: #11111b;
+    border-top: 1px solid #45475a;
+    padding: 14px 16px;
+  }
+  .detail-content p { margin: 6px 0; }
+  .detail-content strong { color: #cdd6f4; }
+  .detail-content code {
+    background: #45475a;
+    padding: 1px 5px;
+    border-radius: 3px;
+    font-family: 'Cascadia Code', 'Fira Code', Consolas, monospace;
+    font-size: 13px;
+  }
+  .detail-content pre {
+    background: #1e1e2e;
+    border: 1px solid #45475a;
+    border-radius: 4px;
+    padding: 10px 12px;
+    margin: 8px 0;
+    overflow-x: auto;
+    font-family: 'Cascadia Code', 'Fira Code', Consolas, monospace;
+    font-size: 13px;
+    line-height: 1.5;
+  }
+  .detail-section { margin-bottom: 10px; }
+  .detail-label {
+    color: #6c7086;
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 3px;
+  }
+  .detail-file { color: #89b4fa; font-size: 13px; }
+  .detail-suggestion {
+    background: #a6e3a10d;
+    border-left: 3px solid #a6e3a1;
+    padding: 8px 12px;
+    border-radius: 0 4px 4px 0;
+    margin: 8px 0;
+  }
+  .detail-assessment {
+    background: #89b4fa0d;
+    border-left: 3px solid #89b4fa;
+    padding: 8px 12px;
+    border-radius: 0 4px 4px 0;
+    margin: 8px 0;
+    color: #a6adc8;
+  }
+
+  /* ── Rich-detail palette ─────────────────────────────────────────────────
+     Class names offered to the assessor's optional, nh3-sanitized A-XX-detail.html
+     sidecar so visuals stay cohesive with the canvas. Inline `style` is also allowed
+     (CSP covers the exfil vector); these classes just provide sensible defaults. */
+  .rich-detail { margin-top: 12px; padding-top: 10px; border-top: 1px dashed #45475a; }
+
+  .code-block {
+    background: #1e1e2e;
+    border: 1px solid #45475a;
+    border-radius: 4px;
+    padding: 10px 12px;
+    margin: 8px 0;
+    overflow-x: auto;
+    font-family: 'Cascadia Code', 'Fira Code', Consolas, monospace;
+    font-size: 13px;
+    line-height: 1.55;
+    white-space: pre;
+    tab-size: 2;
+  }
+  .highlight-line {
+    display: block;
+    margin: 0 -12px;
+    padding: 0 12px 0 9px;
+    background: #f9e2af14;
+    border-left: 3px solid #f9e2af;
+  }
+  .code-block .highlight-line.add { background: #a6e3a114; border-left-color: #a6e3a1; }
+  .code-block .highlight-line.del { background: #f38ba814; border-left-color: #f38ba8; }
+
+  .callout {
+    background: #89b4fa12;
+    border-left: 3px solid #89b4fa;
+    border-radius: 0 4px 4px 0;
+    padding: 8px 12px;
+    margin: 8px 0;
+    color: #a6adc8;
+  }
+  .callout.warn { background: #f9e2af12; border-left-color: #f9e2af; }
+  .callout.danger { background: #f38ba812; border-left-color: #f38ba8; }
+  .callout.ok { background: #a6e3a112; border-left-color: #a6e3a1; }
+
+  .before-after {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+    margin: 8px 0;
+  }
+  .before-after > * { min-width: 0; }
+  .before-after .before { border-left: 3px solid #f38ba8; padding-left: 8px; }
+  .before-after .after { border-left: 3px solid #a6e3a1; padding-left: 8px; }
+  .before-after .ba-label {
+    color: #6c7086;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 4px;
+  }
+
+  .flow {
+    margin: 10px 0;
+    padding: 10px;
+    background: #11111b;
+    border: 1px solid #45475a;
+    border-radius: 4px;
+    overflow-x: auto;
+    text-align: center;
+  }
+  .flow svg { max-width: 100%; height: auto; }
+  .flow text { fill: #cdd6f4; }
+
+  @media (max-width: 640px) {
+    .before-after { grid-template-columns: 1fr; }
+  }
+
+  /* ── Collapsibles (invalid findings, rule-quality notes) ────────────────── */
+  .collapsible {
+    margin-top: 16px;
+    background: #313244;
+    border-radius: 8px;
+    border: 1px solid #45475a;
+  }
+  .collapsible-summary {
+    padding: 10px 16px;
+    cursor: pointer;
+    color: #6c7086;
+    font-size: 13px;
+    user-select: none;
+    list-style: none;
+  }
+  .collapsible-summary::-webkit-details-marker { display: none; }
+  .collapsible-summary::marker { content: ''; }
+  .collapsible-summary:hover { color: #a6adc8; }
+  .collapsible-summary::before { content: '▸ '; }
+  .collapsible[open] > .collapsible-summary::before { content: '▾ '; }
+  .collapsible-body { padding: 0 16px 12px; }
+
+  .invalid-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .invalid-table th {
+    text-align: left;
+    padding: 6px 8px;
+    color: #6c7086;
+    border-bottom: 1px solid #45475a;
+    font-weight: 600;
+  }
+  .invalid-table td {
+    padding: 6px 8px;
+    border-bottom: 1px solid #31324488;
+    color: #a6adc8;
+  }
+
+  .quality-item { margin: 8px 0; color: #a6adc8; }
+  .quality-item strong { color: #f9e2af; }
+
+  /* ── Sticky action bar ──────────────────────────────────────────────────── */
+  .action-bar {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    background: #313244;
+    border-top: 1px solid #585b70;
+    padding: 10px 20px;
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    z-index: 100;
+  }
+  .instructions-input {
+    flex: 1;
+    min-width: 200px;
+    background: #1e1e2e;
+    color: #cdd6f4;
+    border: 1px solid #585b70;
+    border-radius: 4px;
+    padding: 8px 12px;
+    font-size: 14px;
+    font-family: inherit;
+  }
+  .instructions-input::placeholder { color: #6c7086; }
+  .action-btn {
+    padding: 8px 16px;
+    border-radius: 4px;
+    border: 1px solid #585b70;
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 500;
+    white-space: nowrap;
+    font-family: inherit;
+  }
+  .action-btn:disabled { opacity: 0.4; cursor: default; }
+  .action-fix { background: #a6e3a1; color: #1e1e2e; border-color: #a6e3a1; }
+  .action-fix:hover:not(:disabled) { background: #94d990; }
+  .action-disregard { background: #45475a; color: #cdd6f4; }
+  .action-disregard:hover:not(:disabled) { background: #585b70; }
+  .action-doc { background: #89b4fa; color: #1e1e2e; border-color: #89b4fa; }
+  .action-doc:hover:not(:disabled) { background: #7ba8f0; }
+  .selection-count { color: #6c7086; font-size: 13px; white-space: nowrap; min-width: 80px; }
+</style>
+
+<!--
+  Action-bar interactivity. The ONLY JavaScript in the canvas, and it is:
+    * static / data-independent — it never renders rows (Python pre-renders all markup)
+      and there is no window.__REVIEW_DATA__ blob;
+    * morph-safe — it lives in <head> (survives Treemon morphing document.body) and uses
+      document-level event delegation only (never per-row addEventListener, which a morph
+      would discard). Transient UI state (selection, disregarded, open accordion) is held
+      in JS keyed by record_id and re-applied after a morph.
+  Accordion expand/collapse is pure-CSS <details>/<summary>; no JS drives it.
+-->
+<script>
+(function () {
+  "use strict";
+  if (window.__frCanvasInit) return;     // idempotent across morphs / script re-injection
+  window.__frCanvasInit = true;
+
+  var NS = "focused-review.";            // namespaced actions; avoids Treemon reserved names
+  var state = {
+    selected: new Set(),                 // record_ids currently checked
+    disregarded: new Set(),              // record_ids marked disregarded (dimmed)
+    openId: null                         // record_id of the open accordion, if any
+  };
+
+  function all(sel, root) {
+    return Array.prototype.slice.call((root || document).querySelectorAll(sel));
+  }
+  function recordId(el) {
+    var f = el && el.closest ? el.closest(".finding") : null;
+    return f ? f.getAttribute("data-record-id") : null;
+  }
+  function getRunId() {
+    var el = document.querySelector("[data-run-id]");
+    return el ? el.getAttribute("data-run-id") : "";
+  }
+  function instructions() {
+    var box = document.querySelector("[data-instructions]");
+    return box ? box.value.trim() : "";
+  }
+
+  function updateBar() {
+    var n = state.selected.size;
+    var c = document.querySelector("[data-sel-count]");
+    if (c) c.textContent = n + " selected";
+    all("[data-action]").forEach(function (b) { b.disabled = n === 0; });
+  }
+
+  function syncSections() {
+    all(".finding-section").forEach(function (sec) {
+      var cbs = all(".row-cb", sec);
+      var total = cbs.length, checked = 0;
+      cbs.forEach(function (cb) { if (cb.checked) checked++; });
+      var sc = sec.querySelector(".section-cb");
+      if (sc) {
+        sc.checked = total > 0 && checked === total;
+        sc.indeterminate = checked > 0 && checked < total;
+      }
+    });
+  }
+
+  // Checkbox changes: per-row and section select-all.
+  document.addEventListener("change", function (e) {
+    var t = e.target;
+    if (!t || !t.classList) return;
+    if (t.classList.contains("row-cb")) {
+      var id = recordId(t);
+      if (id) { if (t.checked) state.selected.add(id); else state.selected.delete(id); }
+      syncSections();
+      updateBar();
+    } else if (t.classList.contains("section-cb")) {
+      var sec = t.closest(".finding-section");
+      if (!sec) return;
+      all(".row-cb", sec).forEach(function (cb) {
+        cb.checked = t.checked;
+        var rid = recordId(cb);
+        if (rid) { if (t.checked) state.selected.add(rid); else state.selected.delete(rid); }
+      });
+      syncSections();
+      updateBar();
+    }
+  });
+
+  // Action buttons → postMessage to the Treemon parent.
+  document.addEventListener("click", function (e) {
+    var btn = e.target && e.target.closest ? e.target.closest("[data-action]") : null;
+    if (!btn || btn.disabled) return;
+    var action = btn.getAttribute("data-action") || "";
+    if (action.indexOf(NS) !== 0) return;             // only our namespaced actions
+    var ids = Array.from(state.selected);
+    if (!ids.length) return;
+
+    window.parent.postMessage({
+      action: action,
+      run_id: getRunId(),
+      record_ids: ids,
+      instructions: instructions()
+    }, "*");
+
+    if (action === NS + "disregard") {
+      ids.forEach(function (id) { state.disregarded.add(id); });
+      all(".finding").forEach(function (f) {
+        if (state.disregarded.has(f.getAttribute("data-record-id"))) f.classList.add("dimmed");
+      });
+    }
+
+    // Clear selection after dispatch (matches the validated prototype).
+    state.selected.clear();
+    all(".row-cb").forEach(function (cb) { cb.checked = false; });
+    syncSections();
+    updateBar();
+  });
+
+  // Track the open accordion. 'toggle' does not bubble, so listen in the capture phase.
+  document.addEventListener("toggle", function (e) {
+    var d = e.target;
+    if (!d || !d.classList || !d.classList.contains("finding-d")) return;
+    if (d.open) {
+      state.openId = recordId(d);
+    } else {
+      var stillOpen = document.querySelector(".finding-d[open]");
+      state.openId = stillOpen ? recordId(stillOpen) : null;
+    }
+  }, true);
+
+  // Re-apply JS-held transient state to the freshly rendered DOM.
+  function presentIds() {
+    var s = new Set();
+    all(".finding").forEach(function (f) { s.add(f.getAttribute("data-record-id")); });
+    return s;
+  }
+  function pruneTo(set, present) {
+    Array.from(set).forEach(function (id) { if (!present.has(id)) set.delete(id); });
+  }
+
+  function restoreState() {
+    // Prune tracked state to record_ids still present: a morph can drop a finding from
+    // the selectable set (e.g. it is re-categorized invalid and loses its checkbox), so
+    // the count, button enabled-state and posted record_ids never reference off-screen ids.
+    var present = presentIds();
+    pruneTo(state.selected, present);
+    pruneTo(state.disregarded, present);
+    if (state.openId && !present.has(state.openId)) state.openId = null;
+
+    all(".finding").forEach(function (f) {
+      var id = f.getAttribute("data-record-id");
+      var cb = f.querySelector(".row-cb");
+      if (cb) cb.checked = state.selected.has(id);
+      f.classList.toggle("dimmed", state.disregarded.has(id));
+      if (id && id === state.openId) {
+        var d = f.querySelector(".finding-d");
+        if (d && !d.open) d.open = true;
+      }
+    });
+    syncSections();
+    updateBar();
+  }
+
+  // Treemon morphs document.body in place on every re-render; restore state afterwards.
+  // The exact post-morph signal is treated defensively (window message and/or DOM event).
+  window.addEventListener("message", function (e) {
+    var a = e && e.data && e.data.action;
+    if (a === "morph-complete" || a === "content-updated") restoreState();
+  });
+  document.addEventListener("morph-complete", restoreState);
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", restoreState);
+  } else {
+    restoreState();
+  }
+})();
+</script>
+</head>
+<body data-run-id="{{RUN_ID}}">
+
+<div class="header">
+  <h1>Focused Review</h1>
+  <div class="meta"><!-- FR:META --></div>
+  <div class="summary-badges"><!-- FR:SUMMARY_BADGES --></div>
+</div>
+
+<div class="review-list">
+  <div class="list-header">
+    <span></span>
+    <span></span>
+    <span>#</span>
+    <span>Severity</span>
+    <span>Found by</span>
+    <span>Issue</span>
+  </div>
+
+  <section class="finding-section" data-section="confirmed">
+    <div class="section-header">
+      <input type="checkbox" class="section-cb" aria-label="Select all confirmed findings">
+      <span class="section-title">Confirmed Findings (<!-- FR:CONFIRMED_COUNT -->)</span>
+    </div>
+    <!-- FR:CONFIRMED_ROWS -->
+  </section>
+
+  <section class="finding-section" data-section="questionable">
+    <div class="section-header">
+      <input type="checkbox" class="section-cb" aria-label="Select all questionable findings">
+      <span class="section-title">Questionable Findings (<!-- FR:QUESTIONABLE_COUNT -->)</span>
+    </div>
+    <!-- FR:QUESTIONABLE_ROWS -->
+  </section>
+</div>
+
+<details class="collapsible invalid-section">
+  <summary class="collapsible-summary"><!-- FR:INVALID_SUMMARY --></summary>
+  <div class="collapsible-body">
+    <table class="invalid-table">
+      <thead>
+        <tr><th>ID</th><th>Sev</th><th>Title</th><th>Reason</th></tr>
+      </thead>
+      <tbody><!-- FR:INVALID_ROWS --></tbody>
+    </table>
+  </div>
+</details>
+
+<details class="collapsible quality-notes" open>
+  <summary class="collapsible-summary"><!-- FR:QUALITY_SUMMARY --></summary>
+  <div class="collapsible-body"><!-- FR:QUALITY_NOTES --></div>
+</details>
+
+<div class="action-bar">
+  <span class="selection-count" data-sel-count>0 selected</span>
+  <input type="text" class="instructions-input" data-instructions
+         placeholder="Instructions (e.g., 'fix with minimal changes', 'disregard these for now')">
+  <button class="action-btn action-fix" data-action="focused-review.fix" disabled>🔧 Fix selected</button>
+  <button class="action-btn action-disregard" data-action="focused-review.disregard" disabled>👁 Disregard</button>
+  <button class="action-btn action-doc" data-action="focused-review.document" disabled>📄 Document for later</button>
+</div>
+
+</body>
+</html>
