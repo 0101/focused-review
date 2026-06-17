@@ -547,12 +547,11 @@
       instructions: instructions()
     }, getParentOrigin());
 
-    if (action === NS + "disregard") {
-      ids.forEach(function (id) { state.disregarded.add(id); });
-      all(".finding").forEach(function (f) {
-        if (state.disregarded.has(f.getAttribute("data-record-id"))) f.classList.add("dimmed");
-      });
-    }
+    // No optimistic disregard dimming (C-17): the confirmed server round-trip
+    // (validate-action --apply-disregard → re-render) bakes the `dimmed` class into
+    // the HTML, which restoreState() seeds. That single source of truth means a
+    // declined/rejected confirmation can never leave a finding dimmed out of step
+    // with persisted run-state until a reload.
 
     // Clear selection after dispatch (matches the validated prototype).
     state.selected.clear();

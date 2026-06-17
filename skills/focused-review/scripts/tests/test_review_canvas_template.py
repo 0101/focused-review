@@ -186,6 +186,27 @@ def test_template_avoids_reserved_action_buttons(template_text: str, reserved: s
     assert f'data-action="{reserved}"' not in template_text
 
 
+# ── C-17: no optimistic disregard dimming (server round-trip is the source of truth) ──
+
+
+def test_template_has_no_optimistic_disregard_dimming(template_text: str):
+    # The disregard click must not optimistically apply the `dimmed` class before the
+    # orchestrator validates/confirms. Dimming is seeded only from server-rendered
+    # run-state via restoreState(), so a declined/rejected confirmation can never leave
+    # a finding dimmed out of step with persisted run-state. `dimmed` may only be read
+    # (classList.contains) or reconciled (classList.toggle) — never added on dispatch.
+    assert 'classList.add("dimmed")' not in template_text
+    assert 'action === NS + "disregard"' not in template_text
+
+
+def test_fixture_has_no_optimistic_disregard_dimming(fixture_text: str):
+    # Checked on the fixture explicitly too: test_fixture_executable_js_identical_to_template
+    # only proves the two ends match each other, so without this both could re-introduce
+    # the optimistic dim in lockstep and still pass.
+    assert 'classList.add("dimmed")' not in fixture_text
+    assert 'action === NS + "disregard"' not in fixture_text
+
+
 # ── origin-validated postMessage channel (C-03 outbound / C-15 inbound) ──────
 
 

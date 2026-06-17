@@ -448,12 +448,7 @@
       instructions: instructions()
     }, getParentOrigin());
 
-    if (action === NS + "disregard") {
-      ids.forEach(function (id) { state.disregarded.add(id); });
-      all(".finding").forEach(function (f) {
-        if (state.disregarded.has(f.getAttribute("data-record-id"))) f.classList.add("dimmed");
-      });
-    }
+    // No optimistic disregard dimming (C-17): dimming is server-seeded via restoreState.
 
     state.selected.clear();
     all(".row-cb").forEach(function (cb) { cb.checked = false; });
