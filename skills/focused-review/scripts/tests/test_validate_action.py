@@ -22,6 +22,7 @@ import importlib
 import json
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -224,6 +225,18 @@ class TestValidateActionAccept:
         fr.validate_action(env, RUN_ID, ["r1", "r2"], action="focused-review.disregard")
         assert env == snapshot
 
+    def test_all_valid_action_verbs_accepted(self) -> None:
+        # Every verb the canvas action bar emits is on the allowlist and resolves.
+        assert fr.VALID_ACTIONS == (
+            "focused-review.fix",
+            "focused-review.disregard",
+            "focused-review.document",
+        )
+        for verb in fr.VALID_ACTIONS:
+            expanded, errors = fr.validate_action(_envelope(), RUN_ID, ["r1"], action=verb)
+            assert errors == [], verb
+            assert expanded is not None and expanded["action"] == verb
+
 
 # ---------------------------------------------------------------------------
 # validate_action — pure validate/expand (reject)
@@ -286,6 +299,34 @@ class TestValidateActionReject:
         expanded, errors = fr.validate_action(_envelope(), RUN_ID, [""])
         assert expanded is None
         assert any(e["field"] == "record_id" for e in errors)
+
+    def test_unknown_action_verb_rejected(self) -> None:
+        # An arbitrary/forged verb is fail-closed: rejected, never echoed back.
+        expanded, errors = fr.validate_action(
+            _envelope(), RUN_ID, ["r1"], action="focused-review.exec"
+        )
+        assert expanded is None
+        action_errors = [e for e in errors if e["field"] == "action"]
+        assert len(action_errors) == 1
+        assert action_errors[0]["scope"] == "action"
+        assert "unknown action" in action_errors[0]["message"]
+        assert "'focused-review.exec'" in action_errors[0]["message"]
+
+    def test_unknown_action_reported_alongside_run_and_record_errors(self) -> None:
+        # The verb check aggregates with the run_id / record_id checks rather than
+        # masking them, so a fully-bogus action surfaces every problem at once.
+        expanded, errors = fr.validate_action(
+            _envelope(), "FORGED", ["nope"], action="bogus"
+        )
+        assert expanded is None
+        assert {"action", "run_id", "record_id"} <= {e["field"] for e in errors}
+
+    def test_none_action_still_accepted_pure_resolve(self) -> None:
+        # None means "resolve only" (no verb posted) and stays valid — the verb
+        # allowlist only rejects a *provided* unknown verb.
+        expanded, errors = fr.validate_action(_envelope(), RUN_ID, ["r1"], action=None)
+        assert errors == []
+        assert expanded is not None and expanded["action"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -406,6 +447,111 @@ class TestValidateActionCommand:
         assert exc.value.code == 1
         # A rejected (forged) action must never write run state.
         assert not (tmp_path / "run-state.json").exists()
+
+    def test_unknown_action_exits_1(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        records = _write_records(tmp_path)
+        with pytest.raises(SystemExit) as exc:
+            fr.validate_action_command(
+                _action_args(records, RUN_ID, "r1", action="focused-review.exec")
+            )
+        assert exc.value.code == 1
+        captured = capsys.readouterr()
+        assert captured.out == ""  # nothing on stdout for the failure path
+        payload = json.loads(captured.err)
+        assert payload["valid"] is False
+        assert any(e["field"] == "action" for e in payload["errors"])
+
+    def test_apply_disregard_with_non_disregard_action_rejected(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # --apply-disregard is bound to the disregard verb: pairing it with fix
+        # is rejected and writes NO run state (the persisted side effect is gated).
+        records = _write_records(tmp_path)
+        with pytest.raises(SystemExit) as exc:
+            fr.validate_action_command(
+                _action_args(
+                    records, RUN_ID, "r1",
+                    action="focused-review.fix",
+                    apply_disregard=True,
+                    run_dir=str(tmp_path),
+                )
+            )
+        assert exc.value.code == 1
+        payload = json.loads(capsys.readouterr().err)
+        assert payload["valid"] is False
+        assert any(
+            e["field"] == "action" and "apply-disregard" in e["message"]
+            for e in payload["errors"]
+        )
+        assert not (tmp_path / "run-state.json").exists()
+
+    def test_apply_disregard_with_no_action_rejected(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # Even with no --action at all (the argparse default), --apply-disregard
+        # must not silently persist state — it is rejected outright.
+        records = _write_records(tmp_path)
+        with pytest.raises(SystemExit) as exc:
+            fr.validate_action_command(
+                _action_args(
+                    records, RUN_ID, "r1",
+                    apply_disregard=True,
+                    run_dir=str(tmp_path),
+                )
+            )
+        assert exc.value.code == 1
+        payload = json.loads(capsys.readouterr().err)
+        assert any(e["field"] == "action" for e in payload["errors"])
+        assert not (tmp_path / "run-state.json").exists()
+
+
+# ---------------------------------------------------------------------------
+# argparse wiring — the --action choices constraint
+# ---------------------------------------------------------------------------
+
+
+class TestValidateActionParser:
+    def test_parser_rejects_unknown_action_choice(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # argparse enforces choices= before the handler runs: an unknown verb is a
+        # usage error (exit 2), the first line of defence for the verb allowlist.
+        records = _write_records(tmp_path)
+        argv = [
+            "focused-review", "validate-action",
+            "--records", str(records),
+            "--run-id", RUN_ID,
+            "--record-ids", "r1",
+            "--action", "focused-review.exec",
+        ]
+        with patch("sys.argv", argv):
+            with pytest.raises(SystemExit) as exc:
+                fr.main()
+        assert exc.value.code == 2
+        assert "invalid choice" in capsys.readouterr().err
+
+    def test_parser_accepts_each_valid_action_choice(self, tmp_path: Path) -> None:
+        # Each allowlisted verb parses and is dispatched to the handler verbatim.
+        records = _write_records(tmp_path)
+        for verb in fr.VALID_ACTIONS:
+            captured: dict[str, object] = {}
+
+            def spy(args: argparse.Namespace) -> None:
+                captured["action"] = args.action
+
+            argv = [
+                "focused-review", "validate-action",
+                "--records", str(records),
+                "--run-id", RUN_ID,
+                "--record-ids", "r1",
+                "--action", verb,
+            ]
+            with patch("sys.argv", argv):
+                with patch.object(fr, "validate_action_command", spy):
+                    fr.main()
+            assert captured["action"] == verb
 
 
 # ---------------------------------------------------------------------------

@@ -3194,6 +3194,14 @@ def render_review(args: argparse.Namespace) -> None:
 # See docs/spec/canvas-review-report.md (postMessage actions + Security Model).
 # ---------------------------------------------------------------------------
 
+# The canvas action bar posts exactly these namespaced verbs (the data-action
+# values in templates/review-canvas.html). validate-action is fail-closed on the
+# verb: anything outside this allowlist is rejected, never echoed back as a
+# resolved action. disregard is the one verb that carries a persisted side
+# effect (run-state.json), so it is named separately and gated on its own.
+DISREGARD_ACTION = "focused-review.disregard"
+VALID_ACTIONS = ("focused-review.fix", DISREGARD_ACTION, "focused-review.document")
+
 # Per-run state the canvas re-applies across renders (currently: disregarded ids).
 # Lives beside records.json in the run directory.
 RUN_STATE_FILENAME = "run-state.json"
@@ -3293,10 +3301,24 @@ def validate_action(
     Returns ``(expanded, errors)``. ``errors`` is a list of structured per-record
     error dicts (same shape as :func:`validate_records`, scope ``"action"``); when
     it is empty, ``expanded`` is the resolved action — every targeted ``record_id``
-    resolved to file/line/title/suggestion. A mismatched/forged ``run_id`` or any
-    unknown ``record_id`` is rejected. Never raises; never executes anything.
+    resolved to file/line/title/suggestion. The ``action`` verb (when present) must
+    be one of :data:`VALID_ACTIONS`; a mismatched/forged ``run_id`` or any unknown
+    ``record_id`` is rejected. Never raises; never executes anything.
     """
     errors: list[dict] = []
+
+    # Action verb allowlist (fail-closed). A forged/arbitrary verb is rejected
+    # here rather than echoed back as a "resolved" action. ``None`` means
+    # "resolve only" (no verb posted) and is permitted — the CLI ``--action``
+    # defaults to None and the pure-resolve callers rely on it.
+    if action is not None and action not in VALID_ACTIONS:
+        errors.append(
+            _records_error(
+                "action", None, "action", "action",
+                f"unknown action {action!r}: must be one of "
+                f"{', '.join(VALID_ACTIONS)}",
+            )
+        )
 
     if not isinstance(data, dict):
         errors.append(
@@ -3458,17 +3480,35 @@ def validate_action_command(args: argparse.Namespace) -> None:
     """CLI: validate/expand a posted canvas action against records.json.
 
     On success prints the resolved action JSON to stdout (exit 0). On a forged
-    run_id, unknown record_id, or a missing/unparseable records.json, prints the
-    structured errors to stderr and exits 1 — so the orchestrator rejects the
-    action instead of executing it. ``--apply-disregard`` additionally persists the
-    (validated) ids as disregarded run state after a successful validation; it is
-    the only side effect, gated behind the human-confirmation step in SKILL.md.
+    run_id, unknown record_id, an unknown action verb, or a missing/unparseable
+    records.json, prints the structured errors to stderr and exits 1 — so the
+    orchestrator rejects the action instead of executing it. ``--apply-disregard``
+    additionally persists the (validated) ids as disregarded run state after a
+    successful validation; it is the only side effect, is bound to the
+    ``focused-review.disregard`` verb (rejected for any other action), and is
+    gated behind the human-confirmation step in SKILL.md.
     """
     path: str = args.records
     posted_run_id = args.run_id
     action = args.action
     instructions = args.instructions or ""
     record_ids = _split_record_ids(args.record_ids)
+
+    # --apply-disregard is bound to the disregard verb only: it is the one side
+    # effect that persists state, so refuse the flag for any other (or absent)
+    # action rather than silently writing run-state for a fix/document call.
+    # Fail-closed and fail-fast — checked before any records IO.
+    if getattr(args, "apply_disregard", False) and action != DISREGARD_ACTION:
+        _emit_action_error(
+            path, posted_run_id, action,
+            [_records_error(
+                "action", None, "apply_disregard", "action",
+                f"--apply-disregard requires --action {DISREGARD_ACTION!r}, "
+                f"got {action!r}; refusing to persist disregard state for a "
+                f"non-disregard action",
+            )],
+        )
+        sys.exit(1)
 
     data, load_error = _load_records_only(path)
     if load_error is not None:
@@ -3486,8 +3526,10 @@ def validate_action_command(args: argparse.Namespace) -> None:
     resolved["records_path"] = str(path)
 
     # Disregard is the one action that persists state. Only after a successful
-    # validation (so a forged run_id / unknown id can never write state).
-    if getattr(args, "apply_disregard", False):
+    # validation (so a forged run_id / unknown id can never write state). The
+    # ``action == DISREGARD_ACTION`` guard is co-located with the side effect so
+    # it holds even for a caller that bypasses the argparse/early gate above.
+    if getattr(args, "apply_disregard", False) and action == DISREGARD_ACTION:
         run_dir = args.run_dir or os.path.dirname(path) or "."
         state = persist_disregard(run_dir, posted_run_id, record_ids)
         resolved["disregarded"] = state.get("disregarded", [])
@@ -3738,6 +3780,7 @@ def main() -> int:
     action_parser.add_argument(
         "--action",
         default=None,
+        choices=VALID_ACTIONS,
         help="The namespaced action string (focused-review.fix/.disregard/.document)",
     )
     action_parser.add_argument(
