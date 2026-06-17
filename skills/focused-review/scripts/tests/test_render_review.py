@@ -479,6 +479,38 @@ class TestEscaping:
         # The literal {{RUN_ID}} in content was not re-expanded into the run id.
         assert "and {{RUN_ID}}" in out
 
+    def test_hostile_severity_cannot_break_out_of_class_attr(self) -> None:
+        # _sev_class derives the .sev class from the (untrusted) severity word and
+        # is the one finding field interpolated into an attribute. The canvas
+        # helpers are public and must self-defend here rather than leaning on the
+        # enum-validation gate ~700 lines away in render_review: a hostile severity
+        # must stay inside class="..." and never open a new attribute or tag.
+        hostile = 'low"><img src=x onerror=alert(1)>'
+        finding = {
+            "record_id": "r1",
+            "display_number": 1,
+            "title": "t",
+            "severity": hostile,
+            "file": "src/a.py",
+            "line": 1,
+        }
+        block = fr._canvas_finding_block(finding)
+        # The injected tag never materializes; the attribute-closing quote and the
+        # angle brackets are escaped, so the value stays inert inside the class attr.
+        assert "<img" not in block
+        assert '"><img' not in block
+        assert 'class="sev sev-low&quot;&gt;&lt;img src=x onerror=alert(1)&gt;"' in block
+
+    def test_hostile_severity_escaped_in_invalid_row(self) -> None:
+        # Same attribute boundary in the invalid-findings table row.
+        hostile = 'low"><script>evil()</script>'
+        row = fr._canvas_invalid_row(
+            {"assessment_id": "A-01", "severity": hostile, "title": "t", "assessment": ""}
+        )
+        assert "<script>evil()</script>" not in row
+        assert '"><script>' not in row
+        assert 'class="sev sev-low&quot;&gt;&lt;script&gt;evil()&lt;/script&gt;"' in row
+
 
 # ---------------------------------------------------------------------------
 # Provenance label mapping (helpers)
@@ -589,6 +621,29 @@ class TestRenderReviewCLI:
         with pytest.raises(SystemExit) as exc:
             fr.render_review(_render_args(tmp_path / "nope.json"))
         assert exc.value.code == 1
+
+    def test_bad_template_path_writes_no_artifacts(self, tmp_path: Path) -> None:
+        # All-or-nothing: an unreadable --template must fail the whole render with
+        # nothing written, mirroring the validation-failure path. The template is
+        # read BEFORE review.md is written, so a bad path can't leave a half-written
+        # run (review.md present, canvas missing) plus an unstructured traceback.
+        records = self._write_records(tmp_path)
+        review_out = tmp_path / "review.md"
+        canvas_out = tmp_path / "canvas.html"
+        missing_template = tmp_path / "does-not-exist.html"
+
+        with pytest.raises(OSError):
+            fr.render_review(
+                _render_args(
+                    records,
+                    review_out=str(review_out),
+                    canvas_out=str(canvas_out),
+                    template=str(missing_template),
+                )
+            )
+
+        assert not review_out.exists()
+        assert not canvas_out.exists()
 
 
 class TestRenderReviewSubprocess:

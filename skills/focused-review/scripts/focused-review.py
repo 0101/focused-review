@@ -2345,7 +2345,13 @@ _SEV_ABBREV = {"Critical": "Crit", "High": "High", "Medium": "Med", "Low": "Low"
 
 
 def _sev_class(severity: str) -> str:
-    """CSS severity class for a severity word, e.g. 'High' -> 'sev-high'."""
+    """CSS severity class for a severity word, e.g. 'High' -> 'sev-high'.
+
+    The result is derived from the (untrusted) severity text, so callers that
+    interpolate it into an HTML ``class="..."`` attribute must wrap it in
+    ``html.escape(..., quote=True)`` — it is intentionally not pre-escaped here,
+    so the escape stays visible at the attribute boundary like every other field.
+    """
     return "sev-" + str(severity).strip().lower()
 
 
@@ -2935,7 +2941,7 @@ def _canvas_finding_block(
         '          <summary class="finding-summary">\n'
         '            <span class="caret" aria-hidden="true"></span>\n'
         f'            <span class="num">{html.escape(str(number))}</span>\n'
-        f'            <span class="sev {_sev_class(severity)}">{html.escape(str(severity))}</span>\n'
+        f'            <span class="sev {html.escape(_sev_class(severity), quote=True)}">{html.escape(str(severity))}</span>\n'
         f'            <span class="found-by">{_found_tags_html(finding.get("provenance"))}</span>\n'
         f'            <span class="title">{html.escape(str(title))}</span>\n'
         '          </summary>\n'
@@ -2953,7 +2959,7 @@ def _canvas_invalid_row(finding: dict) -> str:
     severity = finding.get("severity", "")
     return (
         f"        <tr><td>{html.escape(str(aid))}</td>"
-        f'<td><span class="sev {_sev_class(severity)}">{html.escape(_sev_abbrev(severity))}</span></td>'
+        f'<td><span class="sev {html.escape(_sev_class(severity), quote=True)}">{html.escape(_sev_abbrev(severity))}</span></td>'
         f"<td>{html.escape(str(finding.get('title', '')))}</td>"
         f"<td>{html.escape(_flatten(finding.get('assessment', '')))}</td></tr>"
     )
@@ -3112,8 +3118,14 @@ def render_review(args: argparse.Namespace) -> None:
     canvas_out = args.canvas_out or os.path.join(args.repo, DEFAULT_CANVAS_RELPATH)
     template_path = args.template or str(CANVAS_TEMPLATE_PATH)
 
-    # review.md (Markdown — raw text fields, no HTML escaping).
-    _write_text(review_out, render_review_markdown(data))
+    # All-or-nothing: read everything that can fail BEFORE writing any artifact,
+    # so a missing/unreadable --template fails the whole render (like the
+    # validation-failure path above, which also writes nothing) instead of
+    # leaving review.md half-written beside an unstructured traceback. The
+    # template read is the only post-validation step that raises an uncaught
+    # OSError; the sidecar/run-state reads below are individually fail-safe.
+    with open(template_path, encoding="utf-8") as fh:
+        template = fh.read()
 
     # Sanitize each finding's optional rich-detail sidecar (nh3, fail-closed):
     # has_detail findings get their {run_dir}/assessments/{A-XX}-detail.html
@@ -3135,10 +3147,14 @@ def render_review(args: argparse.Namespace) -> None:
     run_state = load_run_state(run_dir, expected_run_id=expected_run_id)
     disregarded = set(run_state.get("disregarded", []))
 
-    # Canvas HTML — ALWAYS written (gitignored, inert when Treemon is down).
-    with open(template_path, encoding="utf-8") as fh:
-        template = fh.read()
-    _write_text(canvas_out, render_canvas_html(data, template, details, disregarded))
+    # Render both artifacts in memory, THEN write — so any render-time failure
+    # also leaves no partial output. review.md is Markdown (raw text fields, no
+    # HTML escaping); the canvas is ALWAYS written (gitignored, inert when
+    # Treemon is down).
+    review_md = render_review_markdown(data)
+    canvas_html = render_canvas_html(data, template, details, disregarded)
+    _write_text(review_out, review_md)
+    _write_text(canvas_out, canvas_html)
 
     # Terminal summary -> stdout for verbatim relay (UTF-8, locale-independent).
     _emit_stdout(render_terminal_summary(data, review_out))
