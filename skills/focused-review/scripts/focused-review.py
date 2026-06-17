@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import fnmatch
+import html
 import json
 import os
 import re
@@ -81,6 +82,12 @@ DEFAULT_CONCERNS_DIR = "review/concerns/"
 DEFAULT_BASE_BRANCH = "origin/main"
 BUILTIN_CONCERNS_DIR = Path(__file__).resolve().parent.parent / "defaults" / "concerns"
 CONCERN_FRAMEWORK_PATH = Path(__file__).resolve().parent.parent / "defaults" / "concern-framework.md"
+
+# Packaged canvas template (Phase 1) that render-review (Phase 3) fills server-side.
+CANVAS_TEMPLATE_PATH = Path(__file__).resolve().parent.parent / "templates" / "review-canvas.html"
+# Default canvas output, relative to the repo root. Gitignored and served by
+# Treemon when it is running; written unconditionally so it is ready as a tab.
+DEFAULT_CANVAS_RELPATH = os.path.join(".agents", "canvas", "focused-review.html")
 
 COPILOT_CMD = os.environ.get("COPILOT_CMD", "copilot")
 CONCERN_TIMEOUT_SECS = int(os.environ.get("CONCERN_TIMEOUT", "1200"))
@@ -2308,6 +2315,592 @@ def validate_records_command(args: argparse.Namespace) -> None:
 
 
 # ---------------------------------------------------------------------------
+# render-review (Phase 3): render review.md / terminal summary / canvas HTML
+# from a validated records.json envelope.
+#
+# Python's role is strictly mechanical: it never interprets prose. It groups the
+# validated findings by verdict, formats the provenance labels, and templates the
+# three artifacts. review.md preserves the heading/field shape the reporter used
+# to hand-author (locked by a golden-file test, and read downstream by the
+# post-mortem mode, which matches the "### {n}." headings and the
+# rule:/concern: provenance labels). The canvas fills the version-controlled
+# template, html.escape()-ing every structured text field.
+# See docs/spec/canvas-review-report.md.
+# ---------------------------------------------------------------------------
+
+# Severity → abbreviation shown in the (space-constrained) canvas invalid table.
+_SEV_ABBREV = {"Critical": "Crit", "High": "High", "Medium": "Med", "Low": "Low"}
+
+# Relay trailer is intentionally NOT emitted here — see render_terminal_summary.
+
+
+def _sev_class(severity: str) -> str:
+    """CSS severity class for a severity word, e.g. 'High' -> 'sev-high'."""
+    return "sev-" + str(severity).strip().lower()
+
+
+def _sev_abbrev(severity: str) -> str:
+    """Short severity label for the canvas invalid table."""
+    return _SEV_ABBREV.get(severity, str(severity))
+
+
+def _location_str(file: object, line: object) -> str:
+    """Render a finding's location as ``file:line`` (or just ``file`` when line is null)."""
+    file_str = "" if file is None else str(file)
+    if line is not None and _is_int(line):
+        return f"{file_str}:{line}"
+    return file_str
+
+
+def _md_cell(text: object) -> str:
+    """Escape a value for a one-line Markdown table cell.
+
+    Collapses newlines to spaces and escapes the cell delimiter so a stray ``|``
+    or line break in finding text can't break the table layout.
+    """
+    return (
+        str("" if text is None else text)
+        .replace("\r\n", " ")
+        .replace("\n", " ")
+        .replace("\r", " ")
+        .replace("|", "\\|")
+        .strip()
+    )
+
+
+def _flatten(text: object) -> str:
+    """Collapse a value to a single line (for table 'reason' cells)."""
+    return " ".join(str("" if text is None else text).split())
+
+
+def _invalid_summary_text(n: int) -> str:
+    """e.g. '1 finding filtered as invalid' / '3 findings filtered as invalid'."""
+    return f"{n} finding{'' if n == 1 else 's'} filtered as invalid"
+
+
+# ── provenance → "Found by" labels ───────────────────────────────────────────
+#
+# Provenance entries are the reporter's filename-derived source labels — either a
+# bare string or an object carrying a ``source`` field (validated in Phase 2).
+# The canonical convention is ``rule--<name>`` and ``concern--<name>--<model>``
+# (e.g. ``concern--bugs--opus``). Anything that doesn't match is shown verbatim.
+# Three views derive from the same source list:
+#   * review.md   — ungrouped, "N source(s): rule:<name>, concern:<name> (<model>)"
+#                   (the post-mortem mode parses exactly these labels)
+#   * terminal    — grouped, "<name>(<model>,<model>)" for concerns, "rule:<name>"
+#   * canvas tags — grouped, colour-coded <span> tags (no "rule:" prefix needed)
+
+
+def _parse_source_label(label: str) -> tuple[str, str, str | None]:
+    """Parse one provenance source label into ``(kind, name, model)``.
+
+    ``kind`` is ``rule`` / ``concern`` / ``other``. Unrecognised labels are
+    returned verbatim as ``("other", label, None)``.
+    """
+    text = label.strip()
+    if text.startswith("rule--"):
+        return ("rule", text[len("rule--"):], None)
+    if text.startswith("concern--"):
+        rest = text[len("concern--"):]
+        if "--" in rest:
+            name, model = rest.rsplit("--", 1)
+            return ("concern", name, model or None)
+        return ("concern", rest, None)
+    return ("other", text, None)
+
+
+def _provenance_sources(provenance: object) -> list[tuple[str, str, str | None]]:
+    """Parse a finding's provenance list into ordered ``(kind, name, model)`` tuples."""
+    sources: list[tuple[str, str, str | None]] = []
+    if not isinstance(provenance, list):
+        return sources
+    for entry in provenance:
+        if isinstance(entry, dict):
+            label = entry.get("source")
+        else:
+            label = entry
+        if isinstance(label, str) and label.strip():
+            sources.append(_parse_source_label(label))
+    return sources
+
+
+def _group_sources(
+    sources: list[tuple[str, str, str | None]],
+) -> list[tuple[str, str, list[str]]]:
+    """Group sources by ``(kind, name)`` preserving order, collecting unique models."""
+    groups: list[tuple[str, str, list[str]]] = []
+    index: dict[tuple[str, str], int] = {}
+    for kind, name, model in sources:
+        key = (kind, name)
+        if key not in index:
+            index[key] = len(groups)
+            groups.append((kind, name, []))
+        if model:
+            models = groups[index[key]][2]
+            if model not in models:
+                models.append(model)
+    return groups
+
+
+def _found_by_md(provenance: object) -> str:
+    """review.md 'Found by' — ungrouped, count-prefixed, post-mortem-parseable."""
+    sources = _provenance_sources(provenance)
+    labels: list[str] = []
+    for kind, name, model in sources:
+        if kind == "rule":
+            labels.append(f"rule:{name}")
+        elif kind == "concern":
+            labels.append(f"concern:{name} ({model})" if model else f"concern:{name}")
+        else:
+            labels.append(name)
+    n = len(labels)
+    if n == 0:
+        return ""
+    prefix = f"{n} source{'' if n == 1 else 's'}: "
+    return prefix + ", ".join(labels)
+
+
+def _short_group_label(kind: str, name: str, models: list[str]) -> str:
+    """Grouped short label used by the terminal summary and canvas tags."""
+    if kind == "concern":
+        return f"{name}({','.join(models)})" if models else name
+    if kind == "rule":
+        return f"rule:{name}"
+    return name
+
+
+def _found_by_terminal(provenance: object) -> str:
+    """terminal 'Found by' — grouped short labels joined by ', '."""
+    groups = _group_sources(_provenance_sources(provenance))
+    return ", ".join(_short_group_label(k, n, m) for k, n, m in groups)
+
+
+def _found_tags_html(provenance: object) -> str:
+    """canvas 'Found by' — colour-coded, escaped <span> tags (grouped)."""
+    groups = _group_sources(_provenance_sources(provenance))
+    parts: list[str] = []
+    for kind, name, models in groups:
+        if kind == "concern":
+            text = f"{name}({','.join(models)})" if models else name
+            cls = "found-tag-concern"
+        else:
+            # rule + any unrecognised label use the neutral rule styling.
+            text = name
+            cls = "found-tag-rule"
+        parts.append(f'<span class="found-tag {cls}">{html.escape(text)}</span>')
+    return "".join(parts)
+
+
+# ── finding partitioning ─────────────────────────────────────────────────────
+
+
+def _partition_findings(findings: list) -> tuple[list, list, list]:
+    """Split findings into (confirmed, questionable, invalid) display order.
+
+    Confirmed/Questionable share one numbered sequence and sort by
+    ``display_number``; Invalid render in a table keyed by ``assessment_id``.
+    """
+    confirmed = [f for f in findings if f.get("verdict") == "Confirmed"]
+    questionable = [f for f in findings if f.get("verdict") == "Questionable"]
+    invalid = [f for f in findings if f.get("verdict") == "Invalid"]
+    confirmed.sort(key=lambda f: (f.get("display_number") is None, f.get("display_number") or 0))
+    questionable.sort(key=lambda f: (f.get("display_number") is None, f.get("display_number") or 0))
+    invalid.sort(key=lambda f: str(f.get("assessment_id") or ""))
+    return confirmed, questionable, invalid
+
+
+# ── review.md ────────────────────────────────────────────────────────────────
+
+
+def _md_finding_block(finding: dict) -> str:
+    """One Confirmed/Questionable finding block in the review.md shape."""
+    parts: list[str] = []
+    parts.append(
+        f"### {finding.get('display_number')}. "
+        f"[{finding.get('severity', '')}] {finding.get('title', '')}"
+    )
+    meta = [
+        f"**File:** `{_location_str(finding.get('file', ''), finding.get('line'))}`",
+        f"**Fix complexity:** {finding.get('fix_complexity', '')}",
+        f"**Found by:** {_found_by_md(finding.get('provenance'))}",
+    ]
+    parts.append("\n".join(meta))
+    if finding.get("description"):
+        parts.append(finding["description"])
+    if finding.get("assessment"):
+        parts.append(f"> **Assessment:** {finding['assessment']}")
+    if finding.get("suggestion"):
+        parts.append(f"**Suggestion:** {finding['suggestion']}")
+    parts.append("---")
+    return "\n\n".join(parts)
+
+
+def _md_invalid_block(invalid: list) -> str:
+    """The collapsible invalid-findings <details> table for review.md."""
+    lines = [
+        "<details>",
+        f"<summary>{_invalid_summary_text(len(invalid))}</summary>",
+        "",
+        "| ID | Severity | File | Title | Reason |",
+        "|----|----------|------|-------|--------|",
+    ]
+    for f in invalid:
+        lines.append(
+            f"| {_md_cell(f.get('assessment_id') or '')} "
+            f"| {_md_cell(f.get('severity', ''))} "
+            f"| `{_md_cell(_location_str(f.get('file', ''), f.get('line')))}` "
+            f"| {_md_cell(f.get('title', ''))} "
+            f"| {_md_cell(_flatten(f.get('assessment', '')))} |"
+        )
+    lines.append("")
+    lines.append("</details>")
+    return "\n".join(lines)
+
+
+def _md_quality_block(notes: list) -> str:
+    """The Rule Quality Notes section for review.md."""
+    lines = ["## Rule Quality Notes", ""]
+    for n in notes:
+        lines.append(
+            f"- **{n.get('rule', '')}**: {n.get('observation', '')} "
+            f"— {n.get('suggestion', '')}"
+        )
+    return "\n".join(lines)
+
+
+def render_review_markdown(data: dict) -> str:
+    """Render the ``review.md`` report from a validated envelope.
+
+    Preserves the heading/field shape the reporter agent used to hand-author, so
+    downstream LLM readers (post-comments / post-mortem) and the golden-file test
+    keep working. Empty Confirmed/Questionable/Invalid/quality sections are
+    omitted (the reporter's "omit a section with no findings" rule).
+    """
+    run = data.get("run", {})
+    findings = data.get("findings", [])
+    notes = data.get("rule_quality_notes", []) or []
+    confirmed, questionable, invalid = _partition_findings(findings)
+
+    blocks: list[str] = ["# Unified Review Report"]
+    blocks.append(
+        "\n".join(
+            [
+                f"**Scope:** {run.get('scope', '')}",
+                f"**Date:** {run.get('date', '')}",
+                f"**Pipeline:** Discovery ({run.get('rule_count', 0)} rules, "
+                f"{run.get('concern_count', 0)} concerns) → Consolidation → Assessment",
+            ]
+        )
+    )
+    blocks.append(
+        "\n".join(
+            [
+                "## Summary",
+                "",
+                "| Verdict | Count |",
+                "|---------|-------|",
+                f"| ✅ Confirmed | {len(confirmed)} |",
+                f"| ❓ Questionable | {len(questionable)} |",
+                f"| ❌ Invalid (filtered) | {len(invalid)} |",
+            ]
+        )
+    )
+    blocks.append("---")
+
+    if confirmed:
+        blocks.append("## Confirmed Findings")
+        blocks.extend(_md_finding_block(f) for f in confirmed)
+    if questionable:
+        blocks.append("## Questionable Findings")
+        blocks.extend(_md_finding_block(f) for f in questionable)
+    if invalid:
+        blocks.append(_md_invalid_block(invalid))
+    if notes:
+        blocks.append(_md_quality_block(notes))
+
+    return "\n\n".join(blocks) + "\n"
+
+
+# ── terminal summary ─────────────────────────────────────────────────────────
+
+
+def render_terminal_summary(data: dict, report_path: str) -> str:
+    """Render the user-facing terminal summary string.
+
+    Shape matches the reporter agent's relayed summary: report path, pipeline
+    stats, a findings table (ALL Confirmed + Questionable, with a "Found by"
+    column), and rule-quality notes. The "relay everything above this line"
+    trailer is intentionally NOT emitted here: it was a control instruction for
+    an LLM agent's output; render-review is a tool whose stdout is pure data, and
+    the orchestrator (SKILL.md) owns the relay-verbatim guarantee.
+    """
+    run = data.get("run", {})
+    findings = data.get("findings", [])
+    notes = data.get("rule_quality_notes", []) or []
+    confirmed, questionable, _invalid = _partition_findings(findings)
+    actionable = confirmed + questionable
+    actionable.sort(key=lambda f: (f.get("display_number") is None, f.get("display_number") or 0))
+
+    blocks: list[str] = [f"📄 {report_path}"]
+    blocks.append(
+        f"{run.get('rule_count', 0)} rules + {run.get('concern_count', 0)} concerns "
+        f"→ {run.get('consolidated_count', 0)} unique findings → {len(actionable)} actionable"
+    )
+
+    if actionable:
+        table = [
+            "| # | Verdict | Severity | Found by | File | Issue |",
+            "|---|---------|----------|----------|------|-------|",
+        ]
+        for f in actionable:
+            icon = "✅" if f.get("verdict") == "Confirmed" else "❓"
+            table.append(
+                f"| {f.get('display_number')} "
+                f"| {icon} "
+                f"| {_md_cell(f.get('severity', ''))} "
+                f"| {_md_cell(_found_by_terminal(f.get('provenance')))} "
+                f"| {_md_cell(_location_str(f.get('file', ''), f.get('line')))} "
+                f"| {_md_cell(f.get('title', ''))} |"
+            )
+        blocks.append("\n".join(table))
+    else:
+        blocks.append("✅ No actionable findings.")
+
+    if notes:
+        quality = ["📝 Rule Quality Notes"]
+        for n in notes:
+            quality.append(
+                f"- {n.get('rule', '')}: {n.get('observation', '')} — {n.get('suggestion', '')}"
+            )
+        blocks.append("\n".join(quality))
+
+    return "\n\n".join(blocks) + "\n"
+
+
+# ── canvas HTML ──────────────────────────────────────────────────────────────
+
+
+def _strip_template_doc_comment(template: str) -> str:
+    """Drop the template's leading documentation comment.
+
+    The version-controlled template documents its placeholders in a leading
+    ``<!-- … -->`` block that itself contains the literal FR markers and
+    ``{{RUN_ID}}`` (the hand-filled fixture drops it). Removing everything from
+    the first comment opener up to ``<head>`` leaves only the body placeholders
+    for substitution, so a marker is never filled twice.
+    """
+    head_idx = template.find("<head>")
+    if head_idx == -1:
+        return template
+    prefix = template[:head_idx]
+    comment_idx = prefix.find("<!--")
+    if comment_idx == -1:
+        return template
+    return prefix[:comment_idx] + template[head_idx:]
+
+
+def _canvas_finding_block(finding: dict) -> str:
+    """One ``.finding`` accordion block for the canvas (every text field escaped).
+
+    The optional ``has_detail`` rich-HTML sidecar is embedded by Phase 4 (nh3
+    sanitization); until then the panel renders the escaped structural fields
+    only — exactly the fail-closed "plain escaped text" behaviour.
+    """
+    rid = finding.get("record_id", "")
+    number = finding.get("display_number")
+    title = finding.get("title", "")
+    severity = finding.get("severity", "")
+    location = _location_str(finding.get("file", ""), finding.get("line"))
+    aria = f"Select finding {number}: {title}"
+
+    sections = [
+        "          <div class=\"detail-section\">\n"
+        "            <div class=\"detail-label\">Location</div>\n"
+        f"            <span class=\"detail-file\">{html.escape(location)}</span>"
+        f" · {html.escape(str(finding.get('fix_complexity', '')))}\n"
+        "          </div>"
+    ]
+    if finding.get("description"):
+        sections.append(
+            "          <div class=\"detail-section\">\n"
+            "            <div class=\"detail-label\">Description</div>\n"
+            f"            <p>{html.escape(finding['description'])}</p>\n"
+            "          </div>"
+        )
+    if finding.get("assessment"):
+        sections.append(
+            "          <div class=\"detail-assessment\">\n"
+            "            <div class=\"detail-label\">Assessment</div>\n"
+            f"            <p>{html.escape(finding['assessment'])}</p>\n"
+            "          </div>"
+        )
+    if finding.get("suggestion"):
+        sections.append(
+            "          <div class=\"detail-suggestion\">\n"
+            "            <div class=\"detail-label\">Suggestion</div>\n"
+            f"            <p>{html.escape(finding['suggestion'])}</p>\n"
+            "          </div>"
+        )
+    detail_content = "\n".join(sections)
+
+    return (
+        f'      <div class="finding" data-record-id="{html.escape(str(rid), quote=True)}">\n'
+        f'        <input type="checkbox" class="row-cb" aria-label="{html.escape(aria, quote=True)}">\n'
+        '        <details class="finding-d" name="findings">\n'
+        '          <summary class="finding-summary">\n'
+        '            <span class="caret" aria-hidden="true"></span>\n'
+        f'            <span class="num">{html.escape(str(number))}</span>\n'
+        f'            <span class="sev {_sev_class(severity)}">{html.escape(str(severity))}</span>\n'
+        f'            <span class="found-by">{_found_tags_html(finding.get("provenance"))}</span>\n'
+        f'            <span class="title">{html.escape(str(title))}</span>\n'
+        '          </summary>\n'
+        '          <div class="detail-content">\n'
+        f"{detail_content}\n"
+        '          </div>\n'
+        '        </details>\n'
+        '      </div>'
+    )
+
+
+def _canvas_invalid_row(finding: dict) -> str:
+    """One ``<tr>`` for the canvas invalid-findings table."""
+    aid = finding.get("assessment_id") or ""
+    severity = finding.get("severity", "")
+    return (
+        f"        <tr><td>{html.escape(str(aid))}</td>"
+        f'<td><span class="sev {_sev_class(severity)}">{html.escape(_sev_abbrev(severity))}</span></td>'
+        f"<td>{html.escape(str(finding.get('title', '')))}</td>"
+        f"<td>{html.escape(_flatten(finding.get('assessment', '')))}</td></tr>"
+    )
+
+
+def _canvas_quality_item(note: dict) -> str:
+    """One ``.quality-item`` block for the canvas."""
+    return (
+        f'    <div class="quality-item"><strong>{html.escape(str(note.get("rule", "")))}</strong>: '
+        f'{html.escape(str(note.get("observation", "")))} — '
+        f'{html.escape(str(note.get("suggestion", "")))}</div>'
+    )
+
+
+def render_canvas_html(data: dict, template: str) -> str:
+    """Fill the canvas template with pre-rendered, escaped markup.
+
+    A single-pass regex substitution replaces every placeholder exactly once, so
+    injected (already-escaped) content is never re-scanned for further markers.
+    ``{{RUN_ID}}`` is escaped for an attribute context; escaped finding text can
+    never forge a ``<!-- FR:* -->`` marker because ``html.escape`` turns ``<``
+    into ``&lt;``.
+    """
+    run = data.get("run", {})
+    findings = data.get("findings", [])
+    notes = data.get("rule_quality_notes", []) or []
+    confirmed, questionable, invalid = _partition_findings(findings)
+    actionable_count = len(confirmed) + len(questionable)
+
+    meta = (
+        f"Scope: {html.escape(str(run.get('scope', '')))} · "
+        f"{html.escape(str(run.get('date', '')))} · "
+        f"{run.get('rule_count', 0)} rules + {run.get('concern_count', 0)} concerns → "
+        f"{run.get('consolidated_count', 0)} unique → {actionable_count} actionable"
+    )
+    badges = (
+        f'<span class="summary-badge badge-confirmed"><span class="count">{len(confirmed)}</span> Confirmed</span>'
+        f'<span class="summary-badge badge-questionable"><span class="count">{len(questionable)}</span> Questionable</span>'
+        f'<span class="summary-badge badge-invalid"><span class="count">{len(invalid)}</span> Invalid</span>'
+    )
+
+    replacements = {
+        "{{RUN_ID}}": html.escape(str(run.get("run_id", "")), quote=True),
+        "<!-- FR:META -->": meta,
+        "<!-- FR:SUMMARY_BADGES -->": badges,
+        "<!-- FR:CONFIRMED_COUNT -->": str(len(confirmed)),
+        "<!-- FR:CONFIRMED_ROWS -->": "\n".join(_canvas_finding_block(f) for f in confirmed),
+        "<!-- FR:QUESTIONABLE_COUNT -->": str(len(questionable)),
+        "<!-- FR:QUESTIONABLE_ROWS -->": "\n".join(_canvas_finding_block(f) for f in questionable),
+        "<!-- FR:INVALID_SUMMARY -->": html.escape(_invalid_summary_text(len(invalid))),
+        "<!-- FR:INVALID_ROWS -->": "\n".join(_canvas_invalid_row(f) for f in invalid),
+        "<!-- FR:QUALITY_SUMMARY -->": html.escape(f"Rule Quality Notes ({len(notes)})"),
+        "<!-- FR:QUALITY_NOTES -->": "\n".join(_canvas_quality_item(n) for n in notes),
+    }
+
+    stripped = _strip_template_doc_comment(template)
+    # Longest-first keeps a marker that is a prefix of another from matching early.
+    pattern = re.compile("|".join(re.escape(k) for k in sorted(replacements, key=len, reverse=True)))
+    return pattern.sub(lambda m: replacements[m.group(0)], stripped)
+
+
+# ── CLI handler ──────────────────────────────────────────────────────────────
+
+
+def _write_text(path: str, text: str) -> None:
+    """Write *text* to *path* as UTF-8, creating parent directories as needed."""
+    parent = os.path.dirname(os.path.abspath(path))
+    os.makedirs(parent, exist_ok=True)
+    with open(path, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write(text)
+
+
+def _emit_stdout(text: str) -> None:
+    """Write *text* to stdout as UTF-8 regardless of the ambient console encoding.
+
+    The orchestrator captures this stream (a pipe) to relay the summary verbatim,
+    so on Windows the ambient encoding is cp1252 and ``print`` would raise
+    ``UnicodeEncodeError`` on the summary's glyphs (the doc/pipeline/verdict
+    emoji and the ``->`` arrow). Writing UTF-8 bytes to the binary buffer keeps
+    the relayed bytes deterministic; fall back to a text write for capture
+    harnesses that expose no binary buffer.
+    """
+    buffer = getattr(sys.stdout, "buffer", None)
+    if buffer is not None:
+        buffer.write(text.encode("utf-8"))
+        buffer.flush()
+    else:
+        sys.stdout.write(text)
+        sys.stdout.flush()
+
+
+def render_review(args: argparse.Namespace) -> None:
+    """CLI: render review.md, the terminal summary, and the canvas from records.json.
+
+    On a validation failure, emits the same structured per-record error JSON as
+    ``validate-records`` to stderr and exits 1 (the orchestrator retries the
+    reporter, then falls back to the legacy markdown path). On success, writes
+    review.md and the always-on canvas file, then prints the terminal summary to
+    stdout for the orchestrator to relay.
+    """
+    records_path: str = args.records
+    data, errors = load_and_validate_records(records_path)
+
+    if errors:
+        payload = {
+            "valid": False,
+            "schema_version": RECORDS_SCHEMA_VERSION,
+            "records_path": str(records_path),
+            "error_count": len(errors),
+            "errors": errors,
+        }
+        print(json.dumps(payload, indent=2), file=sys.stderr)
+        sys.exit(1)
+
+    run_dir = args.run_dir or os.path.dirname(records_path) or "."
+    review_out = args.review_out or os.path.join(run_dir, "review.md")
+    canvas_out = args.canvas_out or os.path.join(args.repo, DEFAULT_CANVAS_RELPATH)
+    template_path = args.template or str(CANVAS_TEMPLATE_PATH)
+
+    # review.md (Markdown — raw text fields, no HTML escaping).
+    _write_text(review_out, render_review_markdown(data))
+
+    # Canvas HTML — ALWAYS written (gitignored, inert when Treemon is down).
+    with open(template_path, encoding="utf-8") as fh:
+        template = fh.read()
+    _write_text(canvas_out, render_canvas_html(data, template))
+
+    # Terminal summary -> stdout for verbatim relay (UTF-8, locale-independent).
+    _emit_stdout(render_terminal_summary(data, review_out))
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -2471,6 +3064,43 @@ def main() -> int:
         help="Path to the records.json file to validate",
     )
     validate_parser.set_defaults(func=validate_records_command)
+
+    # render-review subcommand
+    render_parser = subparsers.add_parser(
+        "render-review",
+        help="Render review.md, the terminal summary, and the canvas HTML from records.json",
+    )
+    render_parser.add_argument(
+        "--records",
+        required=True,
+        help="Path to the records.json envelope to render",
+    )
+    render_parser.add_argument(
+        "--run-dir",
+        default=None,
+        help="Run directory (default: the records.json file's directory)",
+    )
+    render_parser.add_argument(
+        "--repo",
+        default=".",
+        help="Repository root, used to resolve the default canvas path (default: .)",
+    )
+    render_parser.add_argument(
+        "--review-out",
+        default=None,
+        help="Output path for review.md (default: {run_dir}/review.md)",
+    )
+    render_parser.add_argument(
+        "--canvas-out",
+        default=None,
+        help="Output path for the canvas HTML (default: {repo}/.agents/canvas/focused-review.html)",
+    )
+    render_parser.add_argument(
+        "--template",
+        default=None,
+        help="Canvas template path (default: the packaged review-canvas.html)",
+    )
+    render_parser.set_defaults(func=render_review)
 
     args = parser.parse_args()
     args.func(args)
