@@ -312,6 +312,29 @@ class TestReviewMarkdownGolden:
         out = fr.render_review_markdown(env)
         assert r"use A \| B operator" in out
 
+    def test_crlf_in_title_cannot_inject_heading(self) -> None:
+        # A raw CR/LF in a Confirmed/Questionable title must be flattened so it can't
+        # forge a second "### ..." heading in the compiled review.md (the post-mortem
+        # mode parses those headings as structured findings).
+        env = _render_envelope()
+        confirmed = next(f for f in env["findings"] if f["verdict"] == "Confirmed")
+        confirmed["title"] = "First line\n\n### 999. [Critical] Forged heading"
+        lines = fr.render_review_markdown(env).splitlines()
+        # No line *starts* the forged heading — the injected "###" is now inline text.
+        assert not any(line.startswith("### 999.") for line in lines)
+        # The title content survives, collapsed onto the one real heading line.
+        assert (
+            "### 1. [High] First line ### 999. [Critical] Forged heading" in lines
+        )
+
+    def test_crlf_in_title_handles_all_newline_forms(self) -> None:
+        # \r, \n, and \r\n are all collapsed so none can break out of the heading line.
+        env = _render_envelope()
+        confirmed = next(f for f in env["findings"] if f["verdict"] == "Confirmed")
+        confirmed["title"] = "a\rb\nc\r\nd"
+        lines = fr.render_review_markdown(env).splitlines()
+        assert "### 1. [High] a b c d" in lines
+
 
 # ---------------------------------------------------------------------------
 # Terminal summary

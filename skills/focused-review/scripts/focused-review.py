@@ -2227,6 +2227,20 @@ def validate_records(data: object) -> list[dict]:
         display_numbers: set = set()
         for i, rec in enumerate(findings):
             _validate_finding(rec, i, errors, record_ids, assessment_ids, display_numbers)
+        # The numbered Confirmed/Questionable sequence must be a gap-free 1..N run so
+        # the rendered report (review.md headings, terminal table, canvas) has no
+        # skipped numbers. The per-finding checks above already enforce integer >= 1
+        # and uniqueness; this cross-finding check catches gaps a reporter retry can
+        # leave behind when it renumbers one finding without adjusting the rest.
+        if display_numbers and sorted(display_numbers) != list(
+            range(1, len(display_numbers) + 1)
+        ):
+            add_envelope(
+                "findings",
+                "display_number values for Confirmed/Questionable findings must form "
+                f"a contiguous 1..{len(display_numbers)} sequence with no gaps "
+                f"(got {sorted(display_numbers)})",
+            )
 
     # rebuttal_overrides ----------------------------------------------------
     overrides = data.get("rebuttal_overrides", _MISSING)
@@ -2539,9 +2553,13 @@ def _partition_findings(findings: list) -> tuple[list, list, list]:
 def _md_finding_block(finding: dict) -> str:
     """One Confirmed/Questionable finding block in the review.md shape."""
     parts: list[str] = []
+    # Flatten the title to a single line before it lands in the
+    # "### n. [severity] title" heading. A raw CR/LF (or block markup) in the title
+    # would otherwise inject a forged heading / markdown into review.md, which the
+    # post-mortem mode then parses as a real "### n." heading.
     parts.append(
         f"### {finding.get('display_number')}. "
-        f"[{finding.get('severity', '')}] {finding.get('title', '')}"
+        f"[{finding.get('severity', '')}] {_flatten(finding.get('title', ''))}"
     )
     meta = [
         f"**File:** `{_location_str(finding.get('file', ''), finding.get('line'))}`",

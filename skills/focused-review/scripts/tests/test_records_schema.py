@@ -437,6 +437,26 @@ class TestRejectFinding:
         env["findings"][1]["display_number"] = 1  # finding 1 is Invalid
         assert fr.validate_records(env) == []
 
+    def test_contiguous_display_numbers_pass(self) -> None:
+        # Two numbered findings forming a gap-free 1..N run ({1, 2}) are accepted.
+        env = _valid_envelope()
+        env["findings"][1]["verdict"] = "Questionable"
+        env["findings"][1]["display_number"] = 2
+        env["run"].update(questionable=1, invalid=0)
+        assert fr.validate_records(env) == []
+
+    def test_noncontiguous_display_numbers_rejected(self) -> None:
+        # A gap in the numbered Confirmed/Questionable sequence ({1, 3}) would render
+        # skipped numbers downstream, so validation rejects it at the envelope level.
+        env = _valid_envelope()
+        env["findings"][1]["verdict"] = "Questionable"
+        env["findings"][1]["display_number"] = 3  # gap: {1, 3}
+        env["run"].update(questionable=1, invalid=0)
+        errors = fr.validate_records(env)
+        assert any(
+            e["path"] == "findings" and "contiguous" in e["message"] for e in errors
+        )
+
     def test_duplicate_assessment_id(self) -> None:
         env = _valid_envelope()
         # Two findings sharing an assessment id would collide in the invalid
