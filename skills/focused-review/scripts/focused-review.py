@@ -2866,13 +2866,21 @@ def _resolve_finding_detail(run_dir: str | None, finding: dict) -> str | None:
     return cleaned
 
 
-def _canvas_finding_block(finding: dict, detail_html: str | None = None) -> str:
+def _canvas_finding_block(
+    finding: dict, detail_html: str | None = None, dimmed: bool = False
+) -> str:
     """One ``.finding`` accordion block for the canvas (every text field escaped).
 
     ``detail_html`` is the already-nh3-sanitized rich-detail fragment (or
     ``None``). When present it is embedded after the structural fields, wrapped in
     ``<div class="rich-detail">``; when absent the panel renders the escaped
     structural fields only — the fail-closed "plain escaped text" behaviour.
+
+    ``dimmed`` bakes the ``dimmed`` class onto the block so a finding the user
+    persisted as *disregarded* (run state, read back by render-review) stays dimmed
+    across every re-render — not just within the live JS session. The action-bar
+    script seeds its own disregarded set from these server-rendered classes, so the
+    persisted dim survives a cold canvas load too, not only an in-session morph.
     """
     rid = finding.get("record_id", "")
     number = finding.get("display_number")
@@ -2919,8 +2927,9 @@ def _canvas_finding_block(finding: dict, detail_html: str | None = None) -> str:
         )
     detail_content = "\n".join(sections)
 
+    classes = "finding dimmed" if dimmed else "finding"
     return (
-        f'      <div class="finding" data-record-id="{html.escape(str(rid), quote=True)}">\n'
+        f'      <div class="{classes}" data-record-id="{html.escape(str(rid), quote=True)}">\n'
         f'        <input type="checkbox" class="row-cb" aria-label="{html.escape(aria, quote=True)}">\n'
         '        <details class="finding-d" name="findings">\n'
         '          <summary class="finding-summary">\n'
@@ -2959,7 +2968,12 @@ def _canvas_quality_item(note: dict) -> str:
     )
 
 
-def render_canvas_html(data: dict, template: str, details: dict[str, str] | None = None) -> str:
+def render_canvas_html(
+    data: dict,
+    template: str,
+    details: dict[str, str] | None = None,
+    disregarded: set[str] | None = None,
+) -> str:
     """Fill the canvas template with pre-rendered, escaped markup.
 
     A single-pass regex substitution replaces every placeholder exactly once, so
@@ -2972,8 +2986,14 @@ def render_canvas_html(data: dict, template: str, details: dict[str, str] | None
     rich-detail fragment (built by the render-review CLI handler, which owns the
     file IO + sanitization). Absent or unmapped findings render text-only — the
     fail-closed default, so callers without sidecars get the Phase 3 behaviour.
+
+    ``disregarded`` is the set of ``record_id``s persisted as disregarded run state
+    (read back from ``run-state.json``); their ``.finding`` block is rendered with
+    the ``dimmed`` class so the dim survives across re-renders. Passed as data (no
+    file IO here) to keep this function pure and testable, mirroring ``details``.
     """
     details = details or {}
+    disregarded = disregarded or set()
     run = data.get("run", {})
     findings = data.get("findings", [])
     notes = data.get("rule_quality_notes", []) or []
@@ -2981,7 +3001,8 @@ def render_canvas_html(data: dict, template: str, details: dict[str, str] | None
     actionable_count = len(confirmed) + len(questionable)
 
     def block(finding: dict) -> str:
-        return _canvas_finding_block(finding, details.get(finding.get("record_id")))
+        rid = finding.get("record_id")
+        return _canvas_finding_block(finding, details.get(rid), dimmed=rid in disregarded)
 
     meta = (
         f"Scope: {html.escape(str(run.get('scope', '')))} · "
@@ -3105,13 +3126,342 @@ def render_review(args: argparse.Namespace) -> None:
         if cleaned is not None:
             details[finding.get("record_id")] = cleaned
 
+    # Disregarded run state: render-review re-applies the user's persisted
+    # "disregard" decisions (written by `validate-action --apply-disregard`) so the
+    # canvas dims those findings on every re-render. Fail-open (empty) when the
+    # state file is absent/unreadable or belongs to a different run_id.
+    run = data.get("run", {}) if isinstance(data, dict) else {}
+    expected_run_id = run.get("run_id") if isinstance(run, dict) else None
+    run_state = load_run_state(run_dir, expected_run_id=expected_run_id)
+    disregarded = set(run_state.get("disregarded", []))
+
     # Canvas HTML — ALWAYS written (gitignored, inert when Treemon is down).
     with open(template_path, encoding="utf-8") as fh:
         template = fh.read()
-    _write_text(canvas_out, render_canvas_html(data, template, details))
+    _write_text(canvas_out, render_canvas_html(data, template, details, disregarded))
 
     # Terminal summary -> stdout for verbatim relay (UTF-8, locale-independent).
     _emit_stdout(render_terminal_summary(data, review_out))
+
+
+# ---------------------------------------------------------------------------
+# validate-action (Phase 6): the canvas action-bar round-trip.
+#
+# The canvas posts {action, run_id, record_ids[], instructions} to the
+# orchestrator. Before the orchestrator does anything (and only after a human
+# confirms), it calls `validate-action` to validate/expand the payload against
+# records.json: the posted run_id must match the rendered run (rejecting a forged
+# action from injected canvas JS), every record_id must exist, and each resolves
+# to its file/line/title/suggestion. Python's role stays mechanical — it validates
+# a schema-defined contract and resolves stable ids; it never executes anything.
+#
+# `disregard` is the one action with persisted state: `--apply-disregard` records
+# the ids in run-state.json so render-review re-applies the dim across re-renders.
+# See docs/spec/canvas-review-report.md (postMessage actions + Security Model).
+# ---------------------------------------------------------------------------
+
+# Per-run state the canvas re-applies across renders (currently: disregarded ids).
+# Lives beside records.json in the run directory.
+RUN_STATE_FILENAME = "run-state.json"
+
+
+def _run_state_path(run_dir: str | None) -> str:
+    """Path to the run-state file inside *run_dir* (defaults to the cwd)."""
+    return os.path.join(run_dir or ".", RUN_STATE_FILENAME)
+
+
+def load_run_state(run_dir: str | None, expected_run_id: str | None = None) -> dict:
+    """Read ``{run_dir}/run-state.json``; fail-open to an empty state.
+
+    The persisted run state holds the ``disregarded`` record_ids the canvas dims
+    on every re-render. Any read/parse problem — or a ``run_id`` that does not
+    match *expected_run_id* (stale state from a different run) — yields an empty
+    state: disregard is an additive canvas affordance, never a hard dependency, so
+    a missing or unreadable file must never block the always-written canvas.
+    """
+    empty: dict = {"disregarded": []}
+    path = _run_state_path(run_dir)
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.loads(fh.read())
+    except (OSError, ValueError):
+        return empty
+    if not isinstance(data, dict):
+        return empty
+    if expected_run_id is not None:
+        # When the caller names the run it expects, honour the state only if it is
+        # stamped with that exact run_id. A state file with a missing/blank or
+        # mismatched run_id is treated as stale/foreign (empty) — render-review
+        # always passes expected_run_id, so this never dims another run's findings.
+        state_run_id = data.get("run_id")
+        if not (_is_nonempty_str(state_run_id) and state_run_id == expected_run_id):
+            return empty
+    raw = data.get("disregarded")
+    disregarded = [r for r in raw if _is_nonempty_str(r)] if isinstance(raw, list) else []
+    return {"disregarded": disregarded}
+
+
+def persist_disregard(run_dir: str | None, run_id: str, record_ids: list[str]) -> dict:
+    """Merge *record_ids* into the run-state's disregarded set and write it.
+
+    Disregard is monotonic within a run (add-only): the existing set is preserved
+    and new ids appended in first-seen order, so render-review re-applies the dim
+    on every subsequent re-render. Returns the persisted state dict. The caller is
+    expected to have validated *record_ids* (via :func:`validate_action`) first.
+    """
+    existing = load_run_state(run_dir, expected_run_id=run_id)
+    disregarded = list(existing.get("disregarded", []))
+    seen = set(disregarded)
+    for rid in record_ids:
+        if _is_nonempty_str(rid) and rid not in seen:
+            seen.add(rid)
+            disregarded.append(rid)
+    state = {
+        "schema_version": RECORDS_SCHEMA_VERSION,
+        "run_id": run_id,
+        "disregarded": disregarded,
+    }
+    _write_text(_run_state_path(run_dir), json.dumps(state, indent=2) + "\n")
+    return state
+
+
+def _resolve_action_finding(finding: dict) -> dict:
+    """Resolve a finding to the fields the orchestrator needs to act on it.
+
+    The spec requires file/line/title/suggestion; the rest (severity, verdict,
+    fix_complexity, the stable ids, display_number) give the orchestrator enough
+    context to describe the action to the human and to scope a fix precisely.
+    """
+    return {
+        "record_id": finding.get("record_id"),
+        "assessment_id": finding.get("assessment_id"),
+        "display_number": finding.get("display_number"),
+        "title": finding.get("title", ""),
+        "file": finding.get("file", ""),
+        "line": finding.get("line"),
+        "severity": finding.get("severity", ""),
+        "verdict": finding.get("verdict", ""),
+        "fix_complexity": finding.get("fix_complexity", ""),
+        "suggestion": finding.get("suggestion", ""),
+    }
+
+
+def validate_action(
+    data: object,
+    run_id: object,
+    record_ids: list[str],
+    *,
+    action: str | None = None,
+    instructions: str = "",
+) -> tuple[dict | None, list[dict]]:
+    """Validate/expand a posted canvas action against a records.json envelope.
+
+    Returns ``(expanded, errors)``. ``errors`` is a list of structured per-record
+    error dicts (same shape as :func:`validate_records`, scope ``"action"``); when
+    it is empty, ``expanded`` is the resolved action — every targeted ``record_id``
+    resolved to file/line/title/suggestion. A mismatched/forged ``run_id`` or any
+    unknown ``record_id`` is rejected. Never raises; never executes anything.
+    """
+    errors: list[dict] = []
+
+    if not isinstance(data, dict):
+        errors.append(
+            _records_error(
+                "action",
+                None,
+                "$",
+                "run_id",
+                f"records.json root must be a JSON object, got {_json_type_name(data)}",
+            )
+        )
+        return None, errors
+
+    run = data.get("run")
+    actual_run_id = run.get("run_id") if isinstance(run, dict) else None
+
+    # run_id must match the rendered run — this is the forgery gate.
+    if not _is_nonempty_str(run_id):
+        errors.append(
+            _records_error(
+                "action", None, "run_id", "run_id",
+                "run_id is required to validate a canvas action",
+            )
+        )
+    elif not _is_nonempty_str(actual_run_id):
+        errors.append(
+            _records_error(
+                "action", None, "run_id", "run_id",
+                "records.json has no run.run_id to match the posted action against",
+            )
+        )
+    elif run_id != actual_run_id:
+        errors.append(
+            _records_error(
+                "action", None, "run_id", "run_id",
+                f"run_id mismatch: posted {run_id!r} does not match records.json "
+                f"run_id {actual_run_id!r} (rejecting a possibly forged action)",
+            )
+        )
+
+    # Index findings by stable record_id so each posted id resolves (or doesn't).
+    findings = data.get("findings")
+    by_id: dict[str, dict] = {}
+    if isinstance(findings, list):
+        for finding in findings:
+            if isinstance(finding, dict):
+                rid = finding.get("record_id")
+                if _is_nonempty_str(rid):
+                    by_id.setdefault(rid, finding)
+
+    resolved: list[dict] = []
+    if not record_ids:
+        errors.append(
+            _records_error(
+                "action", None, "record_ids", "record_ids",
+                "no record_ids provided; a canvas action must target at least one finding",
+            )
+        )
+    for i, rid in enumerate(record_ids):
+        if not _is_nonempty_str(rid):
+            errors.append(
+                _records_error(
+                    "action", i, f"record_ids[{i}]", "record_id",
+                    "record_id must be a non-empty string",
+                    record_id=rid if isinstance(rid, str) else None,
+                )
+            )
+            continue
+        finding = by_id.get(rid)
+        if finding is None:
+            errors.append(
+                _records_error(
+                    "action", i, f"record_ids[{i}]", "record_id",
+                    f"unknown record_id {rid!r}: not present in records.json",
+                    record_id=rid,
+                )
+            )
+        else:
+            resolved.append(_resolve_action_finding(finding))
+
+    if errors:
+        return None, errors
+
+    expanded = {
+        "valid": True,
+        "schema_version": RECORDS_SCHEMA_VERSION,
+        "action": action,
+        "run_id": run_id,
+        "instructions": instructions or "",
+        "record_count": len(resolved),
+        "findings": resolved,
+    }
+    return expanded, []
+
+
+def _load_records_only(path: str | os.PathLike) -> tuple[object, dict | None]:
+    """Read + JSON-parse *path* without full schema validation.
+
+    The action round-trip runs against an already-rendered (hence already
+    schema-validated) records.json, so re-validating the whole envelope here would
+    let an unrelated field error block a legitimate action. Returns ``(data,
+    error)`` where ``error`` is a single envelope-scoped dict on a read/parse
+    failure (``data`` then ``None``), mirroring :func:`load_and_validate_records`.
+    """
+    try:
+        with open(path, encoding="utf-8") as fh:
+            raw = fh.read()
+    except FileNotFoundError:
+        return None, _records_error(
+            "envelope", None, "$", None, f"records.json not found: {path}"
+        )
+    except OSError as exc:
+        return None, _records_error(
+            "envelope", None, "$", None, f"could not read records.json: {exc}"
+        )
+    try:
+        return json.loads(raw), None
+    except json.JSONDecodeError as exc:
+        return None, _records_error(
+            "envelope", None, "$", None, f"records.json is not valid JSON: {exc}"
+        )
+
+
+def _split_record_ids(raw: str | None) -> list[str]:
+    """Parse the comma-separated ``--record-ids`` value into a de-duped list.
+
+    record_ids are per-run tokens (``r1``, ``r2``, …) so a comma is a safe
+    separator. Order is preserved (first-seen) and blanks/dupes are dropped.
+    """
+    if not raw:
+        return []
+    seen: set[str] = set()
+    ids: list[str] = []
+    for tok in raw.split(","):
+        tok = tok.strip()
+        if tok and tok not in seen:
+            seen.add(tok)
+            ids.append(tok)
+    return ids
+
+
+def _emit_action_error(
+    path: str, run_id: object, action: str | None, errors: list[dict]
+) -> None:
+    """Print the structured action-validation failure payload to stderr."""
+    payload = {
+        "valid": False,
+        "schema_version": RECORDS_SCHEMA_VERSION,
+        "records_path": str(path),
+        "run_id": run_id,
+        "action": action,
+        "error_count": len(errors),
+        "errors": errors,
+    }
+    print(json.dumps(payload, indent=2), file=sys.stderr)
+
+
+def validate_action_command(args: argparse.Namespace) -> None:
+    """CLI: validate/expand a posted canvas action against records.json.
+
+    On success prints the resolved action JSON to stdout (exit 0). On a forged
+    run_id, unknown record_id, or a missing/unparseable records.json, prints the
+    structured errors to stderr and exits 1 — so the orchestrator rejects the
+    action instead of executing it. ``--apply-disregard`` additionally persists the
+    (validated) ids as disregarded run state after a successful validation; it is
+    the only side effect, gated behind the human-confirmation step in SKILL.md.
+    """
+    path: str = args.records
+    posted_run_id = args.run_id
+    action = args.action
+    instructions = args.instructions or ""
+    record_ids = _split_record_ids(args.record_ids)
+
+    data, load_error = _load_records_only(path)
+    if load_error is not None:
+        _emit_action_error(path, posted_run_id, action, [load_error])
+        sys.exit(1)
+
+    resolved, errors = validate_action(
+        data, posted_run_id, record_ids, action=action, instructions=instructions
+    )
+    if errors:
+        _emit_action_error(path, posted_run_id, action, errors)
+        sys.exit(1)
+
+    assert resolved is not None  # errors empty => resolved populated
+    resolved["records_path"] = str(path)
+
+    # Disregard is the one action that persists state. Only after a successful
+    # validation (so a forged run_id / unknown id can never write state).
+    if getattr(args, "apply_disregard", False):
+        run_dir = args.run_dir or os.path.dirname(path) or "."
+        state = persist_disregard(run_dir, posted_run_id, record_ids)
+        resolved["disregarded"] = state.get("disregarded", [])
+        resolved["run_state_path"] = _run_state_path(run_dir)
+
+    # ensure_ascii (default) keeps this pure-ASCII, so a plain print is encoding
+    # safe even when the orchestrator pipes stdout under a non-UTF-8 console.
+    print(json.dumps(resolved, indent=2))
 
 
 # ---------------------------------------------------------------------------
@@ -3322,6 +3672,49 @@ def main() -> int:
         help="Canvas template path (default: the packaged review-canvas.html)",
     )
     render_parser.set_defaults(func=render_review)
+
+    # validate-action subcommand
+    action_parser = subparsers.add_parser(
+        "validate-action",
+        help="Validate/expand a posted canvas action (fix/disregard/document) against records.json",
+    )
+    action_parser.add_argument(
+        "--records",
+        required=True,
+        help="Path to the records.json envelope the canvas was rendered from",
+    )
+    action_parser.add_argument(
+        "--run-id",
+        required=True,
+        help="The run_id from the posted action (must match records.json's run.run_id)",
+    )
+    action_parser.add_argument(
+        "--record-ids",
+        required=True,
+        help="Comma-separated stable record_ids the action targets (e.g. r1,r3,r7)",
+    )
+    action_parser.add_argument(
+        "--action",
+        default=None,
+        help="The namespaced action string (focused-review.fix/.disregard/.document)",
+    )
+    action_parser.add_argument(
+        "--instructions",
+        default="",
+        help="Free-text instructions from the action bar (echoed back in the result)",
+    )
+    action_parser.add_argument(
+        "--apply-disregard",
+        action="store_true",
+        help="After validation, persist the record_ids as disregarded run state "
+             "(canvas dims them across re-renders). Use only after human confirmation.",
+    )
+    action_parser.add_argument(
+        "--run-dir",
+        default=None,
+        help="Run directory for run-state.json (default: the records.json file's directory)",
+    )
+    action_parser.set_defaults(func=validate_action_command)
 
     args = parser.parse_args()
     args.func(args)

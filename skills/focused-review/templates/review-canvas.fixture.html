@@ -475,6 +475,11 @@
   }
 
   function restoreState() {
+    // Seed from server-rendered dimmed classes so a persisted disregard survives a
+    // cold load, not just an in-session morph (see the template for the rationale).
+    all(".finding").forEach(function (f) {
+      if (f.classList.contains("dimmed")) state.disregarded.add(f.getAttribute("data-record-id"));
+    });
     var present = presentIds();
     pruneTo(state.selected, present);
     pruneTo(state.disregarded, present);

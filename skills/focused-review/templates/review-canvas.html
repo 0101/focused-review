@@ -572,6 +572,13 @@
   }
 
   function restoreState() {
+    // Seed from server-rendered dimmed classes: render-review bakes the persisted
+    // disregard (read back from run-state.json) into the HTML, so a cold canvas load
+    // — not just an in-session morph where the click handler already populated the set
+    // — keeps those findings dimmed. Disregard is add-only, so this union is safe.
+    all(".finding").forEach(function (f) {
+      if (f.classList.contains("dimmed")) state.disregarded.add(f.getAttribute("data-record-id"));
+    });
     // Prune tracked state to record_ids still present: a morph can drop a finding from
     // the selectable set (e.g. it is re-categorized invalid and loses its checkbox), so
     // the count, button enabled-state and posted record_ids never reference off-screen ids.
