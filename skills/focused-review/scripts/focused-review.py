@@ -18,6 +18,16 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
+# Optional dependency: nh3 (Rust `ammonia`) sanitizes assessor-authored rich
+# detail sidecars before they are embedded in the canvas. It is declared as a
+# core dependency (installed out the gate), but the render path fails closed if
+# the import is ever missing — without the sanitizer no raw HTML is emitted, the
+# canvas falls back to escaped text, and the `rich_html` capability reports off.
+try:
+    import nh3 as _nh3
+except ImportError:  # pragma: no cover - fail-closed path, exercised via monkeypatch
+    _nh3 = None
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -2699,12 +2709,170 @@ def _strip_template_doc_comment(template: str) -> str:
     return prefix[:comment_idx] + template[head_idx:]
 
 
-def _canvas_finding_block(finding: dict) -> str:
+# ── Detail-sidecar sanitization (Phase 4: nh3, fail-closed) ──────────────────
+#
+# Reviewed content is untrusted (diffs may come from untrusted PR contributors),
+# so an assessor-authored ``A-XX-detail.html`` sidecar is sanitized through nh3
+# (Rust `ammonia`) before it is embedded in the canvas. Division of duties (see
+# the template CSP <meta> + docs/spec/canvas-review-report.md):
+#   * nh3 = script — an HTML + SVG tag/attribute allowlist that keeps inline
+#     ``style`` but strips <script>/on*/``javascript:``/SVG animation
+#     (animate/set/...)/foreignObject and every external href.
+#   * CSP = exfil — img/font/connect-src 'self' data: blocks the residual
+#     url()/<img>/fetch beacon vector for the sanitized-but-untrusted markup.
+# Fail-closed: when nh3 is not importable, sanitize_detail_html returns None and
+# the canvas panel renders the escaped structural text fields only — raw HTML is
+# never emitted.
+
+# HTML tags the rich-detail palette (code-block / callout / before-after / flow)
+# and ordinary prose need. Scripting, embedding, and form tags are absent, so
+# nh3 strips them.
+_DETAIL_HTML_TAGS = frozenset({
+    "div", "span", "p", "pre", "code", "samp", "kbd", "var",
+    "strong", "em", "b", "i", "u", "s", "small", "mark", "sub", "sup",
+    "br", "hr", "wbr",
+    "h1", "h2", "h3", "h4", "h5", "h6",
+    "ul", "ol", "li", "dl", "dt", "dd",
+    "table", "thead", "tbody", "tfoot", "tr", "td", "th", "caption", "col", "colgroup",
+    "a", "abbr", "blockquote", "figure", "figcaption",
+})
+
+# SVG tags for flow / timing / call-chain diagrams. The scripting and animation
+# vectors — ``script``, ``animate*``/``set``, and the ``foreignObject`` HTML
+# escape hatch — are deliberately excluded (see _DETAIL_CLEAN_CONTENT_TAGS).
+_DETAIL_SVG_TAGS = frozenset({
+    "svg", "g", "defs", "symbol", "use", "title", "desc",
+    "path", "rect", "circle", "ellipse", "line", "polyline", "polygon",
+    "text", "tspan",
+    "marker", "linearGradient", "radialGradient", "stop", "pattern", "clipPath", "mask",
+})
+
+_DETAIL_TAGS = _DETAIL_HTML_TAGS | _DETAIL_SVG_TAGS
+
+# Attributes allowed on every tag: presentational/global HTML, ARIA, and the SVG
+# geometry/paint/text presentation set. None of these can execute script (event
+# handlers are simply absent, so nh3 drops them); ``style`` is kept on purpose
+# (CSP owns the exfil vector). They are inert on HTML elements, so allowing the
+# SVG attributes globally keeps the map small without widening the attack surface.
+_DETAIL_GLOBAL_ATTRS = frozenset({
+    "class", "style", "id", "title", "role", "lang", "dir",
+    "aria-hidden", "aria-label", "aria-labelledby", "aria-describedby",
+    # SVG geometry
+    "x", "y", "x1", "y1", "x2", "y2", "cx", "cy", "r", "rx", "ry", "dx", "dy",
+    "width", "height", "d", "points", "transform", "viewBox", "preserveAspectRatio",
+    "offset", "fx", "fy", "refX", "refY", "orient", "markerWidth", "markerHeight",
+    "markerUnits", "gradientUnits", "gradientTransform", "spreadMethod",
+    "patternUnits", "patternContentUnits", "clipPathUnits", "maskUnits",
+    # SVG paint / stroke
+    "fill", "fill-opacity", "fill-rule", "stroke", "stroke-width", "stroke-opacity",
+    "stroke-linecap", "stroke-linejoin", "stroke-dasharray", "stroke-dashoffset",
+    "stroke-miterlimit", "opacity", "color", "stop-color", "stop-opacity",
+    "marker-start", "marker-mid", "marker-end", "clip-path", "clip-rule", "mask",
+    # SVG text
+    "text-anchor", "dominant-baseline", "alignment-baseline", "baseline-shift",
+    "font-family", "font-size", "font-weight", "font-style", "letter-spacing",
+    "xml:space", "xmlns", "xmlns:xlink",
+    # HTML table layout
+    "colspan", "rowspan", "span", "scope", "headers", "abbr",
+})
+
+# href/xlink:href are allowed only where references make sense; their *values*
+# are still restricted to same-document fragments by _detail_attribute_filter.
+_DETAIL_ATTRIBUTES = {
+    "*": _DETAIL_GLOBAL_ATTRS,
+    "a": frozenset({"href"}),
+    "use": frozenset({"href", "xlink:href"}),
+}
+
+# Tags whose entire CONTENT (not just the tag) is removed — scripting, raw CSS,
+# SVG animation, and the foreignObject HTML-in-SVG escape hatch. None overlap the
+# allowlist above (nh3 forbids a tag appearing in both sets).
+_DETAIL_CLEAN_CONTENT_TAGS = frozenset({
+    "script", "style", "foreignObject",
+    "animate", "animateTransform", "animateMotion", "set", "mpath",
+})
+
+# URL-bearing attributes whose value must be a same-document fragment (``#...``).
+_DETAIL_URL_ATTRS = frozenset({"href", "xlink:href", "src"})
+
+
+def _detail_attribute_filter(tag: str, attr: str, value: str) -> str | None:
+    """nh3 per-attribute filter enforcing the "no external href" rule.
+
+    Any href/xlink:href/src is kept only when it is a same-document fragment
+    (``#id`` — e.g. an SVG ``<use>`` or gradient reference); every external,
+    ``javascript:``, or ``data:`` target is dropped. All other attributes pass
+    through unchanged (the tag/attribute allowlist already constrained them).
+    """
+    if attr.lower() in _DETAIL_URL_ATTRS:
+        return value if value.startswith("#") else None
+    return value
+
+
+def sanitize_detail_html(raw: str) -> str | None:
+    """Sanitize an assessor-authored detail fragment via nh3 (fail-closed).
+
+    Returns the nh3-cleaned HTML/SVG, or ``None`` when nh3 is unavailable — the
+    fail-closed contract: without the sanitizer the caller emits the escaped
+    structural text fields only, never raw HTML.
+    """
+    if _nh3 is None:
+        return None
+    return _nh3.clean(
+        raw,
+        tags=set(_DETAIL_TAGS),
+        clean_content_tags=set(_DETAIL_CLEAN_CONTENT_TAGS),
+        attributes={tag: set(attrs) for tag, attrs in _DETAIL_ATTRIBUTES.items()},
+        attribute_filter=_detail_attribute_filter,
+        strip_comments=True,
+        link_rel="noopener noreferrer",
+    )
+
+
+def _detail_sidecar_path(run_dir: str, assessment_id: str) -> str:
+    """Path to a finding's optional rich-detail sidecar within the run dir."""
+    return os.path.join(run_dir, "assessments", f"{assessment_id}-detail.html")
+
+
+def _resolve_finding_detail(run_dir: str | None, finding: dict) -> str | None:
+    """Load + sanitize a finding's rich-detail sidecar, or ``None``.
+
+    Returns ``None`` — so the caller falls back to escaped text — when: the
+    finding has no detail, there is no run dir / assessment id to locate it, the
+    ``assessment_id`` is not a safe filename token, the sidecar file is missing
+    or unreadable, nh3 is unavailable (fail-closed), or the fragment sanitizes to
+    nothing.
+    """
+    if not run_dir or not finding.get("has_detail"):
+        return None
+    assessment_id = finding.get("assessment_id")
+    if not assessment_id:
+        return None
+    # assessment_id locates a file, and records.json is authored by an LLM from
+    # untrusted diff content, so a prompt-injected id must not traverse out of
+    # {run_dir}/assessments (e.g. "../../etc/passwd") or smuggle a null byte
+    # (which open() raises ValueError on, aborting the always-on canvas render).
+    # The assessor convention is a plain "A-NN" token; reject anything else.
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", assessment_id):
+        return None
+    try:
+        with open(_detail_sidecar_path(run_dir, assessment_id), encoding="utf-8") as fh:
+            raw = fh.read()
+    except (OSError, ValueError):
+        return None
+    cleaned = sanitize_detail_html(raw)
+    if cleaned is None or not cleaned.strip():
+        return None
+    return cleaned
+
+
+def _canvas_finding_block(finding: dict, detail_html: str | None = None) -> str:
     """One ``.finding`` accordion block for the canvas (every text field escaped).
 
-    The optional ``has_detail`` rich-HTML sidecar is embedded by Phase 4 (nh3
-    sanitization); until then the panel renders the escaped structural fields
-    only — exactly the fail-closed "plain escaped text" behaviour.
+    ``detail_html`` is the already-nh3-sanitized rich-detail fragment (or
+    ``None``). When present it is embedded after the structural fields, wrapped in
+    ``<div class="rich-detail">``; when absent the panel renders the escaped
+    structural fields only — the fail-closed "plain escaped text" behaviour.
     """
     rid = finding.get("record_id", "")
     number = finding.get("display_number")
@@ -2739,6 +2907,14 @@ def _canvas_finding_block(finding: dict) -> str:
             "          <div class=\"detail-suggestion\">\n"
             "            <div class=\"detail-label\">Suggestion</div>\n"
             f"            <p>{html.escape(finding['suggestion'])}</p>\n"
+            "          </div>"
+        )
+    if detail_html:
+        # Already nh3-sanitized; embedded raw (not escaped) inside the palette
+        # wrapper. html.escape on it would defeat the whole rich-detail feature.
+        sections.append(
+            "          <div class=\"rich-detail\">\n"
+            f"{detail_html}\n"
             "          </div>"
         )
     detail_content = "\n".join(sections)
@@ -2783,7 +2959,7 @@ def _canvas_quality_item(note: dict) -> str:
     )
 
 
-def render_canvas_html(data: dict, template: str) -> str:
+def render_canvas_html(data: dict, template: str, details: dict[str, str] | None = None) -> str:
     """Fill the canvas template with pre-rendered, escaped markup.
 
     A single-pass regex substitution replaces every placeholder exactly once, so
@@ -2791,12 +2967,21 @@ def render_canvas_html(data: dict, template: str) -> str:
     ``{{RUN_ID}}`` is escaped for an attribute context; escaped finding text can
     never forge a ``<!-- FR:* -->`` marker because ``html.escape`` turns ``<``
     into ``&lt;``.
+
+    ``details`` maps a finding's ``record_id`` to its already-nh3-sanitized
+    rich-detail fragment (built by the render-review CLI handler, which owns the
+    file IO + sanitization). Absent or unmapped findings render text-only — the
+    fail-closed default, so callers without sidecars get the Phase 3 behaviour.
     """
+    details = details or {}
     run = data.get("run", {})
     findings = data.get("findings", [])
     notes = data.get("rule_quality_notes", []) or []
     confirmed, questionable, invalid = _partition_findings(findings)
     actionable_count = len(confirmed) + len(questionable)
+
+    def block(finding: dict) -> str:
+        return _canvas_finding_block(finding, details.get(finding.get("record_id")))
 
     meta = (
         f"Scope: {html.escape(str(run.get('scope', '')))} · "
@@ -2815,9 +3000,9 @@ def render_canvas_html(data: dict, template: str) -> str:
         "<!-- FR:META -->": meta,
         "<!-- FR:SUMMARY_BADGES -->": badges,
         "<!-- FR:CONFIRMED_COUNT -->": str(len(confirmed)),
-        "<!-- FR:CONFIRMED_ROWS -->": "\n".join(_canvas_finding_block(f) for f in confirmed),
+        "<!-- FR:CONFIRMED_ROWS -->": "\n".join(block(f) for f in confirmed),
         "<!-- FR:QUESTIONABLE_COUNT -->": str(len(questionable)),
-        "<!-- FR:QUESTIONABLE_ROWS -->": "\n".join(_canvas_finding_block(f) for f in questionable),
+        "<!-- FR:QUESTIONABLE_ROWS -->": "\n".join(block(f) for f in questionable),
         "<!-- FR:INVALID_SUMMARY -->": html.escape(_invalid_summary_text(len(invalid))),
         "<!-- FR:INVALID_ROWS -->": "\n".join(_canvas_invalid_row(f) for f in invalid),
         "<!-- FR:QUALITY_SUMMARY -->": html.escape(f"Rule Quality Notes ({len(notes)})"),
@@ -2860,6 +3045,24 @@ def _emit_stdout(text: str) -> None:
         sys.stdout.flush()
 
 
+def capabilities(args: argparse.Namespace) -> None:
+    """CLI: report optional-capability availability as JSON to stdout.
+
+    The orchestrator runs this BEFORE assessment to decide whether the assessor
+    may author rich HTML/SVG detail sidecars: ``rich_html`` is on only when nh3
+    is importable, because render-review fails closed to escaped text without it.
+    Pure-ASCII JSON, so a plain ``print`` is safe under any console encoding.
+    """
+    nh3_available = _nh3 is not None
+    payload = {
+        "nh3": nh3_available,
+        "rich_html": nh3_available,
+        "nh3_version": getattr(_nh3, "__version__", None) if nh3_available else None,
+        "schema_version": RECORDS_SCHEMA_VERSION,
+    }
+    print(json.dumps(payload))
+
+
 def render_review(args: argparse.Namespace) -> None:
     """CLI: render review.md, the terminal summary, and the canvas from records.json.
 
@@ -2891,10 +3094,21 @@ def render_review(args: argparse.Namespace) -> None:
     # review.md (Markdown — raw text fields, no HTML escaping).
     _write_text(review_out, render_review_markdown(data))
 
+    # Sanitize each finding's optional rich-detail sidecar (nh3, fail-closed):
+    # has_detail findings get their {run_dir}/assessments/{A-XX}-detail.html
+    # loaded + cleaned; anything else (no nh3, missing file, empty) renders as
+    # escaped text only. Keyed by stable record_id for the canvas renderer.
+    findings = data.get("findings", []) if isinstance(data, dict) else []
+    details: dict[str, str] = {}
+    for finding in findings:
+        cleaned = _resolve_finding_detail(run_dir, finding)
+        if cleaned is not None:
+            details[finding.get("record_id")] = cleaned
+
     # Canvas HTML — ALWAYS written (gitignored, inert when Treemon is down).
     with open(template_path, encoding="utf-8") as fh:
         template = fh.read()
-    _write_text(canvas_out, render_canvas_html(data, template))
+    _write_text(canvas_out, render_canvas_html(data, template, details))
 
     # Terminal summary -> stdout for verbatim relay (UTF-8, locale-independent).
     _emit_stdout(render_terminal_summary(data, review_out))
@@ -3064,6 +3278,13 @@ def main() -> int:
         help="Path to the records.json file to validate",
     )
     validate_parser.set_defaults(func=validate_records_command)
+
+    # capabilities subcommand
+    capabilities_parser = subparsers.add_parser(
+        "capabilities",
+        help="Report optional-capability availability (nh3 / rich_html) as JSON",
+    )
+    capabilities_parser.set_defaults(func=capabilities)
 
     # render-review subcommand
     render_parser = subparsers.add_parser(
