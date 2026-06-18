@@ -1,0 +1,765 @@
+<!DOCTYPE html>
+<html lang="en">
+<!--
+  HAND-FILLED FIXTURE for skills/focused-review/templates/review-canvas.html.
+
+  This is the Phase-1 browser-test fixture: the page shell with every placeholder
+  filled by hand (no Python involved) with representative findings, including two
+  rich-detail sidecars that exercise the .code-block / .highlight-line / .callout /
+  .before-after / .flow palette and an allowlisted inline SVG.
+
+  Open it directly in a browser to verify the accordion, per-row + section-select-all
+  checkboxes, dimming, and the action-bar postMessage payload shape. Keep it in sync
+  with the template's head (<style> + <script>) when that changes.
+-->
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'unsafe-inline' 'self'; style-src 'unsafe-inline' 'self'; img-src 'self' data:; font-src 'self' data:; connect-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none'">
+<title>Focused Review</title>
+<style>
+  :root {
+    --col-cb: 34px;
+    --col-caret: 16px;
+    --col-num: 30px;
+    --col-sev: 74px;
+    --col-found: 200px;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: #1e1e2e;
+    color: #cdd6f4;
+    font-family: system-ui, -apple-system, sans-serif;
+    font-size: 14px;
+    padding: 20px;
+    line-height: 1.5;
+    padding-bottom: 80px;
+  }
+
+  .header { margin-bottom: 20px; }
+  .header h1 { font-size: 18px; color: #89b4fa; margin-bottom: 4px; }
+  .header .meta { color: #6c7086; font-size: 13px; }
+  .summary-badges { display: flex; gap: 12px; margin-top: 10px; flex-wrap: wrap; }
+  .summary-badge {
+    padding: 4px 12px;
+    border-radius: 6px;
+    font-size: 13px;
+    font-weight: 600;
+  }
+  .summary-badge .count { font-size: 16px; margin-right: 4px; }
+  .badge-confirmed { background: #a6e3a122; color: #a6e3a1; }
+  .badge-questionable { background: #f9e2af22; color: #f9e2af; }
+  .badge-invalid { background: #6c708622; color: #6c7086; }
+
+  .review-list { width: 100%; }
+  .list-header {
+    display: grid;
+    grid-template-columns: var(--col-cb) var(--col-caret) var(--col-num) var(--col-sev) var(--col-found) 1fr;
+    gap: 0 10px;
+    padding: 8px 10px;
+    color: #a6adc8;
+    font-size: 13px;
+    font-weight: 600;
+    border-bottom: 2px solid #45475a;
+    position: sticky;
+    top: 0;
+    background: #1e1e2e;
+    z-index: 10;
+  }
+
+  .section-header {
+    display: grid;
+    grid-template-columns: var(--col-cb) 1fr;
+    gap: 0 10px;
+    align-items: center;
+    padding: 14px 10px 6px;
+    border-bottom: 1px solid #45475a;
+    color: #6c7086;
+    font-size: 13px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    user-select: none;
+  }
+  .section-empty .section-header { opacity: 0.6; }
+
+  .finding {
+    display: grid;
+    grid-template-columns: var(--col-cb) 1fr;
+    gap: 0 10px;
+    align-items: start;
+    border-bottom: 1px solid #31324488;
+  }
+  .finding > .row-cb { margin-top: 9px; justify-self: center; }
+  .finding-d { min-width: 0; }
+
+  .finding-summary {
+    display: grid;
+    grid-template-columns: var(--col-caret) var(--col-num) var(--col-sev) var(--col-found) 1fr;
+    gap: 0 10px;
+    align-items: start;
+    padding: 7px 10px 7px 0;
+    cursor: pointer;
+    list-style: none;
+    user-select: none;
+    transition: background 0.1s;
+  }
+  .finding-summary::-webkit-details-marker { display: none; }
+  .finding-summary::marker { content: ''; }
+  .finding-summary:hover { background: #313244; }
+  .finding-d[open] > .finding-summary { background: #313244; }
+  .finding-d[open] > .finding-summary .title { color: #89b4fa; }
+
+  .caret { color: #6c7086; font-size: 11px; line-height: 1.7; text-align: center; }
+  .caret::before { content: '▸'; }
+  .finding-d[open] > .finding-summary .caret::before { content: '▾'; }
+
+  .num { text-align: center; color: #6c7086; }
+  .title { color: #cdd6f4; }
+
+  .sev {
+    display: inline-block;
+    padding: 1px 8px;
+    border-radius: 10px;
+    font-size: 12px;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  .sev-critical { background: #f38ba833; color: #f38ba8; }
+  .sev-high { background: #fab38733; color: #fab387; }
+  .sev-medium { background: #f9e2af33; color: #f9e2af; }
+  .sev-low { background: #a6adc833; color: #a6adc8; }
+
+  .found-by { display: flex; flex-wrap: wrap; gap: 3px; }
+  .found-tag {
+    display: inline-block;
+    padding: 1px 6px;
+    border-radius: 8px;
+    font-size: 11px;
+    white-space: nowrap;
+  }
+  .found-tag-concern { background: #cba6f722; color: #cba6f7; }
+  .found-tag-rule { background: #89b4fa22; color: #89b4fa; }
+
+  .row-cb, .section-cb {
+    accent-color: #89b4fa;
+    width: 15px;
+    height: 15px;
+    cursor: pointer;
+  }
+
+  .finding.dimmed { opacity: 0.35; }
+  .finding.dimmed .title { text-decoration: line-through; }
+
+  .detail-content {
+    background: #11111b;
+    border-top: 1px solid #45475a;
+    padding: 14px 16px;
+  }
+  .detail-content p { margin: 6px 0; }
+  .detail-content strong { color: #cdd6f4; }
+  .detail-content code {
+    background: #45475a;
+    padding: 1px 5px;
+    border-radius: 3px;
+    font-family: 'Cascadia Code', 'Fira Code', Consolas, monospace;
+    font-size: 13px;
+  }
+  .detail-content pre {
+    background: #1e1e2e;
+    border: 1px solid #45475a;
+    border-radius: 4px;
+    padding: 10px 12px;
+    margin: 8px 0;
+    overflow-x: auto;
+    font-family: 'Cascadia Code', 'Fira Code', Consolas, monospace;
+    font-size: 13px;
+    line-height: 1.5;
+  }
+  .detail-section { margin-bottom: 10px; }
+  .detail-label {
+    color: #6c7086;
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 3px;
+  }
+  .detail-file { color: #89b4fa; font-size: 13px; }
+  .detail-suggestion {
+    background: #a6e3a10d;
+    border-left: 3px solid #a6e3a1;
+    padding: 8px 12px;
+    border-radius: 0 4px 4px 0;
+    margin: 8px 0;
+  }
+  .detail-assessment {
+    background: #89b4fa0d;
+    border-left: 3px solid #89b4fa;
+    padding: 8px 12px;
+    border-radius: 0 4px 4px 0;
+    margin: 8px 0;
+    color: #a6adc8;
+  }
+
+  .rich-detail { margin-top: 12px; padding-top: 10px; border-top: 1px dashed #45475a; }
+
+  .code-block {
+    background: #1e1e2e;
+    border: 1px solid #45475a;
+    border-radius: 4px;
+    padding: 10px 12px;
+    margin: 8px 0;
+    overflow-x: auto;
+    font-family: 'Cascadia Code', 'Fira Code', Consolas, monospace;
+    font-size: 13px;
+    line-height: 1.55;
+    white-space: pre;
+    tab-size: 2;
+  }
+  .highlight-line {
+    display: block;
+    margin: 0 -12px;
+    padding: 0 12px 0 9px;
+    background: #f9e2af14;
+    border-left: 3px solid #f9e2af;
+  }
+  .code-block .highlight-line.add { background: #a6e3a114; border-left-color: #a6e3a1; }
+  .code-block .highlight-line.del { background: #f38ba814; border-left-color: #f38ba8; }
+
+  .callout {
+    background: #89b4fa12;
+    border-left: 3px solid #89b4fa;
+    border-radius: 0 4px 4px 0;
+    padding: 8px 12px;
+    margin: 8px 0;
+    color: #a6adc8;
+  }
+  .callout.warn { background: #f9e2af12; border-left-color: #f9e2af; }
+  .callout.danger { background: #f38ba812; border-left-color: #f38ba8; }
+  .callout.ok { background: #a6e3a112; border-left-color: #a6e3a1; }
+
+  .before-after {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+    margin: 8px 0;
+  }
+  .before-after > * { min-width: 0; }
+  .before-after .before { border-left: 3px solid #f38ba8; padding-left: 8px; }
+  .before-after .after { border-left: 3px solid #a6e3a1; padding-left: 8px; }
+  .before-after .ba-label {
+    color: #6c7086;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 4px;
+  }
+
+  .flow {
+    margin: 10px 0;
+    padding: 10px;
+    background: #11111b;
+    border: 1px solid #45475a;
+    border-radius: 4px;
+    overflow-x: auto;
+    text-align: center;
+  }
+  .flow svg { max-width: 100%; height: auto; }
+  .flow text { fill: #cdd6f4; }
+
+  @media (max-width: 640px) {
+    .before-after { grid-template-columns: 1fr; }
+  }
+
+  .collapsible {
+    margin-top: 16px;
+    background: #313244;
+    border-radius: 8px;
+    border: 1px solid #45475a;
+  }
+  .collapsible-summary {
+    padding: 10px 16px;
+    cursor: pointer;
+    color: #6c7086;
+    font-size: 13px;
+    user-select: none;
+    list-style: none;
+  }
+  .collapsible-summary::-webkit-details-marker { display: none; }
+  .collapsible-summary::marker { content: ''; }
+  .collapsible-summary:hover { color: #a6adc8; }
+  .collapsible-summary::before { content: '▸ '; }
+  .collapsible[open] > .collapsible-summary::before { content: '▾ '; }
+  .collapsible-body { padding: 0 16px 12px; }
+
+  .invalid-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .invalid-table th {
+    text-align: left;
+    padding: 6px 8px;
+    color: #6c7086;
+    border-bottom: 1px solid #45475a;
+    font-weight: 600;
+  }
+  .invalid-table td {
+    padding: 6px 8px;
+    border-bottom: 1px solid #31324488;
+    color: #a6adc8;
+  }
+
+  .quality-item { margin: 8px 0; color: #a6adc8; }
+  .quality-item strong { color: #f9e2af; }
+
+  .action-bar {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    background: #313244;
+    border-top: 1px solid #585b70;
+    padding: 10px 20px;
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    z-index: 100;
+  }
+  .instructions-input {
+    flex: 1;
+    min-width: 200px;
+    background: #1e1e2e;
+    color: #cdd6f4;
+    border: 1px solid #585b70;
+    border-radius: 4px;
+    padding: 8px 12px;
+    font-size: 14px;
+    font-family: inherit;
+  }
+  .instructions-input::placeholder { color: #6c7086; }
+  .action-btn {
+    padding: 8px 16px;
+    border-radius: 4px;
+    border: 1px solid #585b70;
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 500;
+    white-space: nowrap;
+    font-family: inherit;
+  }
+  .action-btn:disabled { opacity: 0.4; cursor: default; }
+  .action-fix { background: #a6e3a1; color: #1e1e2e; border-color: #a6e3a1; }
+  .action-fix:hover:not(:disabled) { background: #94d990; }
+  .action-disregard { background: #45475a; color: #cdd6f4; }
+  .action-disregard:hover:not(:disabled) { background: #585b70; }
+  .action-doc { background: #89b4fa; color: #1e1e2e; border-color: #89b4fa; }
+  .action-doc:hover:not(:disabled) { background: #7ba8f0; }
+  .selection-count { color: #6c7086; font-size: 13px; white-space: nowrap; min-width: 80px; }
+</style>
+
+<script>
+(function () {
+  "use strict";
+  if (window.__frCanvasInit) return;
+  window.__frCanvasInit = true;
+
+  var NS = "focused-review.";
+  var state = {
+    selected: new Set(),
+    disregarded: new Set(),
+    openId: null
+  };
+
+  function all(sel, root) {
+    return Array.prototype.slice.call((root || document).querySelectorAll(sel));
+  }
+  function recordId(el) {
+    var f = el && el.closest ? el.closest(".finding") : null;
+    return f ? f.getAttribute("data-record-id") : null;
+  }
+  function getRunId() {
+    var el = document.querySelector("[data-run-id]");
+    return el ? el.getAttribute("data-run-id") : "";
+  }
+  function getParentOrigin() {
+    // Trusted Treemon parent origin, baked into data-parent-origin by render-review.
+    // Pins the outbound postMessage target and gates inbound messages so the action
+    // channel is origin-validated instead of a wildcard broadcast.
+    var el = document.querySelector("[data-parent-origin]");
+    var raw = el ? el.getAttribute("data-parent-origin") : "";
+    // Normalize to a bare origin: inbound e.origin is never trailing-slashed and a
+    // postMessage target origin must be slash-free, so a misconfigured value such as
+    // "http://host:5000/" can't silently break the action / morph-restore channel.
+    return raw.trim().replace(/\/+$/, "");
+  }
+  function instructions() {
+    var box = document.querySelector("[data-instructions]");
+    return box ? box.value.trim() : "";
+  }
+
+  function updateBar() {
+    var n = state.selected.size;
+    var c = document.querySelector("[data-sel-count]");
+    if (c) c.textContent = n + " selected";
+    all("[data-action]").forEach(function (b) { b.disabled = n === 0; });
+  }
+
+  function syncSections() {
+    all(".finding-section").forEach(function (sec) {
+      var cbs = all(".row-cb", sec);
+      var total = cbs.length, checked = 0;
+      cbs.forEach(function (cb) { if (cb.checked) checked++; });
+      var sc = sec.querySelector(".section-cb");
+      if (sc) {
+        sc.checked = total > 0 && checked === total;
+        sc.indeterminate = checked > 0 && checked < total;
+      }
+    });
+  }
+
+  document.addEventListener("change", function (e) {
+    var t = e.target;
+    if (!t || !t.classList) return;
+    if (t.classList.contains("row-cb")) {
+      var id = recordId(t);
+      if (id) { if (t.checked) state.selected.add(id); else state.selected.delete(id); }
+      syncSections();
+      updateBar();
+    } else if (t.classList.contains("section-cb")) {
+      var sec = t.closest(".finding-section");
+      if (!sec) return;
+      all(".row-cb", sec).forEach(function (cb) {
+        cb.checked = t.checked;
+        var rid = recordId(cb);
+        if (rid) { if (t.checked) state.selected.add(rid); else state.selected.delete(rid); }
+      });
+      syncSections();
+      updateBar();
+    }
+  });
+
+  document.addEventListener("click", function (e) {
+    var btn = e.target && e.target.closest ? e.target.closest("[data-action]") : null;
+    if (!btn || btn.disabled) return;
+    var action = btn.getAttribute("data-action") || "";
+    if (action.indexOf(NS) !== 0) return;
+    var ids = Array.from(state.selected);
+    if (!ids.length) return;
+
+    window.parent.postMessage({
+      action: action,
+      run_id: getRunId(),
+      record_ids: ids,
+      instructions: instructions()
+    }, getParentOrigin());
+
+    // No optimistic disregard dimming (C-17): dimming is server-seeded via restoreState.
+
+    state.selected.clear();
+    all(".row-cb").forEach(function (cb) { cb.checked = false; });
+    syncSections();
+    updateBar();
+  });
+
+  document.addEventListener("toggle", function (e) {
+    var d = e.target;
+    if (!d || !d.classList || !d.classList.contains("finding-d")) return;
+    if (d.open) {
+      state.openId = recordId(d);
+    } else {
+      var stillOpen = document.querySelector(".finding-d[open]");
+      state.openId = stillOpen ? recordId(stillOpen) : null;
+    }
+  }, true);
+
+  function presentIds() {
+    var s = new Set();
+    all(".finding").forEach(function (f) { s.add(f.getAttribute("data-record-id")); });
+    return s;
+  }
+  function pruneTo(set, present) {
+    Array.from(set).forEach(function (id) { if (!present.has(id)) set.delete(id); });
+  }
+
+  function restoreState() {
+    // Seed from server-rendered dimmed classes so a persisted disregard survives a
+    // cold load, not just an in-session morph (see the template for the rationale).
+    all(".finding").forEach(function (f) {
+      if (f.classList.contains("dimmed")) state.disregarded.add(f.getAttribute("data-record-id"));
+    });
+    var present = presentIds();
+    pruneTo(state.selected, present);
+    pruneTo(state.disregarded, present);
+    if (state.openId && !present.has(state.openId)) state.openId = null;
+
+    all(".finding").forEach(function (f) {
+      var id = f.getAttribute("data-record-id");
+      var cb = f.querySelector(".row-cb");
+      if (cb) cb.checked = state.selected.has(id);
+      f.classList.toggle("dimmed", state.disregarded.has(id));
+      if (id && id === state.openId) {
+        var d = f.querySelector(".finding-d");
+        if (d && !d.open) d.open = true;
+      }
+    });
+    syncSections();
+    updateBar();
+  }
+
+  window.addEventListener("message", function (e) {
+    // Origin-validated inbound channel (counterpart to the pinned postMessage target):
+    // only honor morph signals from the trusted Treemon parent window + origin, so an
+    // untrusted framing parent cannot drive the canvas re-render path.
+    if (e.origin !== getParentOrigin()) return;
+    if (e.source !== window.parent) return;
+    var a = e && e.data && e.data.action;
+    if (a === "morph-complete" || a === "content-updated") restoreState();
+  });
+  document.addEventListener("morph-complete", restoreState);
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", restoreState);
+  } else {
+    restoreState();
+  }
+})();
+</script>
+</head>
+<body data-run-id="test-run-20260616-112540" data-parent-origin="http://localhost:5000">
+
+<div class="header">
+  <h1>Focused Review</h1>
+  <div class="meta">Scope: branch · 2026-06-04 · 17 rules + 7 concerns → 23 unique → 5 actionable</div>
+  <div class="summary-badges">
+    <span class="summary-badge badge-confirmed"><span class="count">3</span> Confirmed</span>
+    <span class="summary-badge badge-questionable"><span class="count">2</span> Questionable</span>
+    <span class="summary-badge badge-invalid"><span class="count">2</span> Invalid</span>
+  </div>
+</div>
+
+<div class="review-list">
+  <div class="list-header">
+    <span></span>
+    <span></span>
+    <span>#</span>
+    <span>Severity</span>
+    <span>Found by</span>
+    <span>Issue</span>
+  </div>
+
+  <section class="finding-section" data-section="confirmed">
+    <div class="section-header">
+      <input type="checkbox" class="section-cb" aria-label="Select all confirmed findings">
+      <span class="section-title">Confirmed Findings (3)</span>
+    </div>
+
+    <div class="finding" data-record-id="A-01">
+      <input type="checkbox" class="row-cb" aria-label="Select finding 1: Incremental refresh forces dashboard visible even when Issues tab is selected">
+      <details class="finding-d" name="findings">
+        <summary class="finding-summary">
+          <span class="caret" aria-hidden="true"></span>
+          <span class="num">1</span>
+          <span class="sev sev-high">High</span>
+          <span class="found-by"><span class="found-tag found-tag-concern">bugs(opus,codex)</span></span>
+          <span class="title">Incremental refresh forces dashboard visible even when Issues tab is selected</span>
+        </summary>
+        <div class="detail-content">
+          <div class="detail-section">
+            <div class="detail-label">Location</div>
+            <span class="detail-file">src/Server/BeadspaceTemplate.fs:1120</span> · quickfix
+          </div>
+          <div class="detail-section">
+            <div class="detail-label">Description</div>
+            <p><code>updateDashboard</code> replaces the dashboard DOM element with one generated by <code>renderDashboard</code>, which hardcodes <code>class="view active"</code>. On the Issues tab, the replacement retains <code>active</code>, so both views show at once.</p>
+          </div>
+          <div class="detail-assessment">
+            <div class="detail-label">Assessment</div>
+            <p>Clear, verified bug with a trivially reproducible trigger. Breaks tab navigation for every user after the first 30-second refresh cycle.</p>
+          </div>
+          <div class="detail-suggestion">
+            <div class="detail-label">Suggestion</div>
+            <p>Remove <code>active</code> unconditionally after building the node, then re-add it only when <code>wasActive</code>.</p>
+          </div>
+          <div class="rich-detail">
+            <div class="callout warn">Both views render simultaneously after the first refresh — tab navigation silently breaks for every user.</div>
+            <div class="code-block"><span class="highlight-line del">var newDashView = newDash.firstChild;            // class="view active"</span>
+newDashView.classList.add('active');             // unconditional
+<span class="highlight-line add">newDashView.classList.remove('active');</span>
+<span class="highlight-line add">if (wasActive) newDashView.classList.add('active');</span></div>
+          </div>
+        </div>
+      </details>
+    </div>
+
+    <div class="finding" data-record-id="A-02">
+      <input type="checkbox" class="row-cb" aria-label="Select finding 2: Blocked-only bead sets treated as no issues - deletes dashboard file">
+      <details class="finding-d" name="findings">
+        <summary class="finding-summary">
+          <span class="caret" aria-hidden="true"></span>
+          <span class="num">2</span>
+          <span class="sev sev-high">High</span>
+          <span class="found-by"><span class="found-tag found-tag-concern">bugs(opus,codex)</span></span>
+          <span class="title">Blocked-only bead sets treated as "no issues" — deletes dashboard file</span>
+        </summary>
+        <div class="detail-content">
+          <div class="detail-section">
+            <div class="detail-label">Location</div>
+            <span class="detail-file">src/Server/RefreshScheduler.fs:457</span> · quickfix
+          </div>
+          <div class="detail-section">
+            <div class="detail-label">Description</div>
+            <p>Provisioning uses <code>hasIssues = Open + InProgress + Closed &gt; 0</code>, but <code>BeadsSummary</code> excludes <code>blocked</code>. A repo with only blocked items is misclassified as empty, deleting the dashboard.</p>
+          </div>
+          <div class="detail-assessment">
+            <div class="detail-label">Assessment</div>
+            <p>Every factual claim confirmed by reading the source. Uncommon but real workflow state with a surprising destructive side effect.</p>
+          </div>
+          <div class="detail-suggestion">
+            <div class="detail-label">Suggestion</div>
+            <p>Add <code>Blocked</code> to <code>BeadsSummary</code> and include it in <code>parseCountResponse</code> and <code>hasIssues</code>.</p>
+          </div>
+        </div>
+      </details>
+    </div>
+
+    <div class="finding" data-record-id="A-03">
+      <input type="checkbox" class="row-cb" aria-label="Select finding 3: Dead data-stat update code immediately overwritten by full DOM rebuild">
+      <details class="finding-d" name="findings">
+        <summary class="finding-summary">
+          <span class="caret" aria-hidden="true"></span>
+          <span class="num">3</span>
+          <span class="sev sev-medium">Medium</span>
+          <span class="found-by"><span class="found-tag found-tag-concern">arch(opus)</span><span class="found-tag found-tag-rule">simplicity</span></span>
+          <span class="title">Dead data-stat update code immediately overwritten by full DOM rebuild</span>
+        </summary>
+        <div class="detail-content">
+          <div class="detail-section">
+            <div class="detail-label">Location</div>
+            <span class="detail-file">src/Server/BeadspaceTemplate.fs:1427</span> · quickfix
+          </div>
+          <div class="detail-section">
+            <div class="detail-label">Description</div>
+            <p><code>updateDashboard</code> updates stat cards via <code>data-stat</code> selectors, then immediately replaces the whole <code>view-dashboard</code> subtree — discarding the stat updates.</p>
+          </div>
+          <div class="detail-suggestion">
+            <div class="detail-label">Suggestion</div>
+            <p>Remove the <code>statMap</code> stat-update block and the <code>data-stat</code> attributes from <code>renderDashboard</code>.</p>
+          </div>
+          <div class="rich-detail">
+            <div class="flow">
+              <svg width="340" height="60" viewBox="0 0 340 60" role="img" aria-label="updateDashboard call chain">
+                <rect x="6" y="16" width="130" height="28" rx="4" fill="#313244" stroke="#45475a"></rect>
+                <text x="71" y="34" text-anchor="middle" font-size="12">statMap update</text>
+                <line x1="136" y1="30" x2="196" y2="30" stroke="#6c7086" stroke-width="1.5"></line>
+                <rect x="196" y="16" width="138" height="28" rx="4" fill="#313244" stroke="#45475a"></rect>
+                <text x="265" y="34" text-anchor="middle" font-size="12">replaceChild (rebuild)</text>
+              </svg>
+            </div>
+            <div class="before-after">
+              <div class="before">
+                <div class="ba-label">Before</div>
+                <div class="code-block">statMap loop → textContent
+replaceChild(view-dashboard)</div>
+              </div>
+              <div class="after">
+                <div class="ba-label">After</div>
+                <div class="code-block">replaceChild(view-dashboard)</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </details>
+    </div>
+  </section>
+
+  <section class="finding-section" data-section="questionable">
+    <div class="section-header">
+      <input type="checkbox" class="section-cb" aria-label="Select all questionable findings">
+      <span class="section-title">Questionable Findings (2)</span>
+    </div>
+
+    <div class="finding" data-record-id="A-18">
+      <input type="checkbox" class="row-cb" aria-label="Select finding 4: esc() HTML escaper insufficient for attribute context">
+      <details class="finding-d" name="findings">
+        <summary class="finding-summary">
+          <span class="caret" aria-hidden="true"></span>
+          <span class="num">4</span>
+          <span class="sev sev-low">Low</span>
+          <span class="found-by"><span class="found-tag found-tag-concern">security(opus)</span></span>
+          <span class="title">esc() HTML escaper insufficient for attribute context — double quotes not escaped</span>
+        </summary>
+        <div class="detail-content">
+          <div class="detail-section">
+            <div class="detail-label">Location</div>
+            <span class="detail-file">src/Server/BeadspaceTemplate.fs:1169</span> · quickfix
+          </div>
+          <div class="detail-section">
+            <div class="detail-label">Description</div>
+            <p><code>esc()</code> escapes only <code>&lt;</code>, <code>&gt;</code>, <code>&amp;</code> — not <code>"</code> — while interpolating into a double-quoted attribute. Currently self-XSS only.</p>
+          </div>
+          <div class="detail-assessment">
+            <div class="detail-label">Assessment</div>
+            <p>Technically sound, but the finding's own evidence acknowledges self-XSS only. Trivial defense-in-depth fix; current risk effectively zero.</p>
+          </div>
+          <div class="detail-suggestion">
+            <div class="detail-label">Suggestion</div>
+            <p>Harden <code>esc()</code> to also escape <code>"</code> and <code>'</code>.</p>
+          </div>
+        </div>
+      </details>
+    </div>
+
+    <div class="finding" data-record-id="A-20">
+      <input type="checkbox" class="row-cb" aria-label="Select finding 5: Section divider comment in production code at line 1481">
+      <details class="finding-d" name="findings">
+        <summary class="finding-summary">
+          <span class="caret" aria-hidden="true"></span>
+          <span class="num">5</span>
+          <span class="sev sev-low">Low</span>
+          <span class="found-by"><span class="found-tag found-tag-rule">no-unnecessary-comments</span></span>
+          <span class="title">Section divider comment in production code at line 1481</span>
+        </summary>
+        <div class="detail-content">
+          <div class="detail-section">
+            <p>Technically correct per the rule's literal text, but the dividers navigate an inherently long embedded JS template where the functions are already named. Combined with the pre-existing convention (12 identical dividers), this is Questionable.</p>
+          </div>
+        </div>
+      </details>
+    </div>
+  </section>
+</div>
+
+<details class="collapsible invalid-section">
+  <summary class="collapsible-summary">2 findings filtered as invalid</summary>
+  <div class="collapsible-body">
+    <table class="invalid-table">
+      <thead>
+        <tr><th>ID</th><th>Sev</th><th>Title</th><th>Reason</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>A-09</td><td><span class="sev sev-medium">Med</span></td><td>updateDashboard mixes two DOM update strategies</td><td>Rule exempts sequential steps of a single cohesive operation</td></tr>
+        <tr><td>A-13</td><td><span class="sev sev-low">Low</span></td><td>Section divider at line 1454</td><td>Navigational aid in 600+ line embedded JS</td></tr>
+      </tbody>
+    </table>
+  </div>
+</details>
+
+<details class="collapsible quality-notes" open>
+  <summary class="collapsible-summary">Rule Quality Notes (2)</summary>
+  <div class="collapsible-body">
+    <div class="quality-item"><strong>single-responsibility</strong>: 4 findings, all Invalid. Each flagged sequential steps of a single cohesive operation, which the rule explicitly exempts. — Add examples of exempted orchestrator patterns to the rule's "Right" section.</div>
+    <div class="quality-item"><strong>no-unnecessary-comments</strong>: 10 findings; 4 Invalid, 4 Questionable, 2 Confirmed (Low). Mostly navigational comments in embedded JavaScript inside an F# string template. — Consider an exception for embedded template code.</div>
+  </div>
+</details>
+
+<div class="action-bar">
+  <span class="selection-count" data-sel-count>0 selected</span>
+  <input type="text" class="instructions-input" data-instructions
+         aria-label="Instructions for the selected findings"
+         placeholder="Instructions (e.g., 'fix with minimal changes', 'disregard these for now')">
+  <button class="action-btn action-fix" data-action="focused-review.fix" disabled>🔧 Fix selected</button>
+  <button class="action-btn action-disregard" data-action="focused-review.disregard" disabled>👁 Disregard</button>
+  <button class="action-btn action-doc" data-action="focused-review.document" disabled>📄 Document for later</button>
+</div>
+
+</body>
+</html>
