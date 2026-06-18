@@ -76,9 +76,9 @@ class FamilyRule:
 
     A candidate slug from the available set matches when it starts with
     *prefix*, contains every token in *require*, and contains no token in
-    *exclude*.  Among matches, the *best* is the highest version (then a
-    *prefer* token, then the plainest variant).  *fallback* is the offline
-    default when the live model list cannot be enumerated.
+    *exclude*.  Among matches, the *best* is chosen by *prefer* token first,
+    then the highest version, then the plainest variant.  *fallback* is the
+    offline default when the live model list cannot be enumerated.
     """
 
     prefix: str
@@ -1299,9 +1299,11 @@ def run_concerns(args: argparse.Namespace) -> None:
     retries = args.retries
     inherit_model = getattr(args, "inherit_model", "") or ""
 
-    # Warm the available-model cache once before fanning out so worker threads
-    # share a single ``copilot help config`` query instead of racing on it.
-    _available_models()
+    # Warm the available-model cache once before fanning out, but only if a
+    # concern actually uses a family shorthand — otherwise enumeration is never
+    # needed and we avoid an unnecessary ``copilot help config`` subprocess.
+    if any(str(entry.get("model", "")).lower() in FAMILY_RULES for entry in entries):
+        _available_models()
 
     results: list[dict[str, object]] = []
 

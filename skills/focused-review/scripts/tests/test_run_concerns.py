@@ -959,6 +959,62 @@ class TestRunConcerns:
         assert "Unexpected" in result["error"]
         assert "disk full" in result["error"]
 
+    def test_prewarm_skipped_when_no_family_shorthand(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """With no family shorthand, model enumeration is never invoked."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        entries = [
+            {
+                "concern": "bugs",
+                "model": "inherit",
+                "priority": "high",
+                "prompt_path": ".agents/focused-review/prompts/bugs--inherit.md",
+            }
+        ]
+        _setup_work_dir(repo, entries)
+        _write_finding(repo, "bugs", "inherit")
+
+        args = argparse.Namespace(
+            repo=str(repo), max_workers=1, timeout=60, retries=0, run_dir="",
+        )
+        with patch.object(fr, "_available_models", return_value=()) as mock_avail, patch(
+            "subprocess.run", return_value=_mock_subprocess_success()
+        ):
+            fr.run_concerns(args)
+
+        assert mock_avail.call_count == 0
+
+    def test_prewarm_runs_when_family_shorthand_present(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A family shorthand triggers cache warm-up (enumeration is invoked)."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        entries = [
+            {
+                "concern": "bugs",
+                "model": "opus",
+                "priority": "high",
+                "prompt_path": ".agents/focused-review/prompts/bugs--opus.md",
+            }
+        ]
+        _setup_work_dir(repo, entries)
+        _write_finding(repo, "bugs", "opus")
+
+        args = argparse.Namespace(
+            repo=str(repo), max_workers=1, timeout=60, retries=0, run_dir="",
+        )
+        with patch.object(
+            fr, "_available_models", return_value=AVAILABLE_MODELS
+        ) as mock_avail, patch(
+            "subprocess.run", return_value=_mock_subprocess_success()
+        ):
+            fr.run_concerns(args)
+
+        assert mock_avail.call_count >= 1
+
 
 # ---------------------------------------------------------------------------
 # CLI integration

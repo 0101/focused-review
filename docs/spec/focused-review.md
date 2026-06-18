@@ -231,9 +231,10 @@ The `models` list uses **stable family shorthands** — `opus`, `sonnet`, `haiku
 `gpt`, `codex`, `gemini` — not concrete CLI slugs. At dispatch time the runner
 enumerates the models the Copilot CLI currently offers (parsed from
 `copilot help config`, cached once per run) and resolves each shorthand to the
-**best available** slug in that family: highest version, with a family-specific
-preference (`gemini` prefers the `pro` line) and the plainest variant as a
-tie-break. This keeps concern files stable as Copilot rotates models. Behavior:
+**best available** slug in that family: a family-specific preference first
+(`gemini` prefers the `pro` line), then the highest version, with the plainest
+variant as a final tie-break. This keeps concern files stable as Copilot rotates
+models. Behavior:
 
 - A value that is **not** a known family (a full slug such as `claude-opus-4.6-1m`,
   or any future identifier) passes through unchanged.
