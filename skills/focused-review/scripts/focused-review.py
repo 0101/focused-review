@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import fnmatch
+import functools
 import json
 import os
 import re
@@ -14,6 +15,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
@@ -61,29 +63,157 @@ CONCERN_TIMEOUT_SECS = int(os.environ.get("CONCERN_TIMEOUT", "1200"))
 CONCERN_RETRIES = int(os.environ.get("CONCERN_RETRIES", "2"))
 CONCERN_MAX_WORKERS = int(os.environ.get("CONCERN_MAX_WORKERS", "4"))
 
-# Shorthand model names used in concern files → full CLI model identifiers.
-# Unknown names pass through unchanged so users can specify full names directly.
-MODEL_MAP: dict[str, str] = {
-    "opus": "claude-opus-4.6-1m",
-    "sonnet": "claude-sonnet-4.6",
-    "haiku": "claude-haiku-4.5",
-    "gpt": "gpt-5.5",
-    "codex": "gpt-5.3-codex",
-    "gemini": "gemini-3-pro-preview",
+# Concern files use stable family shorthands (``opus``, ``gpt``, ``gemini`` …)
+# instead of concrete CLI slugs, which Copilot rotates over time.  Each family
+# is resolved to the *best currently-available* slug by querying the live model
+# list (see :func:`_available_models`).  ``fallback`` is used only when the live
+# list is unavailable (offline / enumeration failure) so reviews still run.
+
+
+@dataclass(frozen=True)
+class FamilyRule:
+    """How to select the best concrete slug for a model-family shorthand.
+
+    A candidate slug from the available set matches when it starts with
+    *prefix*, contains every token in *require*, and contains no token in
+    *exclude*.  Among matches, the *best* is the highest version (then a
+    *prefer* token, then the plainest variant).  *fallback* is the offline
+    default when the live model list cannot be enumerated.
+    """
+
+    prefix: str
+    fallback: str
+    require: tuple[str, ...] = ()
+    exclude: tuple[str, ...] = ()
+    prefer: tuple[str, ...] = ()
+
+
+# Single source of truth for family shorthands.  Keys are the shorthands users
+# write in concern frontmatter; values describe how to pick a live slug.
+FAMILY_RULES: dict[str, FamilyRule] = {
+    "opus": FamilyRule(prefix="claude-opus-", fallback="claude-opus-4.6-1m"),
+    "sonnet": FamilyRule(prefix="claude-sonnet-", fallback="claude-sonnet-4.6"),
+    "haiku": FamilyRule(prefix="claude-haiku-", fallback="claude-haiku-4.5"),
+    "gpt": FamilyRule(prefix="gpt-", fallback="gpt-5.5", exclude=("codex", "mini")),
+    "codex": FamilyRule(prefix="gpt-", fallback="gpt-5.3-codex", require=("codex",)),
+    "gemini": FamilyRule(prefix="gemini-", fallback="gemini-3-pro-preview", prefer=("pro",)),
 }
 
+_MODEL_ITEM_RE = re.compile(r'^\s*-\s*"([^"]+)"\s*$')
+_CONFIG_SETTING_RE = re.compile(r"^\s*`([A-Za-z0-9_.]+)`\s*:")
+_VERSION_RE = re.compile(r"\d+(?:\.\d+)*")
 
-def _resolve_model(shorthand: str) -> str:
-    """Map a shorthand model name to the full CLI identifier.
 
-    Lookup is case-insensitive so that concern files using ``Opus`` or ``OPUS``
-    resolve identically to ``opus``.
+def _parse_model_list(help_text: str) -> tuple[str, ...]:
+    """Extract available model slugs from ``copilot help config`` output.
 
-    Returns the full name from :data:`MODEL_MAP` if the shorthand is a known
-    alias, otherwise returns *shorthand* unchanged (passthrough for full names
-    or any future model identifiers the user specifies directly).
+    The ``model`` setting documents its accepted values as a quoted bullet
+    list.  We scope extraction to that block (between the ```` `model`: ````
+    line and the next setting) and return the slugs in order, de-duplicated.
+    Returns an empty tuple if the block is absent.
     """
-    return MODEL_MAP.get(shorthand.lower(), shorthand)
+    in_model_block = False
+    slugs: list[str] = []
+    for line in help_text.splitlines():
+        setting = _CONFIG_SETTING_RE.match(line)
+        if setting:
+            in_model_block = setting.group(1) == "model"
+            continue
+        if in_model_block:
+            item = _MODEL_ITEM_RE.match(line)
+            if item:
+                slugs.append(item.group(1))
+    return tuple(dict.fromkeys(slugs))
+
+
+def _query_available_models() -> tuple[str, ...]:
+    """Run ``copilot help config`` and parse the available model slugs.
+
+    Fail-soft: returns an empty tuple on any error (CLI missing, non-zero
+    exit, timeout) so resolution can fall back to static defaults.
+    """
+    try:
+        result = subprocess.run(
+            [COPILOT_CMD, "help", "config"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            encoding="utf-8",
+            errors="replace",
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ()
+    if result.returncode != 0:
+        return ()
+    return _parse_model_list(result.stdout or "")
+
+
+@functools.lru_cache(maxsize=1)
+def _available_models() -> tuple[str, ...]:
+    """Currently-available model slugs, cached for the lifetime of the run."""
+    return _query_available_models()
+
+
+def _rank(slug: str, rule: FamilyRule) -> tuple[int, tuple[int, ...], int]:
+    """Sort key (higher is better) for picking the best slug in a family.
+
+    Orders by: preferred-token match, then numeric version descending, then
+    the plainest variant (shortest suffix after the version).
+    """
+    remainder = slug[len(rule.prefix):]
+    version_match = _VERSION_RE.match(remainder)
+    if version_match:
+        version = tuple(int(part) for part in version_match.group(0).split("."))
+        suffix = remainder[version_match.end():]
+    else:
+        version = ()
+        suffix = remainder
+
+    prefer_score = 0
+    for index, token in enumerate(rule.prefer):
+        if token in slug:
+            prefer_score = len(rule.prefer) - index
+            break
+
+    return (prefer_score, version, -len(suffix))
+
+
+def _best_match(family: str, available: tuple[str, ...]) -> str | None:
+    """Return the best available slug for *family*, or ``None`` if none match."""
+    rule = FAMILY_RULES[family]
+    candidates = [
+        slug
+        for slug in available
+        if slug.startswith(rule.prefix)
+        and all(token in slug for token in rule.require)
+        and not any(token in slug for token in rule.exclude)
+    ]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda slug: _rank(slug, rule))
+
+
+def _resolve_model(shorthand: str) -> str | None:
+    """Resolve a model shorthand to a concrete, available CLI slug.
+
+    Resolution is case-insensitive.  Behaviour by input:
+
+    - **Known family** (``opus``, ``gpt`` …): pick the best slug from the live
+      model list.  If the family has no available match, return ``None`` so the
+      caller can skip that concern-model gracefully.  If the live list cannot be
+      enumerated, fall back to the family's static default (offline-safe).
+    - **Anything else** (a full slug, internal model, or future identifier):
+      passed through unchanged so users can target exact slugs directly.
+    """
+    key = shorthand.lower()
+    rule = FAMILY_RULES.get(key)
+    if rule is None:
+        return shorthand
+
+    available = _available_models()
+    if available:
+        return _best_match(key, available)
+    return rule.fallback
 
 
 # ---------------------------------------------------------------------------
@@ -1041,7 +1171,19 @@ def _run_single_concern(
         if inherit_model:
             cmd.extend(["--model", inherit_model])
     else:
-        cmd.extend(["--model", _resolve_model(model)])
+        resolved = _resolve_model(model)
+        if resolved is None:
+            return {
+                "concern": concern,
+                "model": model,
+                "status": "skipped",
+                "error": (
+                    f"No available model matches family '{model}' in this "
+                    "environment; skipping this concern-model."
+                ),
+                "attempt": 0,
+            }
+        cmd.extend(["--model", resolved])
 
     last_error = ""
     total_attempts = retries + 1
@@ -1146,6 +1288,7 @@ def run_concerns(args: argparse.Namespace) -> None:
         print(json.dumps({
             "total": 0,
             "success": 0,
+            "skipped": 0,
             "failed": 0,
             "results": [],
         }))
@@ -1155,6 +1298,10 @@ def run_concerns(args: argparse.Namespace) -> None:
     timeout = args.timeout
     retries = args.retries
     inherit_model = getattr(args, "inherit_model", "") or ""
+
+    # Warm the available-model cache once before fanning out so worker threads
+    # share a single ``copilot help config`` query instead of racing on it.
+    _available_models()
 
     results: list[dict[str, object]] = []
 
@@ -1193,6 +1340,11 @@ def run_concerns(args: argparse.Namespace) -> None:
                     f"  ✓ {concern} ({model}): {result.get('finding_path', '')}",
                     file=sys.stderr,
                 )
+            elif status == "skipped":
+                print(
+                    f"  ⊘ {concern} ({model}): {result.get('error', status)}",
+                    file=sys.stderr,
+                )
             else:
                 print(
                     f"  ✗ {concern} ({model}): {result.get('error', status)}",
@@ -1200,11 +1352,13 @@ def run_concerns(args: argparse.Namespace) -> None:
                 )
 
     success_count = sum(1 for r in results if r["status"] == "success")
-    failed_count = len(results) - success_count
+    skipped_count = sum(1 for r in results if r["status"] == "skipped")
+    failed_count = len(results) - success_count - skipped_count
 
     summary = {
         "total": len(results),
         "success": success_count,
+        "skipped": skipped_count,
         "failed": failed_count,
         "results": results,
     }

@@ -227,6 +227,21 @@ Common false-positive patterns to avoid.
 ## Assessment                    # optional — domain-specific verification guidance for the assessor
 ```
 
+The `models` list uses **stable family shorthands** — `opus`, `sonnet`, `haiku`,
+`gpt`, `codex`, `gemini` — not concrete CLI slugs. At dispatch time the runner
+enumerates the models the Copilot CLI currently offers (parsed from
+`copilot help config`, cached once per run) and resolves each shorthand to the
+**best available** slug in that family: highest version, with a family-specific
+preference (`gemini` prefers the `pro` line) and the plainest variant as a
+tie-break. This keeps concern files stable as Copilot rotates models. Behavior:
+
+- A value that is **not** a known family (a full slug such as `claude-opus-4.6-1m`,
+  or any future identifier) passes through unchanged.
+- If a family has **no** available match, that concern-model is **skipped** with a
+  clear message rather than failing the run.
+- If the live model list can't be enumerated (offline / CLI error), resolution
+  **falls back** to a static per-family default so reviews still run.
+
 ### Project Context Format
 
 ```markdown

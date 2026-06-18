@@ -104,52 +104,226 @@ def _write_finding(
 
 
 # ---------------------------------------------------------------------------
-# _resolve_model and MODEL_MAP
+# Model resolution: enumeration, best-match, and family shorthands
 # ---------------------------------------------------------------------------
+
+# A realistic snapshot of the live ``copilot help config`` model list, used so
+# tests never depend on a live CLI call.
+AVAILABLE_MODELS = (
+    "claude-sonnet-4.6",
+    "claude-sonnet-4.5",
+    "claude-haiku-4.5",
+    "claude-fable-5",
+    "claude-opus-4.8",
+    "claude-opus-4.7",
+    "claude-opus-4.6",
+    "claude-opus-4.6-fast",
+    "claude-opus-4.5",
+    "gpt-5.5",
+    "gpt-5.4",
+    "gpt-5.3-codex",
+    "gpt-5.2-codex",
+    "gpt-5.2",
+    "gpt-5.4-mini",
+    "gpt-5-mini",
+    "gemini-3.1-pro-preview",
+    "gemini-3.5-flash",
+)
+
+# Representative ``copilot help config`` output: the ``model`` block plus
+# neighbouring settings (whose bullets must NOT be picked up).
+HELP_CONFIG_SAMPLE = """Configuration Settings:
+
+  `logLevel`: log level for CLI; defaults to "default".
+
+  `model`: AI model to use for Copilot CLI; can be changed with /model command or --model flag option.
+    - "claude-sonnet-4.6"
+    - "claude-opus-4.8"
+    - "gpt-5.5"
+    - "gpt-5.3-codex"
+    - "gemini-3.1-pro-preview"
+
+  `contextTier`: context window tier for tiered-pricing models (e.g., "default" or "long_context").
+    - Can also be set with --context flag (overrides persisted setting)
+
+  `keepAlive`: keep-alive mode applied at CLI startup; defaults to `"off"`.
+    - `"off"` (default): system sleeps normally.
+    - `"on"`: keep-alive is enabled for the duration of the session.
+"""
+
+
+def _with_models(models: tuple[str, ...]) -> object:
+    """Patch the available-model enumeration to a fixed list for a test."""
+    return patch.object(fr, "_available_models", return_value=tuple(models))
+
+
+@pytest.fixture(autouse=True)
+def _stub_available_models():
+    """Resolve against a fixed model list so tests never invoke the live CLI.
+
+    Individual tests override this with :func:`_with_models` when they need a
+    different available set (e.g. to exercise skip/fallback paths).
+    """
+    with patch.object(fr, "_available_models", return_value=AVAILABLE_MODELS):
+        yield
+
+
+class TestParseModelList:
+    """Parsing the model block out of ``copilot help config`` output."""
+
+    def test_extracts_model_block_slugs_in_order(self) -> None:
+        assert fr._parse_model_list(HELP_CONFIG_SAMPLE) == (
+            "claude-sonnet-4.6",
+            "claude-opus-4.8",
+            "gpt-5.5",
+            "gpt-5.3-codex",
+            "gemini-3.1-pro-preview",
+        )
+
+    def test_ignores_bullets_from_other_settings(self) -> None:
+        slugs = fr._parse_model_list(HELP_CONFIG_SAMPLE)
+        assert "off" not in slugs
+        assert "on" not in slugs
+
+    def test_missing_model_block_returns_empty(self) -> None:
+        text = "  `logLevel`: log level for CLI; defaults to \"default\".\n"
+        assert fr._parse_model_list(text) == ()
+
+    def test_deduplicates_preserving_order(self) -> None:
+        text = (
+            "  `model`: AI model to use.\n"
+            '    - "gpt-5.5"\n'
+            '    - "gpt-5.5"\n'
+            '    - "claude-opus-4.8"\n'
+        )
+        assert fr._parse_model_list(text) == ("gpt-5.5", "claude-opus-4.8")
+
+
+class TestQueryAvailableModels:
+    """Querying the CLI for the available-model list (fail-soft)."""
+
+    def test_parses_stdout_on_success(self) -> None:
+        mock = MagicMock(returncode=0, stdout=HELP_CONFIG_SAMPLE, stderr="")
+        with patch("subprocess.run", return_value=mock):
+            assert fr._query_available_models() == (
+                "claude-sonnet-4.6",
+                "claude-opus-4.8",
+                "gpt-5.5",
+                "gpt-5.3-codex",
+                "gemini-3.1-pro-preview",
+            )
+
+    def test_nonzero_exit_returns_empty(self) -> None:
+        mock = MagicMock(returncode=1, stdout="anything", stderr="boom")
+        with patch("subprocess.run", return_value=mock):
+            assert fr._query_available_models() == ()
+
+    def test_cli_missing_returns_empty(self) -> None:
+        with patch("subprocess.run", side_effect=FileNotFoundError):
+            assert fr._query_available_models() == ()
+
+    def test_timeout_returns_empty(self) -> None:
+        with patch(
+            "subprocess.run",
+            side_effect=sp.TimeoutExpired(cmd="copilot", timeout=30),
+        ):
+            assert fr._query_available_models() == ()
+
+
+class TestBestMatch:
+    """Selecting the best concrete slug for a family from an available set."""
+
+    def test_picks_highest_opus_version(self) -> None:
+        avail = ("claude-opus-4.5", "claude-opus-4.8", "claude-opus-4.6")
+        assert fr._best_match("opus", avail) == "claude-opus-4.8"
+
+    def test_gpt_excludes_codex_and_mini(self) -> None:
+        avail = ("gpt-5.3-codex", "gpt-5.4-mini", "gpt-5.4", "gpt-5.2")
+        assert fr._best_match("gpt", avail) == "gpt-5.4"
+
+    def test_codex_requires_codex_token_and_highest_version(self) -> None:
+        avail = ("gpt-5.5", "gpt-5.2-codex", "gpt-5.3-codex")
+        assert fr._best_match("codex", avail) == "gpt-5.3-codex"
+
+    def test_gemini_prefers_pro_over_higher_versioned_flash(self) -> None:
+        avail = ("gemini-3.5-flash", "gemini-3.1-pro-preview")
+        assert fr._best_match("gemini", avail) == "gemini-3.1-pro-preview"
+
+    def test_gemini_falls_back_to_highest_when_no_pro(self) -> None:
+        avail = ("gemini-2.0-flash", "gemini-3.5-flash")
+        assert fr._best_match("gemini", avail) == "gemini-3.5-flash"
+
+    def test_plain_variant_wins_version_tie(self) -> None:
+        avail = ("claude-opus-4.6-fast", "claude-opus-4.6")
+        assert fr._best_match("opus", avail) == "claude-opus-4.6"
+
+    def test_no_candidate_returns_none(self) -> None:
+        assert fr._best_match("gemini", ("gpt-5.5", "claude-opus-4.8")) is None
+
+    def test_unrelated_claude_family_not_matched(self) -> None:
+        # ``claude-fable-5`` must not be selected for opus/sonnet/haiku.
+        assert fr._best_match("opus", ("claude-fable-5",)) is None
 
 
 class TestResolveModel:
-    """Tests for the model name resolution mapping."""
+    """End-to-end shorthand → available-slug resolution."""
 
-    def test_opus_maps_to_full_name(self) -> None:
-        assert fr._resolve_model("opus") == "claude-opus-4.6-1m"
+    def test_opus_resolves_to_best_available(self) -> None:
+        with _with_models(AVAILABLE_MODELS):
+            assert fr._resolve_model("opus") == "claude-opus-4.8"
 
-    def test_sonnet_maps_to_full_name(self) -> None:
-        assert fr._resolve_model("sonnet") == "claude-sonnet-4.6"
+    def test_sonnet_resolves_to_best_available(self) -> None:
+        with _with_models(AVAILABLE_MODELS):
+            assert fr._resolve_model("sonnet") == "claude-sonnet-4.6"
 
-    def test_haiku_maps_to_full_name(self) -> None:
-        assert fr._resolve_model("haiku") == "claude-haiku-4.5"
+    def test_haiku_resolves_to_best_available(self) -> None:
+        with _with_models(AVAILABLE_MODELS):
+            assert fr._resolve_model("haiku") == "claude-haiku-4.5"
 
-    def test_gpt_maps_to_full_name(self) -> None:
-        assert fr._resolve_model("gpt") == "gpt-5.5"
+    def test_gpt_resolves_to_best_available(self) -> None:
+        with _with_models(AVAILABLE_MODELS):
+            assert fr._resolve_model("gpt") == "gpt-5.5"
 
-    def test_codex_maps_to_full_name(self) -> None:
-        assert fr._resolve_model("codex") == "gpt-5.3-codex"
+    def test_codex_resolves_to_best_available(self) -> None:
+        with _with_models(AVAILABLE_MODELS):
+            assert fr._resolve_model("codex") == "gpt-5.3-codex"
 
-    def test_gemini_maps_to_full_name(self) -> None:
-        assert fr._resolve_model("gemini") == "gemini-3-pro-preview"
+    def test_gemini_resolves_to_best_available(self) -> None:
+        with _with_models(AVAILABLE_MODELS):
+            assert fr._resolve_model("gemini") == "gemini-3.1-pro-preview"
 
-    def test_unknown_model_passes_through(self) -> None:
-        """Unknown names pass through unchanged (user may specify full CLI name)."""
-        assert fr._resolve_model("claude-opus-4.6-1m") == "claude-opus-4.6-1m"
+    def test_case_insensitive(self) -> None:
+        with _with_models(AVAILABLE_MODELS):
+            assert fr._resolve_model("Opus") == "claude-opus-4.8"
+            assert fr._resolve_model("OPUS") == "claude-opus-4.8"
+            assert fr._resolve_model("Codex") == "gpt-5.3-codex"
+            assert fr._resolve_model("GPT") == "gpt-5.5"
+
+    def test_full_slug_passes_through(self) -> None:
+        """Exact/internal slugs (not a family shorthand) pass through unchanged."""
+        with _with_models(AVAILABLE_MODELS):
+            assert fr._resolve_model("claude-opus-4.6-1m") == "claude-opus-4.6-1m"
 
     def test_arbitrary_model_passes_through(self) -> None:
-        assert fr._resolve_model("some-future-model-v2") == "some-future-model-v2"
+        with _with_models(AVAILABLE_MODELS):
+            assert fr._resolve_model("some-future-model-v2") == "some-future-model-v2"
 
     def test_inherit_passes_through(self) -> None:
-        """'inherit' is not in MODEL_MAP and should pass through."""
-        assert fr._resolve_model("inherit") == "inherit"
+        """'inherit' is not a family shorthand and should pass through."""
+        with _with_models(AVAILABLE_MODELS):
+            assert fr._resolve_model("inherit") == "inherit"
 
-    def test_case_insensitive_opus(self) -> None:
-        """Model lookup is case-insensitive."""
-        assert fr._resolve_model("Opus") == "claude-opus-4.6-1m"
-        assert fr._resolve_model("OPUS") == "claude-opus-4.6-1m"
+    def test_family_without_available_match_returns_none(self) -> None:
+        """A known family with no live match resolves to None (caller skips)."""
+        with _with_models(("gpt-5.5", "claude-opus-4.8")):
+            assert fr._resolve_model("gemini") is None
 
-    def test_case_insensitive_codex(self) -> None:
-        assert fr._resolve_model("Codex") == "gpt-5.3-codex"
-
-    def test_case_insensitive_gpt(self) -> None:
-        assert fr._resolve_model("GPT") == "gpt-5.5"
+    def test_falls_back_to_static_when_enumeration_unavailable(self) -> None:
+        """When the live list can't be enumerated, use the offline fallback."""
+        with _with_models(()):
+            assert fr._resolve_model("opus") == "claude-opus-4.6-1m"
+            assert fr._resolve_model("gpt") == "gpt-5.5"
+            assert fr._resolve_model("gemini") == "gemini-3-pro-preview"
 
 
 # ---------------------------------------------------------------------------
@@ -501,8 +675,34 @@ class TestRunSingleConcernRetry:
         cmd = call_args[0][0]
         assert "--model" in cmd
         model_idx = cmd.index("--model")
-        # Shorthand "opus" should be resolved to full CLI name
-        assert cmd[model_idx + 1] == "claude-opus-4.6-1m"
+        # Shorthand "opus" resolves to the best available concrete slug.
+        assert cmd[model_idx + 1] == "claude-opus-4.8"
+
+    def test_unresolvable_family_is_skipped_without_invoking_cli(
+        self, tmp_path: Path
+    ) -> None:
+        """A family with no available match is skipped, not run or failed."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        entries = [
+            {
+                "concern": "architecture",
+                "model": "gemini",
+                "priority": "standard",
+                "prompt_path": ".agents/focused-review/prompts/architecture--gemini.md",
+            }
+        ]
+        work_dir = _setup_work_dir(repo, entries)
+
+        mock_run = MagicMock(return_value=_mock_subprocess_success())
+        with _with_models(("gpt-5.5", "claude-opus-4.8")), patch(
+            "subprocess.run", mock_run
+        ):
+            result = fr._run_single_concern(entries[0], repo, work_dir, retries=0)
+
+        assert result["status"] == "skipped"
+        assert "gemini" in result["error"]
+        assert mock_run.call_count == 0
 
     def test_inherit_model_without_flag_omits_model(self, tmp_path: Path) -> None:
         """When model is 'inherit' and no inherit_model provided, --model is omitted."""
