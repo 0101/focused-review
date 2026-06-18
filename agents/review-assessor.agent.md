@@ -19,6 +19,7 @@ Parse these named fields from your prompt:
 - `concerns_dir` — directory containing the concern files
 - `project_context_path` — (optional) path to the project context file describing project type, priorities, and trade-off guidance
 - `output_path` — file path where you must write your assessment
+- `rich_html` — (optional) `true` when the canvas can safely embed a sanitized rich-detail fragment because the orchestrator detected the `nh3` sanitizer **before** assessment. When absent or `false`, **do not** author a detail sidecar — write only the `A-XX.md` markdown. Default: off.
 
 Read the diff yourself using the view tool. The finding text is provided inline — no file to read.
 
@@ -238,6 +239,78 @@ Use this exact format:
 {pass through from the finding}
 ```
 
+### Step 8: Optional rich-detail sidecar (only when `rich_html`)
+
+This step is **gated on the `rich_html` input**. If `rich_html` is absent or `false`, **stop after Step 7** — write only the `A-XX.md` markdown, no sidecar. (`rich_html` is on only when the orchestrator detected the `nh3` sanitizer before assessment; without it the canvas cannot safely embed raw HTML and ignores the file anyway.)
+
+When `rich_html` is on, you **may** additionally author a small HTML/SVG visual that makes the finding easier to grasp. This is **optional and additive**: the `A-XX.md` you already wrote in Step 7 is the source of truth and stays exactly as-is. The reporter detects the sidecar by its presence on disk — you don't reference it from the markdown.
+
+**Author a visual only when it genuinely clarifies a non-obvious finding.** Good candidates:
+
+- A **code snippet** with the offending line(s) highlighted — off-by-one, wrong operator, a missing `await`, a swapped argument — where seeing the exact line beats describing it.
+- A **before/after** when a fix or refactor changes structure.
+- A small **diagram** (call chain, race interleaving, state transition, timing/sequence) for a control- or data-flow bug that's hard to hold in your head from prose.
+
+**Skip the sidecar for most findings — that is the expected default.** Don't author one when:
+
+- The markdown description/suggestion already conveys it (simple, self-evident issues).
+- It's a naming, style, or one-line mechanical issue a sentence covers.
+- The visual would just restate the text or decorate the panel. **A forced or low-value diagram is worse than none** — it adds noise and review cost. When in doubt, omit it.
+
+**Where to write it.** In the same `assessments/` directory as `output_path`, named `{assessment_id}-detail.html` (e.g. `output_path` `…/assessments/A-01.md` → sidecar `…/assessments/A-01-detail.html`). Use the `create` tool; if the file already exists (e.g. on a re-run), delete it first with `powershell` (`Remove-Item`), then create.
+
+**What to write.** The **inner** HTML/SVG fragment only — **do not** wrap it in `<div class="rich-detail">`; the renderer adds that wrapper for you (wrapping it yourself doubles the divider). Use the canvas palette classes below so the visual matches the rest of the panel — the styling comes for free.
+
+#### CSS class palette
+
+- **`.code-block`** — monospace code box (`white-space: pre`; put each source line on its own line).
+- **`.highlight-line`** — wrap a line *inside* a `.code-block` to emphasize it; add `.add` (green) or `.del` (red) for diff lines (e.g. `<span class="highlight-line add">`).
+- **`.callout`** — an aside/explanation box; modifiers `.warn` (amber), `.danger` (red), `.ok` (green).
+- **`.before-after`** — two-column grid; give the two children `.before` (red rule) and `.after` (green rule), each optionally led by `<div class="ba-label">Before</div>`.
+- **`.flow`** — centered container for an inline `<svg>` diagram; `.flow svg` is width-capped and `.flow text` defaults to a light fill.
+
+Inline `style` is also allowed for anything the palette doesn't cover (the canvas CSP blocks the exfil vector, so colors/spacing are safe).
+
+#### Sanitizer allowlist (stay inside it or the markup is dropped)
+
+The fragment is **`nh3`-sanitized server-side**; anything outside the allowlist is silently stripped, and a fragment that sanitizes to empty just falls back to the text fields. Keep within:
+
+- **HTML:** `div span p pre code samp kbd var`, `strong em b i u s small mark sub sup`, `br hr wbr`, `h1`–`h6`, `ul ol li dl dt dd`, `table thead tbody tfoot tr td th caption col colgroup`, `a abbr blockquote figure figcaption`.
+- **SVG:** `svg g defs symbol use title desc`, `path rect circle ellipse line polyline polygon`, `text tspan`, `marker linearGradient radialGradient stop pattern clipPath mask`, plus the usual geometry/paint/text attributes (`d viewBox fill stroke stroke-width x y transform text-anchor font-size` …).
+- **Inline `style`** is kept on every tag.
+
+**Forbidden (silently stripped):** `<script>`, any `on*` handler, `<style>` blocks, `<foreignObject>`, SVG animation (`animate` / `animateTransform` / `animateMotion` / `set`), `<img>` and other embeds, and any `href`/`src` that isn't a same-document `#fragment` (so `<use href="#id">` and `url(#grad)` work; `http(s):`, `data:`, and `javascript:` do not). No external images, web fonts, or network references.
+
+#### Examples
+
+HTML-escape literal `<`, `>`, `&` inside code as `&lt;` `&gt;` `&amp;` so they render as text rather than parsing as tags.
+
+A highlighted off-by-one with an explanatory callout:
+
+```html
+<div class="code-block"><span class="highlight-line del">if (idx &lt;= items.length) {</span>
+<span class="highlight-line add">if (idx &lt; items.length) {</span>
+    return items[idx];
+}</div>
+<div class="callout danger">
+  <strong>Off-by-one:</strong> when <code>idx == items.length</code> the guard
+  still passes and <code>items[idx]</code> reads one past the end.
+</div>
+```
+
+A minimal call-chain diagram (`.flow` + inline SVG, fully within the allowlist):
+
+```html
+<div class="flow">
+  <svg viewBox="0 0 300 40" width="300" height="40" role="img" aria-label="handler calls close() twice">
+    <rect x="4" y="8" width="80" height="24" rx="4" fill="none" stroke="#89b4fa"/>
+    <text x="44" y="24" text-anchor="middle" font-size="12">handler</text>
+    <line x1="84" y1="20" x2="150" y2="20" stroke="#f38ba8"/>
+    <text x="225" y="24" text-anchor="middle" font-size="12">close() ×2</text>
+  </svg>
+</div>
+```
+
 ## Constraints
 
 - **Read the actual code.** You must use `view` and `grep` to examine source files, callers, and context. Never assess based solely on the finding description. The finding description is a claim — your job is to investigate it.
@@ -248,3 +321,5 @@ Use this exact format:
 - **No new findings.** You investigate what was found — you do not discover new issues.
 - **Severity gates proportionality.** High-impact issues (Critical/High — bugs, security, correctness) get reported regardless of fix cost. Lower-impact issues must be proportional — a minor style nit requiring a 2000-line rewrite is noise.
 - **Write to disk.** After producing your output, write it to `output_path` using the `create` tool. This is required — the orchestrator reads findings from disk.
+- **The rich-detail sidecar is optional and additive.** Author `{assessment_id}-detail.html` only when `rich_html` is set **and** a visual genuinely clarifies a non-obvious finding (Step 8). Most findings get none. The `A-XX.md` markdown is the source of truth and never changes shape — `assessed.md`, the rebuttal pass, `post-mortem`, and `post-comments` all read it.
+- **Stay inside the sanitizer allowlist.** The sidecar is `nh3`-sanitized server-side; `script`, `on*` handlers, `<style>`, `foreignObject`, SVG animation, external `href`/`src`, and images are stripped (a fragment that sanitizes to empty just falls back to text). Don't wrap your fragment in `<div class="rich-detail">` — the renderer adds it.

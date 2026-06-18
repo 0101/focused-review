@@ -3,6 +3,11 @@ name = "focused-review"
 version = "0.1.0"
 description = "Focused review plugin for code review automation"
 requires-python = ">=3.10"
+# nh3 (Rust `ammonia` binding) sanitizes assessor-authored rich-detail HTML/SVG
+# sidecars before they are embedded in the canvas. Declared as a core dependency
+# (installed out the gate), but render-review still fails closed when the import
+# is unavailable — see sanitize_detail_html in scripts/focused-review.py.
+dependencies = ["nh3>=0.2.15"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]

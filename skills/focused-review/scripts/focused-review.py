@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import fnmatch
+import html
 import json
 import os
 import re
@@ -16,6 +17,16 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
+
+# Optional dependency: nh3 (Rust `ammonia`) sanitizes assessor-authored rich
+# detail sidecars before they are embedded in the canvas. It is declared as a
+# core dependency (installed out the gate), but the render path fails closed if
+# the import is ever missing — without the sanitizer no raw HTML is emitted, the
+# canvas falls back to escaped text, and the `rich_html` capability reports off.
+try:
+    import nh3 as _nh3
+except ImportError:  # pragma: no cover - fail-closed path, exercised via monkeypatch
+    _nh3 = None
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -39,6 +50,32 @@ INSTRUCTION_PATTERNS: list[str] = [
 
 DIFF_TARGET_CHUNK_LINES = 3000
 
+# ---------------------------------------------------------------------------
+# records.json envelope schema (Phase 2)
+#
+# The reporter agent serializes the final compiled review as a single JSON
+# envelope ({run_dir}/records.json). Python validates it mechanically — it never
+# interprets prose — and downstream render-review (Phase 3) templates it into
+# review.md / terminal / canvas. See docs/spec/canvas-review-report.md.
+# ---------------------------------------------------------------------------
+
+RECORDS_SCHEMA_VERSION = 1
+
+# Enum values validated strictly because the renderer depends on them:
+# severity → CSS severity class, verdict → section grouping, fix_complexity →
+# ordinal sort, type → "found by" tag styling. Sourced from the discovery /
+# assessor / consolidator agent contracts.
+VALID_SEVERITIES = ("Critical", "High", "Medium", "Low")
+VALID_FIX_COMPLEXITIES = ("quickfix", "moderate", "complex")
+VALID_VERDICTS = ("Confirmed", "Questionable", "Invalid")
+VALID_FINDING_TYPES = ("rule", "concern", "mixed")
+# Mirrors the prepare-review --scope choices.
+VALID_RUN_SCOPES = ("branch", "commit", "staged", "unstaged", "full")
+# Findings that are shown in the numbered (actionable) sections must carry a
+# positional display_number; Invalid findings render in a separate table keyed
+# by assessment id, so their display_number is optional.
+_VERDICTS_REQUIRING_DISPLAY_NUMBER = ("Confirmed", "Questionable")
+
 CONFIG_FILENAME = "focused-review.json"
 CONFIG_SCAN_LOCATIONS: list[str] = [
     os.path.join(".claude", CONFIG_FILENAME),
@@ -55,6 +92,20 @@ DEFAULT_CONCERNS_DIR = "review/concerns/"
 DEFAULT_BASE_BRANCH = "origin/main"
 BUILTIN_CONCERNS_DIR = Path(__file__).resolve().parent.parent / "defaults" / "concerns"
 CONCERN_FRAMEWORK_PATH = Path(__file__).resolve().parent.parent / "defaults" / "concern-framework.md"
+
+# Packaged canvas template (Phase 1) that render-review (Phase 3) fills server-side.
+CANVAS_TEMPLATE_PATH = Path(__file__).resolve().parent.parent / "templates" / "review-canvas.html"
+# Default canvas output, relative to the repo root. Gitignored and served by
+# Treemon when it is running; written unconditionally so it is ready as a tab.
+DEFAULT_CANVAS_RELPATH = os.path.join(".agents", "canvas", "focused-review.html")
+
+# Trusted Treemon parent-app origin pinned into the canvas action-bar channel.
+# Treemon serves the canvas iframe over http://127.0.0.1:5002, but the embedding
+# parent app is a *different* origin (http://localhost:5000). render-review bakes
+# this into the canvas data-parent-origin attribute so the action bar posts to —
+# and accepts morph signals from — only that origin instead of the wildcard "*"
+# (origin-validated channel; see docs/spec/canvas-review-report.md security model).
+DEFAULT_PARENT_ORIGIN = "http://localhost:5000"
 
 COPILOT_CMD = os.environ.get("COPILOT_CMD", "copilot")
 CONCERN_TIMEOUT_SECS = int(os.environ.get("CONCERN_TIMEOUT", "1200"))
@@ -1712,6 +1763,1806 @@ def post_comments(args: argparse.Namespace) -> None:
 
 
 # ---------------------------------------------------------------------------
+# records.json validation (Phase 2)
+#
+# `validate_records` is a pure function: it takes the parsed JSON and returns a
+# list of structured, per-record error dicts (empty list == valid). Each error
+# carries enough context — a JSON-ish `path`, the offending `field`, and the
+# finding's stable identifiers (`record_id` / `assessment_id`) plus its
+# positional `display_number` when known — for the orchestrator to relay an
+# actionable message back to the reporter on a retry.
+# ---------------------------------------------------------------------------
+
+# Sentinel distinguishing "key absent" from an explicit JSON ``null``.
+_MISSING = object()
+
+
+def _json_type_name(value: object) -> str:
+    """Return the JSON type name for *value* (for human-readable messages)."""
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, int):
+        return "integer"
+    if isinstance(value, float):
+        return "number"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, list):
+        return "array"
+    if isinstance(value, dict):
+        return "object"
+    return type(value).__name__
+
+
+def _is_int(value: object) -> bool:
+    """True for a real integer (``bool`` is a subclass of ``int`` — exclude it)."""
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _is_nonempty_str(value: object) -> bool:
+    """True for a non-blank string."""
+    return isinstance(value, str) and value.strip() != ""
+
+
+def _records_error(
+    scope: str,
+    index: int | None,
+    path: str,
+    field: str | None,
+    message: str,
+    *,
+    record_id: str | None = None,
+    assessment_id: str | None = None,
+    display_number: int | None = None,
+) -> dict[str, object]:
+    """Build one structured validation error.
+
+    ``scope`` is one of ``envelope`` / ``run`` / ``finding`` /
+    ``rebuttal_override`` / ``rule_quality_note``; ``index`` is the position
+    within that array (``None`` for the singleton envelope/run scopes).
+    """
+    return {
+        "scope": scope,
+        "index": index,
+        "path": path,
+        "field": field,
+        "record_id": record_id,
+        "assessment_id": assessment_id,
+        "display_number": display_number,
+        "message": message,
+    }
+
+
+def _finding_identity(rec: dict) -> tuple[str | None, str | None, int | None]:
+    """Best-effort extraction of a finding's stable ids for error attribution."""
+    rid = rec.get("record_id")
+    rid = rid if _is_nonempty_str(rid) else None
+    aid = rec.get("assessment_id")
+    aid = aid if _is_nonempty_str(aid) else None
+    dnum = rec.get("display_number")
+    dnum = dnum if _is_int(dnum) else None
+    return rid, aid, dnum
+
+
+def _validate_run(run: dict, errors: list[dict]) -> None:
+    """Validate the ``run`` metadata object (counts cross-checked separately)."""
+
+    def add(field: str | None, message: str) -> None:
+        path = "run" if field is None else f"run.{field}"
+        errors.append(_records_error("run", None, path, field, message))
+
+    for field in ("run_id", "date"):
+        if not _is_nonempty_str(run.get(field, _MISSING)):
+            add(field, f"{field} is required and must be a non-empty string")
+
+    scope = run.get("scope", _MISSING)
+    if scope is _MISSING:
+        add("scope", "scope is required and must be one of " + ", ".join(VALID_RUN_SCOPES))
+    elif scope not in VALID_RUN_SCOPES:
+        add("scope", f"scope must be one of {', '.join(VALID_RUN_SCOPES)} (got {scope!r})")
+
+    for field in (
+        "rule_count",
+        "concern_count",
+        "consolidated_count",
+        "confirmed",
+        "questionable",
+        "invalid",
+    ):
+        value = run.get(field, _MISSING)
+        if not _is_int(value) or value < 0:
+            add(field, f"{field} is required and must be an integer >= 0")
+
+
+def _validate_run_counts(run: dict, findings: list, errors: list[dict]) -> None:
+    """Cross-check ``run`` tallies against the verdicts present in ``findings``.
+
+    Only runs when every finding is an object (otherwise a structural error was
+    already reported). Catches truncation and miscounts — both real reporter
+    failure modes the spec calls out.
+    """
+    if not all(isinstance(rec, dict) for rec in findings):
+        return
+
+    tally = {verdict: 0 for verdict in VALID_VERDICTS}
+    for rec in findings:
+        verdict = rec.get("verdict")
+        if verdict in tally:
+            tally[verdict] += 1
+
+    def add(field: str, message: str) -> None:
+        errors.append(_records_error("run", None, f"run.{field}", field, message))
+
+    # Only cross-check the per-verdict tallies when every finding has a valid
+    # verdict. A finding with a bad/missing verdict drops out of the tally and
+    # would otherwise produce a *misleading* "run.confirmed is N but M findings
+    # have verdict 'Confirmed'" error — pointing the reporter at the wrong field
+    # and risking a wasted retry. The real (verdict) error is reported per-finding.
+    if all(rec.get("verdict") in tally for rec in findings):
+        for field, verdict in (
+            ("confirmed", "Confirmed"),
+            ("questionable", "Questionable"),
+            ("invalid", "Invalid"),
+        ):
+            value = run.get(field)
+            if _is_int(value) and value >= 0 and value != tally[verdict]:
+                add(
+                    field,
+                    f"run.{field} is {value} but {tally[verdict]} finding(s) have "
+                    f"verdict '{verdict}'",
+                )
+
+    # Length-based, independent of verdicts — always safe to check, and the
+    # primary signal for a truncated findings array.
+    consolidated = run.get("consolidated_count")
+    if _is_int(consolidated) and consolidated >= 0 and consolidated != len(findings):
+        add(
+            "consolidated_count",
+            f"run.consolidated_count is {consolidated} but findings[] has "
+            f"{len(findings)} entr(ies)",
+        )
+
+
+def _validate_provenance(prov: object, base_path: str, add) -> None:
+    """Validate a finding's ``provenance`` list.
+
+    Each entry is either a non-empty source label string or an object carrying a
+    non-empty ``source`` field — both encodings give the renderer a label to show
+    in the "Found by" column. ``add`` is the finding-scoped error accumulator.
+    """
+    if not isinstance(prov, list) or len(prov) == 0:
+        add("provenance", "provenance is required and must be a non-empty array")
+        return
+    for j, entry in enumerate(prov):
+        entry_path = f"{base_path}.provenance[{j}]"
+        if _is_nonempty_str(entry):
+            continue
+        if isinstance(entry, dict):
+            if not _is_nonempty_str(entry.get("source")):
+                add(
+                    "provenance",
+                    f"provenance[{j}] object must have a non-empty 'source' string",
+                )
+            continue
+        add(
+            "provenance",
+            f"provenance[{j}] must be a non-empty string or an object with a "
+            f"'source' field (got {_json_type_name(entry)})",
+        )
+
+
+def _validate_finding(
+    rec: object,
+    index: int,
+    errors: list[dict],
+    seen_record_ids: set,
+    seen_assessment_ids: set,
+    seen_display_numbers: set,
+) -> None:
+    """Validate a single finding object and accumulate structured errors."""
+    base_path = f"findings[{index}]"
+    if not isinstance(rec, dict):
+        errors.append(
+            _records_error(
+                "finding",
+                index,
+                base_path,
+                None,
+                f"finding must be a JSON object, got {_json_type_name(rec)}",
+            )
+        )
+        return
+
+    rid, aid, dnum = _finding_identity(rec)
+
+    def add(field: str | None, message: str) -> None:
+        path = base_path if field is None else f"{base_path}.{field}"
+        errors.append(
+            _records_error(
+                "finding",
+                index,
+                path,
+                field,
+                message,
+                record_id=rid,
+                assessment_id=aid,
+                display_number=dnum,
+            )
+        )
+
+    def require_nonempty_str(field: str) -> None:
+        if not _is_nonempty_str(rec.get(field, _MISSING)):
+            add(field, f"{field} is required and must be a non-empty string")
+
+    def require_str(field: str) -> None:
+        value = rec.get(field, _MISSING)
+        if value is _MISSING or not isinstance(value, str):
+            add(field, f'{field} is required and must be a string (use "" when absent)')
+
+    def require_enum(field: str, allowed: tuple) -> None:
+        value = rec.get(field, _MISSING)
+        if value is _MISSING:
+            add(field, f"{field} is required and must be one of " + ", ".join(allowed))
+        elif value not in allowed:
+            add(field, f"{field} must be one of {', '.join(allowed)} (got {value!r})")
+
+    # Stable identifier — required, unique.
+    record_id = rec.get("record_id", _MISSING)
+    if not _is_nonempty_str(record_id):
+        add("record_id", "record_id is required and must be a non-empty string")
+    elif record_id in seen_record_ids:
+        add("record_id", f"duplicate record_id {record_id!r} (record_ids must be unique)")
+    else:
+        seen_record_ids.add(record_id)
+
+    require_nonempty_str("title")
+    require_nonempty_str("file")
+    require_str("description")
+    require_str("assessment")
+    require_str("suggestion")
+
+    require_enum("original_severity", VALID_SEVERITIES)
+    require_enum("severity", VALID_SEVERITIES)
+    require_enum("fix_complexity", VALID_FIX_COMPLEXITIES)
+    require_enum("verdict", VALID_VERDICTS)
+    require_enum("type", VALID_FINDING_TYPES)
+
+    # introduced_by — optional display metadata; only type-checked when present
+    # (the spec keeps it free-form: "type-checked only, no enum").
+    introduced_by = rec.get("introduced_by", _MISSING)
+    if introduced_by is not _MISSING and not isinstance(introduced_by, str):
+        add("introduced_by", "introduced_by must be a string when present")
+
+    # has_detail — required boolean; gates the optional detail sidecar.
+    has_detail = rec.get("has_detail", _MISSING)
+    if not isinstance(has_detail, bool):
+        add("has_detail", "has_detail is required and must be a boolean")
+
+    # assessment_id — nullable; the detail sidecar is located by it AND the
+    # Invalid-findings table is keyed by it, so a non-null assessment_id must be
+    # a non-empty string, unique across findings, and present when has_detail.
+    assessment_id = rec.get("assessment_id", None)
+    if assessment_id is not None and not _is_nonempty_str(assessment_id):
+        add("assessment_id", "assessment_id must be a non-empty string or null")
+    elif _is_nonempty_str(assessment_id):
+        if assessment_id in seen_assessment_ids:
+            add(
+                "assessment_id",
+                f"duplicate assessment_id {assessment_id!r} (assessment ids must be unique)",
+            )
+        else:
+            seen_assessment_ids.add(assessment_id)
+    if has_detail is True and not _is_nonempty_str(assessment_id):
+        add(
+            "assessment_id",
+            "assessment_id must be a non-empty string when has_detail is true "
+            "(the detail sidecar is located by assessment id)",
+        )
+
+    # line — nullable; an integer line number otherwise.
+    line = rec.get("line", None)
+    if line is not None and not (_is_int(line) and line >= 0):
+        add("line", "line must be an integer >= 0 or null")
+
+    # display_number — positional. Required and unique for the numbered
+    # (actionable) Confirmed/Questionable sections; optional for Invalid findings
+    # (which render in a separate table keyed by assessment_id), so an Invalid
+    # finding's number does not participate in the uniqueness set.
+    verdict = rec.get("verdict")
+    requires_number = verdict in _VERDICTS_REQUIRING_DISPLAY_NUMBER
+    display_number = rec.get("display_number", None)
+    if display_number is None:
+        if requires_number:
+            add(
+                "display_number",
+                "display_number is required (integer >= 1) for "
+                "Confirmed/Questionable findings",
+            )
+    elif not _is_int(display_number) or display_number < 1:
+        add("display_number", "display_number must be an integer >= 1 or null")
+    elif requires_number:
+        if display_number in seen_display_numbers:
+            add(
+                "display_number",
+                f"duplicate display_number {display_number} (display numbers must be unique)",
+            )
+        else:
+            seen_display_numbers.add(display_number)
+
+    _validate_provenance(rec.get("provenance", _MISSING), base_path, add)
+
+
+def _validate_rebuttal_override(
+    item: object, index: int, errors: list[dict], known_record_ids: set | None
+) -> None:
+    """Validate one rebuttal-override entry."""
+    base_path = f"rebuttal_overrides[{index}]"
+    if not isinstance(item, dict):
+        errors.append(
+            _records_error(
+                "rebuttal_override",
+                index,
+                base_path,
+                None,
+                f"rebuttal override must be a JSON object, got {_json_type_name(item)}",
+            )
+        )
+        return
+
+    raw_rid = item.get("record_id")
+    rid_ident = raw_rid if _is_nonempty_str(raw_rid) else None
+
+    def add(field: str | None, message: str) -> None:
+        path = base_path if field is None else f"{base_path}.{field}"
+        errors.append(
+            _records_error(
+                "rebuttal_override", index, path, field, message, record_id=rid_ident
+            )
+        )
+
+    if not _is_nonempty_str(raw_rid):
+        add("record_id", "record_id is required and must be a non-empty string")
+    elif known_record_ids is not None and raw_rid not in known_record_ids:
+        add("record_id", f"record_id {raw_rid!r} does not match any finding")
+
+    for field in ("original_severity", "severity"):
+        value = item.get(field, _MISSING)
+        if value is _MISSING:
+            add(field, f"{field} is required and must be one of " + ", ".join(VALID_SEVERITIES))
+        elif value not in VALID_SEVERITIES:
+            add(field, f"{field} must be one of {', '.join(VALID_SEVERITIES)} (got {value!r})")
+
+    if not _is_nonempty_str(item.get("reasoning", _MISSING)):
+        add("reasoning", "reasoning is required and must be a non-empty string")
+
+
+def _validate_rule_quality_note(item: object, index: int, errors: list[dict]) -> None:
+    """Validate one rule-quality-note entry."""
+    base_path = f"rule_quality_notes[{index}]"
+    if not isinstance(item, dict):
+        errors.append(
+            _records_error(
+                "rule_quality_note",
+                index,
+                base_path,
+                None,
+                f"rule quality note must be a JSON object, got {_json_type_name(item)}",
+            )
+        )
+        return
+
+    def add(field: str, message: str) -> None:
+        errors.append(
+            _records_error("rule_quality_note", index, f"{base_path}.{field}", field, message)
+        )
+
+    for field in ("rule", "observation", "suggestion"):
+        if not _is_nonempty_str(item.get(field, _MISSING)):
+            add(field, f"{field} is required and must be a non-empty string")
+
+
+def validate_records(data: object) -> list[dict]:
+    """Validate a parsed ``records.json`` envelope against the schema.
+
+    Returns a list of structured, per-record error dicts; an empty list means
+    the envelope is valid. Never raises on malformed *data* — every problem is
+    reported as an error entry so the caller can relay it back to the reporter.
+    """
+    errors: list[dict] = []
+
+    if not isinstance(data, dict):
+        errors.append(
+            _records_error(
+                "envelope",
+                None,
+                "$",
+                None,
+                f"records.json root must be a JSON object, got {_json_type_name(data)}",
+            )
+        )
+        return errors
+
+    def add_envelope(field: str | None, message: str) -> None:
+        path = "$" if field is None else field
+        errors.append(_records_error("envelope", None, path, field, message))
+
+    # schema_version --------------------------------------------------------
+    schema_version = data.get("schema_version", _MISSING)
+    if schema_version is _MISSING:
+        add_envelope("schema_version", "schema_version is required")
+    elif not _is_int(schema_version):
+        add_envelope(
+            "schema_version",
+            f"schema_version must be the integer {RECORDS_SCHEMA_VERSION} "
+            f"(got {_json_type_name(schema_version)})",
+        )
+    elif schema_version != RECORDS_SCHEMA_VERSION:
+        add_envelope(
+            "schema_version",
+            f"unsupported schema_version {schema_version}; this tool supports "
+            f"{RECORDS_SCHEMA_VERSION}",
+        )
+
+    # run -------------------------------------------------------------------
+    run = data.get("run", _MISSING)
+    if run is _MISSING:
+        add_envelope("run", "run is required and must be an object")
+    elif not isinstance(run, dict):
+        add_envelope("run", f"run must be an object, got {_json_type_name(run)}")
+    else:
+        _validate_run(run, errors)
+
+    # findings --------------------------------------------------------------
+    findings = data.get("findings", _MISSING)
+    record_ids: set = set()
+    findings_is_list = isinstance(findings, list)
+    if findings is _MISSING:
+        add_envelope("findings", "findings is required and must be an array")
+    elif not findings_is_list:
+        add_envelope("findings", f"findings must be an array, got {_json_type_name(findings)}")
+    else:
+        assessment_ids: set = set()
+        display_numbers: set = set()
+        for i, rec in enumerate(findings):
+            _validate_finding(rec, i, errors, record_ids, assessment_ids, display_numbers)
+        # The numbered Confirmed/Questionable sequence must be a gap-free 1..N run so
+        # the rendered report (review.md headings, terminal table, canvas) has no
+        # skipped numbers. The per-finding checks above already enforce integer >= 1
+        # and uniqueness; this cross-finding check catches gaps a reporter retry can
+        # leave behind when it renumbers one finding without adjusting the rest.
+        if display_numbers and sorted(display_numbers) != list(
+            range(1, len(display_numbers) + 1)
+        ):
+            add_envelope(
+                "findings",
+                "display_number values for Confirmed/Questionable findings must form "
+                f"a contiguous 1..{len(display_numbers)} sequence with no gaps "
+                f"(got {sorted(display_numbers)})",
+            )
+
+    # rebuttal_overrides ----------------------------------------------------
+    overrides = data.get("rebuttal_overrides", _MISSING)
+    if overrides is _MISSING:
+        add_envelope(
+            "rebuttal_overrides",
+            "rebuttal_overrides is required and must be an array (use [] when none)",
+        )
+    elif not isinstance(overrides, list):
+        add_envelope(
+            "rebuttal_overrides",
+            f"rebuttal_overrides must be an array, got {_json_type_name(overrides)}",
+        )
+    else:
+        known = record_ids if findings_is_list else None
+        for i, item in enumerate(overrides):
+            _validate_rebuttal_override(item, i, errors, known)
+
+    # rule_quality_notes ----------------------------------------------------
+    notes = data.get("rule_quality_notes", _MISSING)
+    if notes is _MISSING:
+        add_envelope(
+            "rule_quality_notes",
+            "rule_quality_notes is required and must be an array (use [] when none)",
+        )
+    elif not isinstance(notes, list):
+        add_envelope(
+            "rule_quality_notes",
+            f"rule_quality_notes must be an array, got {_json_type_name(notes)}",
+        )
+    else:
+        for i, item in enumerate(notes):
+            _validate_rule_quality_note(item, i, errors)
+
+    # run/findings count cross-checks (only when both are well-formed) ------
+    if isinstance(run, dict) and findings_is_list:
+        _validate_run_counts(run, findings, errors)
+
+    return errors
+
+
+def load_and_validate_records(path: str | os.PathLike) -> tuple[object, list[dict]]:
+    """Load *path* and validate it.
+
+    Returns ``(data, errors)``. On a read/parse failure, ``data`` is ``None`` and
+    ``errors`` holds a single envelope-scoped error.
+    """
+    try:
+        with open(path, encoding="utf-8") as f:
+            raw = f.read()
+    except FileNotFoundError:
+        return None, [
+            _records_error("envelope", None, "$", None, f"records.json not found: {path}")
+        ]
+    except OSError as exc:
+        return None, [
+            _records_error("envelope", None, "$", None, f"could not read records.json: {exc}")
+        ]
+
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        return None, [
+            _records_error("envelope", None, "$", None, f"records.json is not valid JSON: {exc}")
+        ]
+
+    return data, validate_records(data)
+
+
+def _emit_validation_errors(records_path: str, errors: list[dict]) -> None:
+    """Print the structured records-validation failure payload to stderr.
+
+    Shared by ``validate-records`` and ``render-review`` so both commands emit
+    byte-identical failure JSON. Emit-only (mirroring ``_emit_action_error``):
+    callers keep their own ``sys.exit(1)`` so control flow stays visible at the
+    call site.
+    """
+    payload = {
+        "valid": False,
+        "schema_version": RECORDS_SCHEMA_VERSION,
+        "records_path": str(records_path),
+        "error_count": len(errors),
+        "errors": errors,
+    }
+    print(json.dumps(payload, indent=2), file=sys.stderr)
+
+
+def validate_records_command(args: argparse.Namespace) -> None:
+    """CLI: validate ``records.json`` and emit a structured result.
+
+    On success, prints a small summary JSON to stdout (exit 0). On failure,
+    prints the structured per-record errors as JSON to stderr and exits 1, so the
+    orchestrator can relay them to the reporter for a retry.
+    """
+    path: str = args.records
+    data, errors = load_and_validate_records(path)
+
+    if errors:
+        _emit_validation_errors(path, errors)
+        sys.exit(1)
+
+    run = data.get("run", {}) if isinstance(data, dict) else {}
+    findings = data.get("findings", []) if isinstance(data, dict) else []
+    summary = {
+        "valid": True,
+        "schema_version": RECORDS_SCHEMA_VERSION,
+        "records_path": str(path),
+        "run_id": run.get("run_id") if isinstance(run, dict) else None,
+        "findings": len(findings),
+        "confirmed": run.get("confirmed") if isinstance(run, dict) else None,
+        "questionable": run.get("questionable") if isinstance(run, dict) else None,
+        "invalid": run.get("invalid") if isinstance(run, dict) else None,
+    }
+    print(json.dumps(summary))
+
+
+# ---------------------------------------------------------------------------
+# render-review (Phase 3): render review.md / terminal summary / canvas HTML
+# from a validated records.json envelope.
+#
+# Python's role is strictly mechanical: it never interprets prose. It groups the
+# validated findings by verdict, formats the provenance labels, and templates the
+# three artifacts. review.md preserves the heading/field shape the reporter used
+# to hand-author (locked by a golden-file test, and read downstream by the
+# post-mortem mode, which matches the "### {n}." headings and the
+# rule:/concern: provenance labels). The canvas fills the version-controlled
+# template, html.escape()-ing every structured text field.
+# See docs/spec/canvas-review-report.md.
+# ---------------------------------------------------------------------------
+
+# Severity → abbreviation shown in the (space-constrained) canvas invalid table.
+_SEV_ABBREV = {"Critical": "Crit", "High": "High", "Medium": "Med", "Low": "Low"}
+
+# Relay trailer is intentionally NOT emitted here — see render_terminal_summary.
+
+
+def _sev_class(severity: str) -> str:
+    """CSS severity class for a severity word, e.g. 'High' -> 'sev-high'.
+
+    The result is derived from the (untrusted) severity text, so callers that
+    interpolate it into an HTML ``class="..."`` attribute must wrap it in
+    ``html.escape(..., quote=True)`` — it is intentionally not pre-escaped here,
+    so the escape stays visible at the attribute boundary like every other field.
+    """
+    return "sev-" + str(severity).strip().lower()
+
+
+def _sev_abbrev(severity: str) -> str:
+    """Short severity label for the canvas invalid table."""
+    return _SEV_ABBREV.get(severity, str(severity))
+
+
+def _location_str(file: object, line: object) -> str:
+    """Render a finding's location as ``file:line`` (or just ``file`` when line is null)."""
+    file_str = "" if file is None else str(file)
+    if line is not None and _is_int(line):
+        return f"{file_str}:{line}"
+    return file_str
+
+
+def _md_cell(text: object) -> str:
+    """Escape a value for a one-line Markdown table cell.
+
+    Collapses newlines to spaces and escapes the cell delimiter so a stray ``|``
+    or line break in finding text can't break the table layout.
+    """
+    return (
+        str("" if text is None else text)
+        .replace("\r\n", " ")
+        .replace("\n", " ")
+        .replace("\r", " ")
+        .replace("|", "\\|")
+        .strip()
+    )
+
+
+def _flatten(text: object) -> str:
+    """Collapse a value to a single line (for table 'reason' cells)."""
+    return " ".join(str("" if text is None else text).split())
+
+
+def _invalid_summary_text(n: int) -> str:
+    """e.g. '1 finding filtered as invalid' / '3 findings filtered as invalid'."""
+    return f"{n} finding{'' if n == 1 else 's'} filtered as invalid"
+
+
+# ── provenance → "Found by" labels ───────────────────────────────────────────
+#
+# Provenance entries are the reporter's filename-derived source labels — either a
+# bare string or an object carrying a ``source`` field (validated in Phase 2).
+# The canonical convention is ``rule--<name>`` and ``concern--<name>--<model>``
+# (e.g. ``concern--bugs--opus``). Anything that doesn't match is shown verbatim.
+# Three views derive from the same source list:
+#   * review.md   — ungrouped, "N source(s): rule:<name>, concern:<name> (<model>)"
+#                   (the post-mortem mode parses exactly these labels)
+#   * terminal    — grouped, "<name>(<model>,<model>)" for concerns, "rule:<name>"
+#   * canvas tags — grouped, colour-coded <span> tags (no "rule:" prefix needed)
+
+
+def _parse_source_label(label: str) -> tuple[str, str, str | None]:
+    """Parse one provenance source label into ``(kind, name, model)``.
+
+    ``kind`` is ``rule`` / ``concern`` / ``other``. Unrecognised labels are
+    returned verbatim as ``("other", label, None)``.
+    """
+    text = label.strip()
+    if text.startswith("rule--"):
+        return ("rule", text[len("rule--"):], None)
+    if text.startswith("concern--"):
+        rest = text[len("concern--"):]
+        if "--" in rest:
+            name, model = rest.rsplit("--", 1)
+            return ("concern", name, model or None)
+        return ("concern", rest, None)
+    return ("other", text, None)
+
+
+def _provenance_sources(provenance: object) -> list[tuple[str, str, str | None]]:
+    """Parse a finding's provenance list into ordered ``(kind, name, model)`` tuples."""
+    sources: list[tuple[str, str, str | None]] = []
+    if not isinstance(provenance, list):
+        return sources
+    for entry in provenance:
+        if isinstance(entry, dict):
+            label = entry.get("source")
+        else:
+            label = entry
+        if isinstance(label, str) and label.strip():
+            sources.append(_parse_source_label(label))
+    return sources
+
+
+def _group_sources(
+    sources: list[tuple[str, str, str | None]],
+) -> list[tuple[str, str, list[str]]]:
+    """Group sources by ``(kind, name)`` preserving order, collecting unique models."""
+    groups: list[tuple[str, str, list[str]]] = []
+    index: dict[tuple[str, str], int] = {}
+    for kind, name, model in sources:
+        key = (kind, name)
+        if key not in index:
+            index[key] = len(groups)
+            groups.append((kind, name, []))
+        if model:
+            models = groups[index[key]][2]
+            if model not in models:
+                models.append(model)
+    return groups
+
+
+def _found_by_md(provenance: object) -> str:
+    """review.md 'Found by' — ungrouped, count-prefixed, post-mortem-parseable."""
+    sources = _provenance_sources(provenance)
+    labels: list[str] = []
+    for kind, name, model in sources:
+        if kind == "rule":
+            labels.append(f"rule:{name}")
+        elif kind == "concern":
+            labels.append(f"concern:{name} ({model})" if model else f"concern:{name}")
+        else:
+            labels.append(name)
+    n = len(labels)
+    if n == 0:
+        return ""
+    prefix = f"{n} source{'' if n == 1 else 's'}: "
+    return prefix + ", ".join(labels)
+
+
+def _short_group_label(kind: str, name: str, models: list[str]) -> str:
+    """Grouped short label used by the terminal summary and canvas tags."""
+    if kind == "concern":
+        return f"{name}({','.join(models)})" if models else name
+    if kind == "rule":
+        return f"rule:{name}"
+    return name
+
+
+def _found_by_terminal(provenance: object) -> str:
+    """terminal 'Found by' — grouped short labels joined by ', '."""
+    groups = _group_sources(_provenance_sources(provenance))
+    return ", ".join(_short_group_label(k, n, m) for k, n, m in groups)
+
+
+def _found_tags_html(provenance: object) -> str:
+    """canvas 'Found by' — colour-coded, escaped <span> tags (grouped)."""
+    groups = _group_sources(_provenance_sources(provenance))
+    parts: list[str] = []
+    for kind, name, models in groups:
+        if kind == "concern":
+            text = f"{name}({','.join(models)})" if models else name
+            cls = "found-tag-concern"
+        else:
+            # rule + any unrecognised label use the neutral rule styling.
+            text = name
+            cls = "found-tag-rule"
+        parts.append(f'<span class="found-tag {cls}">{html.escape(text)}</span>')
+    return "".join(parts)
+
+
+# ── finding partitioning ─────────────────────────────────────────────────────
+
+
+def _partition_findings(findings: list) -> tuple[list, list, list]:
+    """Split findings into (confirmed, questionable, invalid) display order.
+
+    Confirmed/Questionable share one numbered sequence and sort by
+    ``display_number``; Invalid render in a table keyed by ``assessment_id``.
+    """
+    confirmed = [f for f in findings if f.get("verdict") == "Confirmed"]
+    questionable = [f for f in findings if f.get("verdict") == "Questionable"]
+    invalid = [f for f in findings if f.get("verdict") == "Invalid"]
+    confirmed.sort(key=lambda f: (f.get("display_number") is None, f.get("display_number") or 0))
+    questionable.sort(key=lambda f: (f.get("display_number") is None, f.get("display_number") or 0))
+    invalid.sort(key=lambda f: str(f.get("assessment_id") or ""))
+    return confirmed, questionable, invalid
+
+
+# ── review.md ────────────────────────────────────────────────────────────────
+
+
+def _md_finding_block(finding: dict) -> str:
+    """One Confirmed/Questionable finding block in the review.md shape."""
+    parts: list[str] = []
+    # Flatten the title to a single line before it lands in the
+    # "### n. [severity] title" heading. A raw CR/LF (or block markup) in the title
+    # would otherwise inject a forged heading / markdown into review.md, which the
+    # post-mortem mode then parses as a real "### n." heading.
+    parts.append(
+        f"### {finding.get('display_number')}. "
+        f"[{finding.get('severity', '')}] {_flatten(finding.get('title', ''))}"
+    )
+    meta = [
+        f"**File:** `{_location_str(finding.get('file', ''), finding.get('line'))}`",
+        f"**Fix complexity:** {finding.get('fix_complexity', '')}",
+        f"**Found by:** {_found_by_md(finding.get('provenance'))}",
+    ]
+    parts.append("\n".join(meta))
+    if finding.get("description"):
+        parts.append(finding["description"])
+    if finding.get("assessment"):
+        parts.append(f"> **Assessment:** {finding['assessment']}")
+    if finding.get("suggestion"):
+        parts.append(f"**Suggestion:** {finding['suggestion']}")
+    parts.append("---")
+    return "\n\n".join(parts)
+
+
+def _md_invalid_block(invalid: list) -> str:
+    """The collapsible invalid-findings <details> table for review.md."""
+    lines = [
+        "<details>",
+        f"<summary>{_invalid_summary_text(len(invalid))}</summary>",
+        "",
+        "| ID | Severity | File | Title | Reason |",
+        "|----|----------|------|-------|--------|",
+    ]
+    for f in invalid:
+        lines.append(
+            f"| {_md_cell(f.get('assessment_id') or '')} "
+            f"| {_md_cell(f.get('severity', ''))} "
+            f"| `{_md_cell(_location_str(f.get('file', ''), f.get('line')))}` "
+            f"| {_md_cell(f.get('title', ''))} "
+            f"| {_md_cell(_flatten(f.get('assessment', '')))} |"
+        )
+    lines.append("")
+    lines.append("</details>")
+    return "\n".join(lines)
+
+
+def _md_quality_block(notes: list) -> str:
+    """The Rule Quality Notes section for review.md."""
+    lines = ["## Rule Quality Notes", ""]
+    for n in notes:
+        lines.append(
+            f"- **{n.get('rule', '')}**: {n.get('observation', '')} "
+            f"— {n.get('suggestion', '')}"
+        )
+    return "\n".join(lines)
+
+
+def render_review_markdown(data: dict) -> str:
+    """Render the ``review.md`` report from a validated envelope.
+
+    Preserves the heading/field shape the reporter agent used to hand-author, so
+    downstream LLM readers (post-comments / post-mortem) and the golden-file test
+    keep working. Empty Confirmed/Questionable/Invalid/quality sections are
+    omitted (the reporter's "omit a section with no findings" rule).
+    """
+    run = data.get("run", {})
+    findings = data.get("findings", [])
+    notes = data.get("rule_quality_notes", []) or []
+    confirmed, questionable, invalid = _partition_findings(findings)
+
+    blocks: list[str] = ["# Unified Review Report"]
+    blocks.append(
+        "\n".join(
+            [
+                f"**Scope:** {run.get('scope', '')}",
+                f"**Date:** {run.get('date', '')}",
+                f"**Pipeline:** Discovery ({run.get('rule_count', 0)} rules, "
+                f"{run.get('concern_count', 0)} concerns) → Consolidation → Assessment",
+            ]
+        )
+    )
+    blocks.append(
+        "\n".join(
+            [
+                "## Summary",
+                "",
+                "| Verdict | Count |",
+                "|---------|-------|",
+                f"| ✅ Confirmed | {len(confirmed)} |",
+                f"| ❓ Questionable | {len(questionable)} |",
+                f"| ❌ Invalid (filtered) | {len(invalid)} |",
+            ]
+        )
+    )
+    blocks.append("---")
+
+    if confirmed:
+        blocks.append("## Confirmed Findings")
+        blocks.extend(_md_finding_block(f) for f in confirmed)
+    if questionable:
+        blocks.append("## Questionable Findings")
+        blocks.extend(_md_finding_block(f) for f in questionable)
+    if invalid:
+        blocks.append(_md_invalid_block(invalid))
+    if notes:
+        blocks.append(_md_quality_block(notes))
+
+    return "\n\n".join(blocks) + "\n"
+
+
+# ── terminal summary ─────────────────────────────────────────────────────────
+
+
+def render_terminal_summary(data: dict, report_path: str) -> str:
+    """Render the user-facing terminal summary string.
+
+    Shape matches the reporter agent's relayed summary: report path, pipeline
+    stats, a findings table (ALL Confirmed + Questionable, with a "Found by"
+    column), and rule-quality notes. The "relay everything above this line"
+    trailer is intentionally NOT emitted here: it was a control instruction for
+    an LLM agent's output; render-review is a tool whose stdout is pure data, and
+    the orchestrator (SKILL.md) owns the relay-verbatim guarantee.
+    """
+    run = data.get("run", {})
+    findings = data.get("findings", [])
+    notes = data.get("rule_quality_notes", []) or []
+    confirmed, questionable, _invalid = _partition_findings(findings)
+    actionable = confirmed + questionable
+    actionable.sort(key=lambda f: (f.get("display_number") is None, f.get("display_number") or 0))
+
+    blocks: list[str] = [f"📄 {report_path}"]
+    blocks.append(
+        f"{run.get('rule_count', 0)} rules + {run.get('concern_count', 0)} concerns "
+        f"→ {run.get('consolidated_count', 0)} unique findings → {len(actionable)} actionable"
+    )
+
+    if actionable:
+        table = [
+            "| # | Verdict | Severity | Found by | File | Issue |",
+            "|---|---------|----------|----------|------|-------|",
+        ]
+        for f in actionable:
+            icon = "✅" if f.get("verdict") == "Confirmed" else "❓"
+            table.append(
+                f"| {f.get('display_number')} "
+                f"| {icon} "
+                f"| {_md_cell(f.get('severity', ''))} "
+                f"| {_md_cell(_found_by_terminal(f.get('provenance')))} "
+                f"| {_md_cell(_location_str(f.get('file', ''), f.get('line')))} "
+                f"| {_md_cell(f.get('title', ''))} |"
+            )
+        blocks.append("\n".join(table))
+    else:
+        blocks.append("✅ No actionable findings.")
+
+    if notes:
+        quality = ["📝 Rule Quality Notes"]
+        for n in notes:
+            quality.append(
+                f"- {n.get('rule', '')}: {n.get('observation', '')} — {n.get('suggestion', '')}"
+            )
+        blocks.append("\n".join(quality))
+
+    return "\n\n".join(blocks) + "\n"
+
+
+# ── canvas HTML ──────────────────────────────────────────────────────────────
+
+
+def _strip_template_doc_comment(template: str) -> str:
+    """Drop the template's leading documentation comment.
+
+    The version-controlled template documents its placeholders in a leading
+    ``<!-- … -->`` block that itself contains the literal FR markers and
+    ``{{RUN_ID}}`` (the hand-filled fixture drops it). Removing everything from
+    the first comment opener up to ``<head>`` leaves only the body placeholders
+    for substitution, so a marker is never filled twice.
+    """
+    head_idx = template.find("<head>")
+    if head_idx == -1:
+        return template
+    prefix = template[:head_idx]
+    comment_idx = prefix.find("<!--")
+    if comment_idx == -1:
+        return template
+    return prefix[:comment_idx] + template[head_idx:]
+
+
+# ── Detail-sidecar sanitization (Phase 4: nh3, fail-closed) ──────────────────
+#
+# Reviewed content is untrusted (diffs may come from untrusted PR contributors),
+# so an assessor-authored ``A-XX-detail.html`` sidecar is sanitized through nh3
+# (Rust `ammonia`) before it is embedded in the canvas. Division of duties (see
+# the template CSP <meta> + docs/spec/canvas-review-report.md):
+#   * nh3 = script — an HTML + SVG tag/attribute allowlist that keeps inline
+#     ``style`` but strips <script>/on*/``javascript:``/SVG animation
+#     (animate/set/...)/foreignObject and every external href.
+#   * CSP = exfil — img/font/connect-src 'self' data: blocks the residual
+#     url()/<img>/fetch beacon vector for the sanitized-but-untrusted markup.
+# Fail-closed: when nh3 is not importable, sanitize_detail_html returns None and
+# the canvas panel renders the escaped structural text fields only — raw HTML is
+# never emitted.
+
+# HTML tags the rich-detail palette (code-block / callout / before-after / flow)
+# and ordinary prose need. Scripting, embedding, and form tags are absent, so
+# nh3 strips them.
+_DETAIL_HTML_TAGS = frozenset({
+    "div", "span", "p", "pre", "code", "samp", "kbd", "var",
+    "strong", "em", "b", "i", "u", "s", "small", "mark", "sub", "sup",
+    "br", "hr", "wbr",
+    "h1", "h2", "h3", "h4", "h5", "h6",
+    "ul", "ol", "li", "dl", "dt", "dd",
+    "table", "thead", "tbody", "tfoot", "tr", "td", "th", "caption", "col", "colgroup",
+    "a", "abbr", "blockquote", "figure", "figcaption",
+})
+
+# SVG tags for flow / timing / call-chain diagrams. The scripting and animation
+# vectors — ``script``, ``animate*``/``set``, and the ``foreignObject`` HTML
+# escape hatch — are deliberately excluded (see _DETAIL_CLEAN_CONTENT_TAGS).
+_DETAIL_SVG_TAGS = frozenset({
+    "svg", "g", "defs", "symbol", "use", "title", "desc",
+    "path", "rect", "circle", "ellipse", "line", "polyline", "polygon",
+    "text", "tspan",
+    "marker", "linearGradient", "radialGradient", "stop", "pattern", "clipPath", "mask",
+})
+
+_DETAIL_TAGS = _DETAIL_HTML_TAGS | _DETAIL_SVG_TAGS
+
+# Attributes allowed on every tag: presentational/global HTML, ARIA, and the SVG
+# geometry/paint/text presentation set. None of these can execute script (event
+# handlers are simply absent, so nh3 drops them); ``style`` is kept on purpose
+# (CSP owns the exfil vector). They are inert on HTML elements, so allowing the
+# SVG attributes globally keeps the map small without widening the attack surface.
+_DETAIL_GLOBAL_ATTRS = frozenset({
+    "class", "style", "id", "title", "role", "lang", "dir",
+    "aria-hidden", "aria-label", "aria-labelledby", "aria-describedby",
+    # SVG geometry
+    "x", "y", "x1", "y1", "x2", "y2", "cx", "cy", "r", "rx", "ry", "dx", "dy",
+    "width", "height", "d", "points", "transform", "viewBox", "preserveAspectRatio",
+    "offset", "fx", "fy", "refX", "refY", "orient", "markerWidth", "markerHeight",
+    "markerUnits", "gradientUnits", "gradientTransform", "spreadMethod",
+    "patternUnits", "patternContentUnits", "clipPathUnits", "maskUnits",
+    # SVG paint / stroke
+    "fill", "fill-opacity", "fill-rule", "stroke", "stroke-width", "stroke-opacity",
+    "stroke-linecap", "stroke-linejoin", "stroke-dasharray", "stroke-dashoffset",
+    "stroke-miterlimit", "opacity", "color", "stop-color", "stop-opacity",
+    "marker-start", "marker-mid", "marker-end", "clip-path", "clip-rule", "mask",
+    # SVG text
+    "text-anchor", "dominant-baseline", "alignment-baseline", "baseline-shift",
+    "font-family", "font-size", "font-weight", "font-style", "letter-spacing",
+    "xml:space", "xmlns", "xmlns:xlink",
+    # HTML table layout
+    "colspan", "rowspan", "span", "scope", "headers", "abbr",
+})
+
+# href/xlink:href are allowed only where references make sense; their *values*
+# are still restricted to same-document fragments by _detail_attribute_filter.
+_DETAIL_ATTRIBUTES = {
+    "*": _DETAIL_GLOBAL_ATTRS,
+    "a": frozenset({"href"}),
+    "use": frozenset({"href", "xlink:href"}),
+}
+
+# Tags whose entire CONTENT (not just the tag) is removed — scripting, raw CSS,
+# SVG animation, and the foreignObject HTML-in-SVG escape hatch. None overlap the
+# allowlist above (nh3 forbids a tag appearing in both sets).
+_DETAIL_CLEAN_CONTENT_TAGS = frozenset({
+    "script", "style", "foreignObject",
+    "animate", "animateTransform", "animateMotion", "set", "mpath",
+})
+
+# URL-bearing attributes whose value must be a same-document fragment (``#...``).
+_DETAIL_URL_ATTRS = frozenset({"href", "xlink:href", "src"})
+
+
+def _detail_attribute_filter(tag: str, attr: str, value: str) -> str | None:
+    """nh3 per-attribute filter enforcing the "no external href" rule.
+
+    Any href/xlink:href/src is kept only when it is a same-document fragment
+    (``#id`` — e.g. an SVG ``<use>`` or gradient reference); every external,
+    ``javascript:``, or ``data:`` target is dropped. All other attributes pass
+    through unchanged (the tag/attribute allowlist already constrained them).
+    """
+    if attr.lower() in _DETAIL_URL_ATTRS:
+        return value if value.startswith("#") else None
+    return value
+
+
+def sanitize_detail_html(raw: str) -> str | None:
+    """Sanitize an assessor-authored detail fragment via nh3 (fail-closed).
+
+    Returns the nh3-cleaned HTML/SVG, or ``None`` when nh3 is unavailable — the
+    fail-closed contract: without the sanitizer the caller emits the escaped
+    structural text fields only, never raw HTML.
+    """
+    if _nh3 is None:
+        return None
+    return _nh3.clean(
+        raw,
+        tags=set(_DETAIL_TAGS),
+        clean_content_tags=set(_DETAIL_CLEAN_CONTENT_TAGS),
+        attributes={tag: set(attrs) for tag, attrs in _DETAIL_ATTRIBUTES.items()},
+        attribute_filter=_detail_attribute_filter,
+        strip_comments=True,
+        link_rel="noopener noreferrer",
+    )
+
+
+def _detail_sidecar_path(run_dir: str, assessment_id: str) -> str:
+    """Path to a finding's optional rich-detail sidecar within the run dir."""
+    return os.path.join(run_dir, "assessments", f"{assessment_id}-detail.html")
+
+
+def _resolve_finding_detail(run_dir: str | None, finding: dict) -> str | None:
+    """Load + sanitize a finding's rich-detail sidecar, or ``None``.
+
+    Returns ``None`` — so the caller falls back to escaped text — when: the
+    finding has no detail, there is no run dir / assessment id to locate it, the
+    ``assessment_id`` is not a safe filename token, the sidecar file is missing
+    or unreadable, nh3 is unavailable (fail-closed), or the fragment sanitizes to
+    nothing.
+    """
+    if not run_dir or not finding.get("has_detail"):
+        return None
+    assessment_id = finding.get("assessment_id")
+    if not assessment_id:
+        return None
+    # assessment_id locates a file, and records.json is authored by an LLM from
+    # untrusted diff content, so a prompt-injected id must not traverse out of
+    # {run_dir}/assessments (e.g. "../../etc/passwd") or smuggle a null byte
+    # (which open() raises ValueError on, aborting the always-on canvas render).
+    # The assessor convention is a plain "A-NN" token; reject anything else.
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", assessment_id):
+        return None
+    try:
+        with open(_detail_sidecar_path(run_dir, assessment_id), encoding="utf-8") as fh:
+            raw = fh.read()
+    except (OSError, ValueError):
+        return None
+    cleaned = sanitize_detail_html(raw)
+    if cleaned is None or not cleaned.strip():
+        return None
+    return cleaned
+
+
+def _canvas_finding_block(
+    finding: dict, detail_html: str | None = None, dimmed: bool = False
+) -> str:
+    """One ``.finding`` accordion block for the canvas (every text field escaped).
+
+    ``detail_html`` is the already-nh3-sanitized rich-detail fragment (or
+    ``None``). When present it is embedded after the structural fields, wrapped in
+    ``<div class="rich-detail">``; when absent the panel renders the escaped
+    structural fields only — the fail-closed "plain escaped text" behaviour.
+
+    ``dimmed`` bakes the ``dimmed`` class onto the block so a finding the user
+    persisted as *disregarded* (run state, read back by render-review) stays dimmed
+    across every re-render — not just within the live JS session. The action-bar
+    script seeds its own disregarded set from these server-rendered classes, so the
+    persisted dim survives a cold canvas load too, not only an in-session morph.
+    """
+    rid = finding.get("record_id", "")
+    number = finding.get("display_number")
+    title = finding.get("title", "")
+    severity = finding.get("severity", "")
+    location = _location_str(finding.get("file", ""), finding.get("line"))
+    aria = f"Select finding {number}: {title}"
+
+    sections = [
+        "          <div class=\"detail-section\">\n"
+        "            <div class=\"detail-label\">Location</div>\n"
+        f"            <span class=\"detail-file\">{html.escape(location)}</span>"
+        f" · {html.escape(str(finding.get('fix_complexity', '')))}\n"
+        "          </div>"
+    ]
+    if finding.get("description"):
+        sections.append(
+            "          <div class=\"detail-section\">\n"
+            "            <div class=\"detail-label\">Description</div>\n"
+            f"            <p>{html.escape(finding['description'])}</p>\n"
+            "          </div>"
+        )
+    if finding.get("assessment"):
+        sections.append(
+            "          <div class=\"detail-assessment\">\n"
+            "            <div class=\"detail-label\">Assessment</div>\n"
+            f"            <p>{html.escape(finding['assessment'])}</p>\n"
+            "          </div>"
+        )
+    if finding.get("suggestion"):
+        sections.append(
+            "          <div class=\"detail-suggestion\">\n"
+            "            <div class=\"detail-label\">Suggestion</div>\n"
+            f"            <p>{html.escape(finding['suggestion'])}</p>\n"
+            "          </div>"
+        )
+    if detail_html:
+        # Already nh3-sanitized; embedded raw (not escaped) inside the palette
+        # wrapper. html.escape on it would defeat the whole rich-detail feature.
+        sections.append(
+            "          <div class=\"rich-detail\">\n"
+            f"{detail_html}\n"
+            "          </div>"
+        )
+    detail_content = "\n".join(sections)
+
+    classes = "finding dimmed" if dimmed else "finding"
+    return (
+        f'      <div class="{classes}" data-record-id="{html.escape(str(rid), quote=True)}">\n'
+        f'        <input type="checkbox" class="row-cb" aria-label="{html.escape(aria, quote=True)}">\n'
+        '        <details class="finding-d" name="findings">\n'
+        '          <summary class="finding-summary">\n'
+        '            <span class="caret" aria-hidden="true"></span>\n'
+        f'            <span class="num">{html.escape(str(number))}</span>\n'
+        f'            <span class="sev {html.escape(_sev_class(severity), quote=True)}">{html.escape(str(severity))}</span>\n'
+        f'            <span class="found-by">{_found_tags_html(finding.get("provenance"))}</span>\n'
+        f'            <span class="title">{html.escape(str(title))}</span>\n'
+        '          </summary>\n'
+        '          <div class="detail-content">\n'
+        f"{detail_content}\n"
+        '          </div>\n'
+        '        </details>\n'
+        '      </div>'
+    )
+
+
+def _canvas_invalid_row(finding: dict) -> str:
+    """One ``<tr>`` for the canvas invalid-findings table."""
+    aid = finding.get("assessment_id") or ""
+    severity = finding.get("severity", "")
+    return (
+        f"        <tr><td>{html.escape(str(aid))}</td>"
+        f'<td><span class="sev {html.escape(_sev_class(severity), quote=True)}">{html.escape(_sev_abbrev(severity))}</span></td>'
+        f"<td>{html.escape(str(finding.get('title', '')))}</td>"
+        f"<td>{html.escape(_flatten(finding.get('assessment', '')))}</td></tr>"
+    )
+
+
+def _canvas_quality_item(note: dict) -> str:
+    """One ``.quality-item`` block for the canvas."""
+    return (
+        f'    <div class="quality-item"><strong>{html.escape(str(note.get("rule", "")))}</strong>: '
+        f'{html.escape(str(note.get("observation", "")))} — '
+        f'{html.escape(str(note.get("suggestion", "")))}</div>'
+    )
+
+
+def render_canvas_html(
+    data: dict,
+    template: str,
+    details: dict[str, str] | None = None,
+    disregarded: set[str] | None = None,
+    parent_origin: str = DEFAULT_PARENT_ORIGIN,
+) -> str:
+    """Fill the canvas template with pre-rendered, escaped markup.
+
+    A single-pass regex substitution replaces every placeholder exactly once, so
+    injected (already-escaped) content is never re-scanned for further markers.
+    ``{{RUN_ID}}`` is escaped for an attribute context; escaped finding text can
+    never forge a ``<!-- FR:* -->`` marker because ``html.escape`` turns ``<``
+    into ``&lt;``.
+
+    ``parent_origin`` is baked into ``{{PARENT_ORIGIN}}`` (the canvas
+    ``data-parent-origin`` attribute): the action bar pins it as the postMessage
+    target origin and validates it on inbound messages, so the channel is
+    origin-validated rather than a wildcard ``"*"`` broadcast.
+
+    ``details`` maps a finding's ``record_id`` to its already-nh3-sanitized
+    rich-detail fragment (built by the render-review CLI handler, which owns the
+    file IO + sanitization). Absent or unmapped findings render text-only — the
+    fail-closed default, so callers without sidecars get the Phase 3 behaviour.
+
+    ``disregarded`` is the set of ``record_id``s persisted as disregarded run state
+    (read back from ``run-state.json``); their ``.finding`` block is rendered with
+    the ``dimmed`` class so the dim survives across re-renders. Passed as data (no
+    file IO here) to keep this function pure and testable, mirroring ``details``.
+    """
+    details = details or {}
+    disregarded = disregarded or set()
+    run = data.get("run", {})
+    findings = data.get("findings", [])
+    notes = data.get("rule_quality_notes", []) or []
+    confirmed, questionable, invalid = _partition_findings(findings)
+    actionable_count = len(confirmed) + len(questionable)
+
+    def block(finding: dict) -> str:
+        rid = finding.get("record_id")
+        return _canvas_finding_block(finding, details.get(rid), dimmed=rid in disregarded)
+
+    meta = (
+        f"Scope: {html.escape(str(run.get('scope', '')))} · "
+        f"{html.escape(str(run.get('date', '')))} · "
+        f"{run.get('rule_count', 0)} rules + {run.get('concern_count', 0)} concerns → "
+        f"{run.get('consolidated_count', 0)} unique → {actionable_count} actionable"
+    )
+    badges = (
+        f'<span class="summary-badge badge-confirmed"><span class="count">{len(confirmed)}</span> Confirmed</span>'
+        f'<span class="summary-badge badge-questionable"><span class="count">{len(questionable)}</span> Questionable</span>'
+        f'<span class="summary-badge badge-invalid"><span class="count">{len(invalid)}</span> Invalid</span>'
+    )
+
+    replacements = {
+        "{{RUN_ID}}": html.escape(str(run.get("run_id", "")), quote=True),
+        "{{PARENT_ORIGIN}}": html.escape(str(parent_origin), quote=True),
+        "<!-- FR:META -->": meta,
+        "<!-- FR:SUMMARY_BADGES -->": badges,
+        "<!-- FR:CONFIRMED_COUNT -->": str(len(confirmed)),
+        "<!-- FR:CONFIRMED_ROWS -->": "\n".join(block(f) for f in confirmed),
+        "<!-- FR:QUESTIONABLE_COUNT -->": str(len(questionable)),
+        "<!-- FR:QUESTIONABLE_ROWS -->": "\n".join(block(f) for f in questionable),
+        "<!-- FR:INVALID_SUMMARY -->": html.escape(_invalid_summary_text(len(invalid))),
+        "<!-- FR:INVALID_ROWS -->": "\n".join(_canvas_invalid_row(f) for f in invalid),
+        "<!-- FR:QUALITY_SUMMARY -->": html.escape(f"Rule Quality Notes ({len(notes)})"),
+        "<!-- FR:QUALITY_NOTES -->": "\n".join(_canvas_quality_item(n) for n in notes),
+    }
+
+    stripped = _strip_template_doc_comment(template)
+    # Longest-first keeps a marker that is a prefix of another from matching early.
+    pattern = re.compile("|".join(re.escape(k) for k in sorted(replacements, key=len, reverse=True)))
+    return pattern.sub(lambda m: replacements[m.group(0)], stripped)
+
+
+# ── CLI handler ──────────────────────────────────────────────────────────────
+
+
+def _write_text(path: str, text: str) -> None:
+    """Write *text* to *path* as UTF-8, creating parent directories as needed."""
+    parent = os.path.dirname(os.path.abspath(path))
+    os.makedirs(parent, exist_ok=True)
+    with open(path, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write(text)
+
+
+def _emit_stdout(text: str) -> None:
+    """Write *text* to stdout as UTF-8 regardless of the ambient console encoding.
+
+    The orchestrator captures this stream (a pipe) to relay the summary verbatim,
+    so on Windows the ambient encoding is cp1252 and ``print`` would raise
+    ``UnicodeEncodeError`` on the summary's glyphs (the doc/pipeline/verdict
+    emoji and the ``->`` arrow). Writing UTF-8 bytes to the binary buffer keeps
+    the relayed bytes deterministic; fall back to a text write for capture
+    harnesses that expose no binary buffer.
+    """
+    buffer = getattr(sys.stdout, "buffer", None)
+    if buffer is not None:
+        buffer.write(text.encode("utf-8"))
+        buffer.flush()
+    else:
+        sys.stdout.write(text)
+        sys.stdout.flush()
+
+
+def capabilities(args: argparse.Namespace) -> None:
+    """CLI: report optional-capability availability as JSON to stdout.
+
+    The orchestrator runs this BEFORE assessment to decide whether the assessor
+    may author rich HTML/SVG detail sidecars: ``rich_html`` is on only when nh3
+    is importable, because render-review fails closed to escaped text without it.
+    Pure-ASCII JSON, so a plain ``print`` is safe under any console encoding.
+    """
+    nh3_available = _nh3 is not None
+    payload = {
+        "nh3": nh3_available,
+        "rich_html": nh3_available,
+        "nh3_version": getattr(_nh3, "__version__", None) if nh3_available else None,
+        "schema_version": RECORDS_SCHEMA_VERSION,
+    }
+    print(json.dumps(payload))
+
+
+def render_review(args: argparse.Namespace) -> None:
+    """CLI: render review.md, the terminal summary, and the canvas from records.json.
+
+    On a validation failure, emits the same structured per-record error JSON as
+    ``validate-records`` to stderr and exits 1 (the orchestrator retries the
+    reporter, then falls back to the legacy markdown path). On success, writes
+    review.md and the always-on canvas file, then prints the terminal summary to
+    stdout for the orchestrator to relay.
+    """
+    records_path: str = args.records
+    data, errors = load_and_validate_records(records_path)
+
+    if errors:
+        _emit_validation_errors(records_path, errors)
+        sys.exit(1)
+
+    run_dir = args.run_dir or os.path.dirname(records_path) or "."
+    review_out = args.review_out or os.path.join(run_dir, "review.md")
+    canvas_out = args.canvas_out or os.path.join(args.repo, DEFAULT_CANVAS_RELPATH)
+    template_path = args.template or str(CANVAS_TEMPLATE_PATH)
+    # Trusted parent origin pinned into the canvas postMessage channel (getattr keeps
+    # callers that build a bare Namespace working; falls back to the safe default).
+    parent_origin = getattr(args, "parent_origin", None) or DEFAULT_PARENT_ORIGIN
+
+    # All-or-nothing: read everything that can fail BEFORE writing any artifact,
+    # so a missing/unreadable --template fails the whole render (like the
+    # validation-failure path above, which also writes nothing) instead of
+    # leaving review.md half-written beside an unstructured traceback. The
+    # template read is the only post-validation step that raises an uncaught
+    # OSError; the sidecar/run-state reads below are individually fail-safe.
+    with open(template_path, encoding="utf-8") as fh:
+        template = fh.read()
+
+    # Sanitize each finding's optional rich-detail sidecar (nh3, fail-closed):
+    # has_detail findings get their {run_dir}/assessments/{A-XX}-detail.html
+    # loaded + cleaned; anything else (no nh3, missing file, empty) renders as
+    # escaped text only. Keyed by stable record_id for the canvas renderer.
+    findings = data.get("findings", []) if isinstance(data, dict) else []
+    details: dict[str, str] = {}
+    for finding in findings:
+        cleaned = _resolve_finding_detail(run_dir, finding)
+        if cleaned is not None:
+            details[finding.get("record_id")] = cleaned
+
+    # Disregarded run state: render-review re-applies the user's persisted
+    # "disregard" decisions (written by `validate-action --apply-disregard`) so the
+    # canvas dims those findings on every re-render. Fail-open (empty) when the
+    # state file is absent/unreadable or belongs to a different run_id.
+    run = data.get("run", {}) if isinstance(data, dict) else {}
+    expected_run_id = run.get("run_id") if isinstance(run, dict) else None
+    run_state = load_run_state(run_dir, expected_run_id=expected_run_id)
+    disregarded = set(run_state.get("disregarded", []))
+
+    # Render both artifacts in memory, THEN write — so any render-time failure
+    # also leaves no partial output. review.md is Markdown (raw text fields, no
+    # HTML escaping); the canvas is ALWAYS written (gitignored, inert when
+    # Treemon is down).
+    review_md = render_review_markdown(data)
+    canvas_html = render_canvas_html(data, template, details, disregarded, parent_origin)
+    _write_text(review_out, review_md)
+    _write_text(canvas_out, canvas_html)
+
+    # Terminal summary -> stdout for verbatim relay (UTF-8, locale-independent).
+    _emit_stdout(render_terminal_summary(data, review_out))
+
+
+# ---------------------------------------------------------------------------
+# validate-action (Phase 6): the canvas action-bar round-trip.
+#
+# The canvas posts {action, run_id, record_ids[], instructions} to the
+# orchestrator. Before the orchestrator does anything (and only after a human
+# confirms), it calls `validate-action` to validate/expand the payload against
+# records.json: the posted run_id must match the rendered run (rejecting a forged
+# action from injected canvas JS), every record_id must exist, and each resolves
+# to its file/line/title/suggestion. Python's role stays mechanical — it validates
+# a schema-defined contract and resolves stable ids; it never executes anything.
+#
+# `disregard` is the one action with persisted state: `--apply-disregard` records
+# the ids in run-state.json so render-review re-applies the dim across re-renders.
+# See docs/spec/canvas-review-report.md (postMessage actions + Security Model).
+# ---------------------------------------------------------------------------
+
+# The canvas action bar posts exactly these namespaced verbs (the data-action
+# values in templates/review-canvas.html). validate-action is fail-closed on the
+# verb: anything outside this allowlist is rejected, never echoed back as a
+# resolved action. disregard is the one verb that carries a persisted side
+# effect (run-state.json), so it is named separately and gated on its own.
+DISREGARD_ACTION = "focused-review.disregard"
+VALID_ACTIONS = ("focused-review.fix", DISREGARD_ACTION, "focused-review.document")
+
+# Per-run state the canvas re-applies across renders (currently: disregarded ids).
+# Lives beside records.json in the run directory.
+RUN_STATE_FILENAME = "run-state.json"
+
+
+def _run_state_path(run_dir: str | None) -> str:
+    """Path to the run-state file inside *run_dir* (defaults to the cwd)."""
+    return os.path.join(run_dir or ".", RUN_STATE_FILENAME)
+
+
+def load_run_state(run_dir: str | None, expected_run_id: str | None = None) -> dict:
+    """Read ``{run_dir}/run-state.json``; fail-open to an empty state.
+
+    The persisted run state holds the ``disregarded`` record_ids the canvas dims
+    on every re-render. Any read/parse problem — or a ``run_id`` that does not
+    match *expected_run_id* (stale state from a different run) — yields an empty
+    state: disregard is an additive canvas affordance, never a hard dependency, so
+    a missing or unreadable file must never block the always-written canvas.
+    """
+    empty: dict = {"disregarded": []}
+    path = _run_state_path(run_dir)
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.loads(fh.read())
+    except (OSError, ValueError):
+        return empty
+    if not isinstance(data, dict):
+        return empty
+    if expected_run_id is not None:
+        # When the caller names the run it expects, honour the state only if it is
+        # stamped with that exact run_id. A state file with a missing/blank or
+        # mismatched run_id is treated as stale/foreign (empty) — render-review
+        # always passes expected_run_id, so this never dims another run's findings.
+        state_run_id = data.get("run_id")
+        if not (_is_nonempty_str(state_run_id) and state_run_id == expected_run_id):
+            return empty
+    raw = data.get("disregarded")
+    disregarded = [r for r in raw if _is_nonempty_str(r)] if isinstance(raw, list) else []
+    return {"disregarded": disregarded}
+
+
+def persist_disregard(run_dir: str | None, run_id: str, record_ids: list[str]) -> dict:
+    """Merge *record_ids* into the run-state's disregarded set and write it.
+
+    Disregard is monotonic within a run (add-only): the existing set is preserved
+    and new ids appended in first-seen order, so render-review re-applies the dim
+    on every subsequent re-render. Returns the persisted state dict. The caller is
+    expected to have validated *record_ids* (via :func:`validate_action`) first.
+    """
+    existing = load_run_state(run_dir, expected_run_id=run_id)
+    disregarded = list(existing.get("disregarded", []))
+    seen = set(disregarded)
+    for rid in record_ids:
+        if _is_nonempty_str(rid) and rid not in seen:
+            seen.add(rid)
+            disregarded.append(rid)
+    state = {
+        "schema_version": RECORDS_SCHEMA_VERSION,
+        "run_id": run_id,
+        "disregarded": disregarded,
+    }
+    _write_text(_run_state_path(run_dir), json.dumps(state, indent=2) + "\n")
+    return state
+
+
+def _resolve_action_finding(finding: dict) -> dict:
+    """Resolve a finding to the fields the orchestrator needs to act on it.
+
+    The spec requires file/line/title/suggestion; the rest (severity, verdict,
+    fix_complexity, the stable ids, display_number) give the orchestrator enough
+    context to describe the action to the human and to scope a fix precisely.
+    """
+    return {
+        "record_id": finding.get("record_id"),
+        "assessment_id": finding.get("assessment_id"),
+        "display_number": finding.get("display_number"),
+        "title": finding.get("title", ""),
+        "file": finding.get("file", ""),
+        "line": finding.get("line"),
+        "severity": finding.get("severity", ""),
+        "verdict": finding.get("verdict", ""),
+        "fix_complexity": finding.get("fix_complexity", ""),
+        "suggestion": finding.get("suggestion", ""),
+    }
+
+
+def validate_action(
+    data: object,
+    run_id: object,
+    record_ids: list[str],
+    *,
+    action: str | None = None,
+    instructions: str = "",
+) -> tuple[dict | None, list[dict]]:
+    """Validate/expand a posted canvas action against a records.json envelope.
+
+    Returns ``(expanded, errors)``. ``errors`` is a list of structured per-record
+    error dicts (same shape as :func:`validate_records`, scope ``"action"``); when
+    it is empty, ``expanded`` is the resolved action — every targeted ``record_id``
+    resolved to file/line/title/suggestion. The ``action`` verb (when present) must
+    be one of :data:`VALID_ACTIONS`; a mismatched/forged ``run_id`` or any unknown
+    ``record_id`` is rejected. Never raises; never executes anything.
+    """
+    errors: list[dict] = []
+
+    # Action verb allowlist (fail-closed). A forged/arbitrary verb is rejected
+    # here rather than echoed back as a "resolved" action. ``None`` means
+    # "resolve only" (no verb posted) and is permitted — the CLI ``--action``
+    # defaults to None and the pure-resolve callers rely on it.
+    if action is not None and action not in VALID_ACTIONS:
+        errors.append(
+            _records_error(
+                "action", None, "action", "action",
+                f"unknown action {action!r}: must be one of "
+                f"{', '.join(VALID_ACTIONS)}",
+            )
+        )
+
+    if not isinstance(data, dict):
+        errors.append(
+            _records_error(
+                "action",
+                None,
+                "$",
+                "run_id",
+                f"records.json root must be a JSON object, got {_json_type_name(data)}",
+            )
+        )
+        return None, errors
+
+    run = data.get("run")
+    actual_run_id = run.get("run_id") if isinstance(run, dict) else None
+
+    # run_id must match the rendered run — this is the forgery gate.
+    if not _is_nonempty_str(run_id):
+        errors.append(
+            _records_error(
+                "action", None, "run_id", "run_id",
+                "run_id is required to validate a canvas action",
+            )
+        )
+    elif not _is_nonempty_str(actual_run_id):
+        errors.append(
+            _records_error(
+                "action", None, "run_id", "run_id",
+                "records.json has no run.run_id to match the posted action against",
+            )
+        )
+    elif run_id != actual_run_id:
+        errors.append(
+            _records_error(
+                "action", None, "run_id", "run_id",
+                f"run_id mismatch: posted {run_id!r} does not match records.json "
+                f"run_id {actual_run_id!r} (rejecting a possibly forged action)",
+            )
+        )
+
+    # Index findings by stable record_id so each posted id resolves (or doesn't).
+    findings = data.get("findings")
+    by_id: dict[str, dict] = {}
+    if isinstance(findings, list):
+        for finding in findings:
+            if isinstance(finding, dict):
+                rid = finding.get("record_id")
+                if _is_nonempty_str(rid):
+                    by_id.setdefault(rid, finding)
+
+    resolved: list[dict] = []
+    if not record_ids:
+        errors.append(
+            _records_error(
+                "action", None, "record_ids", "record_ids",
+                "no record_ids provided; a canvas action must target at least one finding",
+            )
+        )
+    for i, rid in enumerate(record_ids):
+        if not _is_nonempty_str(rid):
+            errors.append(
+                _records_error(
+                    "action", i, f"record_ids[{i}]", "record_id",
+                    "record_id must be a non-empty string",
+                    record_id=rid if isinstance(rid, str) else None,
+                )
+            )
+            continue
+        finding = by_id.get(rid)
+        if finding is None:
+            errors.append(
+                _records_error(
+                    "action", i, f"record_ids[{i}]", "record_id",
+                    f"unknown record_id {rid!r}: not present in records.json",
+                    record_id=rid,
+                )
+            )
+        else:
+            resolved.append(_resolve_action_finding(finding))
+
+    if errors:
+        return None, errors
+
+    expanded = {
+        "valid": True,
+        "schema_version": RECORDS_SCHEMA_VERSION,
+        "action": action,
+        "run_id": run_id,
+        "instructions": instructions or "",
+        "record_count": len(resolved),
+        "findings": resolved,
+    }
+    return expanded, []
+
+
+def _load_records_only(path: str | os.PathLike) -> tuple[object, dict | None]:
+    """Read + JSON-parse *path* without full schema validation.
+
+    The action round-trip runs against an already-rendered (hence already
+    schema-validated) records.json, so re-validating the whole envelope here would
+    let an unrelated field error block a legitimate action. Returns ``(data,
+    error)`` where ``error`` is a single envelope-scoped dict on a read/parse
+    failure (``data`` then ``None``), mirroring :func:`load_and_validate_records`.
+    """
+    try:
+        with open(path, encoding="utf-8") as fh:
+            raw = fh.read()
+    except FileNotFoundError:
+        return None, _records_error(
+            "envelope", None, "$", None, f"records.json not found: {path}"
+        )
+    except OSError as exc:
+        return None, _records_error(
+            "envelope", None, "$", None, f"could not read records.json: {exc}"
+        )
+    try:
+        return json.loads(raw), None
+    except json.JSONDecodeError as exc:
+        return None, _records_error(
+            "envelope", None, "$", None, f"records.json is not valid JSON: {exc}"
+        )
+
+
+def _split_record_ids(raw: str | None) -> list[str]:
+    """Parse the comma-separated ``--record-ids`` value into a de-duped list.
+
+    record_ids are per-run tokens (``r1``, ``r2``, …) so a comma is a safe
+    separator. Order is preserved (first-seen) and blanks/dupes are dropped.
+    """
+    if not raw:
+        return []
+    seen: set[str] = set()
+    ids: list[str] = []
+    for tok in raw.split(","):
+        tok = tok.strip()
+        if tok and tok not in seen:
+            seen.add(tok)
+            ids.append(tok)
+    return ids
+
+
+def _emit_action_error(
+    path: str, run_id: object, action: str | None, errors: list[dict]
+) -> None:
+    """Print the structured action-validation failure payload to stderr."""
+    payload = {
+        "valid": False,
+        "schema_version": RECORDS_SCHEMA_VERSION,
+        "records_path": str(path),
+        "run_id": run_id,
+        "action": action,
+        "error_count": len(errors),
+        "errors": errors,
+    }
+    print(json.dumps(payload, indent=2), file=sys.stderr)
+
+
+def validate_action_command(args: argparse.Namespace) -> None:
+    """CLI: validate/expand a posted canvas action against records.json.
+
+    On success prints the resolved action JSON to stdout (exit 0). On a forged
+    run_id, unknown record_id, an unknown action verb, or a missing/unparseable
+    records.json, prints the structured errors to stderr and exits 1 — so the
+    orchestrator rejects the action instead of executing it. ``--apply-disregard``
+    additionally persists the (validated) ids as disregarded run state after a
+    successful validation; it is the only side effect, is bound to the
+    ``focused-review.disregard`` verb (rejected for any other action), and is
+    gated behind the human-confirmation step in SKILL.md.
+    """
+    path: str = args.records
+    posted_run_id = args.run_id
+    action = args.action
+    instructions = args.instructions or ""
+    record_ids = _split_record_ids(args.record_ids)
+
+    # --apply-disregard is bound to the disregard verb only: it is the one side
+    # effect that persists state, so refuse the flag for any other (or absent)
+    # action rather than silently writing run-state for a fix/document call.
+    # Fail-closed and fail-fast — checked before any records IO.
+    if getattr(args, "apply_disregard", False) and action != DISREGARD_ACTION:
+        _emit_action_error(
+            path, posted_run_id, action,
+            [_records_error(
+                "action", None, "apply_disregard", "action",
+                f"--apply-disregard requires --action {DISREGARD_ACTION!r}, "
+                f"got {action!r}; refusing to persist disregard state for a "
+                f"non-disregard action",
+            )],
+        )
+        sys.exit(1)
+
+    data, load_error = _load_records_only(path)
+    if load_error is not None:
+        _emit_action_error(path, posted_run_id, action, [load_error])
+        sys.exit(1)
+
+    resolved, errors = validate_action(
+        data, posted_run_id, record_ids, action=action, instructions=instructions
+    )
+    if errors:
+        _emit_action_error(path, posted_run_id, action, errors)
+        sys.exit(1)
+
+    assert resolved is not None  # errors empty => resolved populated
+    resolved["records_path"] = str(path)
+
+    # Disregard is the one action that persists state. Only after a successful
+    # validation (so a forged run_id / unknown id can never write state). The
+    # ``action == DISREGARD_ACTION`` guard is co-located with the side effect so
+    # it holds even for a caller that bypasses the argparse/early gate above.
+    if getattr(args, "apply_disregard", False) and action == DISREGARD_ACTION:
+        run_dir = args.run_dir or os.path.dirname(path) or "."
+        state = persist_disregard(run_dir, posted_run_id, record_ids)
+        resolved["disregarded"] = state.get("disregarded", [])
+        resolved["run_state_path"] = _run_state_path(run_dir)
+
+    # ensure_ascii (default) keeps this pure-ASCII, so a plain print is encoding
+    # safe even when the orchestrator pipes stdout under a non-UTF-8 console.
+    print(json.dumps(resolved, indent=2))
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -1863,6 +3714,114 @@ def main() -> int:
         help="Comma-separated list of finding IDs to exclude",
     )
     post_parser.set_defaults(func=post_comments)
+
+    # validate-records subcommand
+    validate_parser = subparsers.add_parser(
+        "validate-records",
+        help="Validate a records.json envelope against the schema",
+    )
+    validate_parser.add_argument(
+        "--records",
+        required=True,
+        help="Path to the records.json file to validate",
+    )
+    validate_parser.set_defaults(func=validate_records_command)
+
+    # capabilities subcommand
+    capabilities_parser = subparsers.add_parser(
+        "capabilities",
+        help="Report optional-capability availability (nh3 / rich_html) as JSON",
+    )
+    capabilities_parser.set_defaults(func=capabilities)
+
+    # render-review subcommand
+    render_parser = subparsers.add_parser(
+        "render-review",
+        help="Render review.md, the terminal summary, and the canvas HTML from records.json",
+    )
+    render_parser.add_argument(
+        "--records",
+        required=True,
+        help="Path to the records.json envelope to render",
+    )
+    render_parser.add_argument(
+        "--run-dir",
+        default=None,
+        help="Run directory (default: the records.json file's directory)",
+    )
+    render_parser.add_argument(
+        "--repo",
+        default=".",
+        help="Repository root, used to resolve the default canvas path (default: .)",
+    )
+    render_parser.add_argument(
+        "--review-out",
+        default=None,
+        help="Output path for review.md (default: {run_dir}/review.md)",
+    )
+    render_parser.add_argument(
+        "--canvas-out",
+        default=None,
+        help="Output path for the canvas HTML (default: {repo}/.agents/canvas/focused-review.html)",
+    )
+    render_parser.add_argument(
+        "--template",
+        default=None,
+        help="Canvas template path (default: the packaged review-canvas.html)",
+    )
+    render_parser.add_argument(
+        "--parent-origin",
+        default=DEFAULT_PARENT_ORIGIN,
+        help=(
+            "Trusted Treemon parent-app origin pinned into the canvas postMessage "
+            "channel; replaces the wildcard target origin (default: %(default)s)"
+        ),
+    )
+    render_parser.set_defaults(func=render_review)
+
+    # validate-action subcommand
+    action_parser = subparsers.add_parser(
+        "validate-action",
+        help="Validate/expand a posted canvas action (fix/disregard/document) against records.json",
+    )
+    action_parser.add_argument(
+        "--records",
+        required=True,
+        help="Path to the records.json envelope the canvas was rendered from",
+    )
+    action_parser.add_argument(
+        "--run-id",
+        required=True,
+        help="The run_id from the posted action (must match records.json's run.run_id)",
+    )
+    action_parser.add_argument(
+        "--record-ids",
+        required=True,
+        help="Comma-separated stable record_ids the action targets (e.g. r1,r3,r7)",
+    )
+    action_parser.add_argument(
+        "--action",
+        default=None,
+        choices=VALID_ACTIONS,
+        help="The namespaced action string (focused-review.fix/.disregard/.document)",
+    )
+    action_parser.add_argument(
+        "--instructions",
+        default="",
+        help="Free-text instructions from the action bar (echoed back in the result)",
+    )
+    action_parser.add_argument(
+        "--apply-disregard",
+        action="store_true",
+        help="After validation, persist the record_ids as disregarded run state "
+             "(canvas dims them across re-renders). Use only after human confirmation.",
+    )
+    action_parser.add_argument(
+        "--run-dir",
+        default=None,
+        help="Run directory for run-state.json (default: the records.json file's directory)",
+    )
+    action_parser.set_defaults(func=validate_action_command)
 
     args = parser.parse_args()
     args.func(args)
