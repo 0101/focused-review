@@ -2310,6 +2310,24 @@ def load_and_validate_records(path: str | os.PathLike) -> tuple[object, list[dic
     return data, validate_records(data)
 
 
+def _emit_validation_errors(records_path: str, errors: list[dict]) -> None:
+    """Print the structured records-validation failure payload to stderr.
+
+    Shared by ``validate-records`` and ``render-review`` so both commands emit
+    byte-identical failure JSON. Emit-only (mirroring ``_emit_action_error``):
+    callers keep their own ``sys.exit(1)`` so control flow stays visible at the
+    call site.
+    """
+    payload = {
+        "valid": False,
+        "schema_version": RECORDS_SCHEMA_VERSION,
+        "records_path": str(records_path),
+        "error_count": len(errors),
+        "errors": errors,
+    }
+    print(json.dumps(payload, indent=2), file=sys.stderr)
+
+
 def validate_records_command(args: argparse.Namespace) -> None:
     """CLI: validate ``records.json`` and emit a structured result.
 
@@ -2321,14 +2339,7 @@ def validate_records_command(args: argparse.Namespace) -> None:
     data, errors = load_and_validate_records(path)
 
     if errors:
-        payload = {
-            "valid": False,
-            "schema_version": RECORDS_SCHEMA_VERSION,
-            "records_path": str(path),
-            "error_count": len(errors),
-            "errors": errors,
-        }
-        print(json.dumps(payload, indent=2), file=sys.stderr)
+        _emit_validation_errors(path, errors)
         sys.exit(1)
 
     run = data.get("run", {}) if isinstance(data, dict) else {}
@@ -3136,14 +3147,7 @@ def render_review(args: argparse.Namespace) -> None:
     data, errors = load_and_validate_records(records_path)
 
     if errors:
-        payload = {
-            "valid": False,
-            "schema_version": RECORDS_SCHEMA_VERSION,
-            "records_path": str(records_path),
-            "error_count": len(errors),
-            "errors": errors,
-        }
-        print(json.dumps(payload, indent=2), file=sys.stderr)
+        _emit_validation_errors(records_path, errors)
         sys.exit(1)
 
     run_dir = args.run_dir or os.path.dirname(records_path) or "."

@@ -2,7 +2,7 @@
 
 Render the focused-review final report from a single structured source into three artifacts — `review.md`, the terminal summary, and an interactive Treemon **canvas** HTML page — with optional per-finding rich detail (code snippets, before/after, SVG diagrams) and a `postMessage` action bar (fix / disregard / document).
 
-Full rationale, alternatives, and verified runtime facts: `.agents/canvas-review-report-investigation.md`.
+Full rationale, alternatives, and verified runtime facts: [`canvas-review-report-investigation.md`](./canvas-review-report-investigation.md).
 
 ## Goals
 
