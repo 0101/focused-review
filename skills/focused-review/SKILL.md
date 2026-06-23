@@ -208,16 +208,16 @@ Wait for all assessors to complete. If individual assessors fail, continue with 
 
 After all assessors complete, read every `.md` file in `{run_dir}/assessments/` (in ID order: A-01, A-02, ...). Assemble `{run_dir}/assessed.md` by:
 
-1. Counting verdicts from each file (look for `**Verdict:**` lines)
+1. Counting verdicts from each file (look for `**Verdict:**` lines). The assessor still writes the literal envelope tokens `Confirmed` / `Questionable` / `Invalid`; in the new model `Questionable` is surfaced to the user as **Needs your decision** and `Invalid` means a **false-positive** (recorded only, never shown). Count by token, label by the new model.
 2. Writing the header:
 
 ```markdown
 # Assessment Report
 
 **Findings assessed:** {total}
-**Confirmed:** {count}
-**Questionable:** {count}
-**Invalid:** {count}
+**Confirmed:** {count of `Confirmed`}
+**Needs your decision:** {count of `Questionable`}
+**Invalid (false-positive):** {count of `Invalid`}
 
 ---
 ```
@@ -228,20 +228,25 @@ After all assessors complete, read every `.md` file in `{run_dir}/assessments/` 
 
 **Skip this step for `full` scope** (no diff to assess against).
 
-Read `{run_dir}/assessed.md`. Find any findings with **Severity Critical or High** that received a verdict of **Invalid**.
+In the new verdict model **`Invalid` means false-positive only** — the assessor reaches it solely by judging the finding *not a real issue*. (Cost, low severity, or "not worth it" never produce `Invalid` now; those land in `Confirmed` or `Questionable`.) So the rebuttal's only job is to catch a **mistaken false-positive dismissal** of a genuinely real, high-stakes issue — it contests **factual** dismissals, not worth-it calls, and it respects scope (it does not drag a pre-existing item that the model would record/hide back into view).
 
-If none exist, skip to Step 6.
+Read `{run_dir}/assessed.md`. Find any findings with **Severity Critical or High** that received a verdict of **Invalid** (a false-positive call). If none exist, skip to Step 6.
 
 For each such finding, launch a `general-purpose` Task agent (launch all rebuttals in parallel in a single response):
 
 ```
-You are a rebuttal agent. A high-priority finding was assessed as Invalid. Challenge this assessment.
+You are a rebuttal agent. A high-priority finding was dismissed as Invalid — meaning the assessor judged it a false positive (not a real issue). Challenge ONLY that factual call: argue the issue is genuinely real.
 
-Read the assessed finding and the diff. Construct arguments for why this finding IS valid despite the assessor's counter-arguments. Consider edge cases, race conditions, subtle interactions, and error paths the assessor may have missed.
+Read the assessed finding and the diff. Construct arguments for why this finding describes a REAL defect despite the assessor's counter-arguments — the code path exists, is reachable, and has the claimed consequence. Consider edge cases, race conditions, subtle interactions, and error paths the assessor may have missed.
+
+Stay strictly on the factual question. Do NOT argue about whether the fix is worth it, its cost, churn, or its severity — none of those produce an Invalid verdict in this model, so they are out of scope for the rebuttal.
+
+Respect scope. If `Introduced by` is `pre-existing` (or `reclassified-pre-existing`), default to Uphold Invalid unless the issue is unmistakably real — the scope policy, not the rebuttal, decides whether a real pre-existing item surfaces, and a pre-existing item must never be forced into the actionable set.
 
 Finding ID: {A-XX}
 File: {file path from finding}
 Title: {title from finding}
+Introduced by: {introduced_by from finding — diff | pre-existing | reclassified-* }
 Description: {description from finding}
 Assessment reasoning: {assessment reasoning from finding}
 Counter-arguments: {counter-arguments from finding}
@@ -249,12 +254,12 @@ Counter-arguments: {counter-arguments from finding}
 Diff path: {run_dir}/diff.patch
 
 Write your rebuttal to {run_dir}/rebuttals/{A-XX}.md with:
-- Your counter-counter-arguments
-- Whether the assessor's dismissal holds up under scrutiny
-- Final recommendation: Reinstate (with what severity) or Uphold Invalid
+- Your counter-counter-arguments (factual only: is the issue real?)
+- Whether the assessor's false-positive call holds up under scrutiny
+- Final recommendation: Reinstate (with what severity) or Uphold Invalid. Recommend Reinstate ONLY for a genuinely real issue that is `Introduced by: diff` (or `reclassified-diff`); for pre-existing findings, default to Uphold Invalid.
 ```
 
-After all rebuttals complete, read each rebuttal file. For any finding where the rebuttal recommends "Reinstate", note the finding ID and reinstated severity — you will apply these overrides when compiling the report in Step 6.
+After all rebuttals complete, read each rebuttal file. For any **in-scope** finding (`Introduced by: diff` / `reclassified-diff`) where the rebuttal recommends "Reinstate", note the finding ID and reinstated severity — you will apply these overrides when compiling the report in Step 6 (a reinstated finding becomes `Confirmed`). **Ignore "Reinstate" recommendations for pre-existing findings** — the scope policy governs whether those surface, so never force a pre-existing item back into the report via an override.
 
 ### Step 6: Phase 5 — Presentation
 
@@ -318,13 +323,13 @@ python {script_path} render-review --records {run_dir}/records.json --repo .
       **Scope:** {scope}
       **Date:** {ISO timestamp}
       **Pipeline:** Discovery ({rule_count} rules, {concern_count} concerns) -> Consolidation -> Assessment
-      ## Summary  (a | Verdict | Count | table: Confirmed / Questionable / Invalid)
-      ## Confirmed Findings  (### {n}. [{severity}] {title}; File `path:line`; Fix complexity; Found by {sources}; description; > Assessment:; Suggestion:)
-      ## Questionable Findings  (same shape)
-      a <details> block listing invalid findings in a table (ID | Severity | File | Title | Reason)
+      ## Summary  (a | Verdict | Count | table with ONLY these rows: Confirmed / Needs your decision / Pre-existing — there is NO Invalid row)
+      ## Confirmed Findings  (in-scope Confirmed; ### {n}. [{severity}] {title}; File `path:line`; Fix complexity; Found by {sources}; description; > Assessment:; Suggestion:)
+      ## Needs Your Decision  (in-scope Questionable; same shape; each item names the decision and carries the agent's recommendation, e.g. "suggest skip")
+      ## Pre-existing  (Confirmed findings tagged `introduced_by: pre-existing`; same shape; non-gating)
       ## Rule Quality Notes  (only if any; bullet per rule: observation — suggestion)
-      Group findings by file path then line; omit any empty section.
-   2. Then output ONLY the user-facing summary for the orchestrator to relay verbatim: the report path line, a one-line pipeline summary, a findings table (| # | Verdict | Severity | Found by | File | Issue |) of all Confirmed+Questionable findings (or "No actionable findings."), and any Rule Quality Notes. No preamble, no commentary.
+      Group findings by file path then line; omit any empty section. **Never render Invalid findings** — Invalid now means false-positive only; they stay in records.json, are never shown, and are never counted in the summary table.
+   2. Then output ONLY the user-facing summary for the orchestrator to relay verbatim: the report path line, a one-line pipeline summary, an actionable findings table (| # | Verdict | Severity | Found by | File | Issue |) of all Confirmed + Needs-your-decision findings (or "No actionable findings."), then a non-gating Pre-existing list if any, and any Rule Quality Notes. No preamble, no commentary.
    ```
 
    Relay that agent's output verbatim (Step 6c). Tell the user the interactive canvas was skipped for this run because the structured render failed.
@@ -402,7 +407,7 @@ Parse the arguments after `post-mortem` for finding numbers. Accept comma-separa
 
 If no numbers provided, present the numbered summary table from the report and ask the user which findings they consider invalid. Wait for their response before continuing.
 
-For each specified number, locate the corresponding finding in the report (match the `### {n}.` heading in the Confirmed or Questionable sections). Extract:
+For each specified number, locate the corresponding finding in the report (match the `### {n}.` heading in the Confirmed, Needs Your Decision, or Pre-existing sections). Extract:
 - **Title** and **severity**
 - **File** path
 - **Provenance** line (e.g., `rule:sealed-classes, concern:bugs (opus)`)
