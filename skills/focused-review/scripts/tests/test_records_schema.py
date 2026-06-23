@@ -120,6 +120,61 @@ def _by_field(errors: list[dict], field: str) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# _derive_display_bucket — scope normalization (the pure routing function)
+# ---------------------------------------------------------------------------
+
+
+class TestDeriveDisplayBucket:
+    """Direct unit tests for the ``(verdict, introduced_by) → display_bucket`` map.
+
+    The assessor emits a four-value ``introduced_by`` vocabulary — ``diff`` |
+    ``pre-existing`` | ``reclassified-pre-existing`` | ``reclassified-diff``
+    (``agents/review-assessor.agent.md``) — and the validator/renderer must route
+    the two pre-existing spellings identically. Exact-string matching used to leak
+    a ``reclassified-pre-existing`` Confirmed into the gating ``confirmed`` bucket
+    (focused-review-7gj.11); these tests pin the normalized routing.
+    """
+
+    @pytest.mark.parametrize("introduced_by", ["pre-existing", "reclassified-pre-existing"])
+    def test_pre_existing_spellings_route_confirmed_to_pre_existing(
+        self, introduced_by: str
+    ) -> None:
+        assert fr._derive_display_bucket("Confirmed", introduced_by) == "pre-existing"
+
+    @pytest.mark.parametrize("introduced_by", ["pre-existing", "reclassified-pre-existing"])
+    def test_pre_existing_spellings_route_questionable_to_hidden(
+        self, introduced_by: str
+    ) -> None:
+        assert fr._derive_display_bucket("Questionable", introduced_by) == "hidden"
+
+    @pytest.mark.parametrize("introduced_by", ["diff", "reclassified-diff", ""])
+    def test_in_scope_spellings_route_confirmed_to_confirmed(self, introduced_by: str) -> None:
+        assert fr._derive_display_bucket("Confirmed", introduced_by) == "confirmed"
+
+    @pytest.mark.parametrize("introduced_by", ["diff", "reclassified-diff", ""])
+    def test_in_scope_spellings_route_questionable_to_needs_decision(
+        self, introduced_by: str
+    ) -> None:
+        assert fr._derive_display_bucket("Questionable", introduced_by) == "needs-decision"
+
+    @pytest.mark.parametrize(
+        "introduced_by",
+        ["diff", "pre-existing", "reclassified-pre-existing", "reclassified-diff"],
+    )
+    def test_invalid_is_always_hidden_regardless_of_scope(self, introduced_by: str) -> None:
+        assert fr._derive_display_bucket("Invalid", introduced_by) == "hidden"
+
+    @pytest.mark.parametrize("introduced_by", [None, 123, ["pre-existing"]])
+    def test_absent_or_non_string_scope_is_in_scope(self, introduced_by: object) -> None:
+        # Absent / non-string introduced_by is treated as in-scope and never raises.
+        assert fr._derive_display_bucket("Confirmed", introduced_by) == "confirmed"
+
+    def test_unknown_verdict_returns_none(self) -> None:
+        # A bucket can't be derived from a bad verdict — the caller reports that error.
+        assert fr._derive_display_bucket("Bogus", "diff") is None
+
+
+# ---------------------------------------------------------------------------
 # Accept
 # ---------------------------------------------------------------------------
 
@@ -214,6 +269,37 @@ class TestAccept:
             display_number=None,
         )
         env["run"].update(invalid=0, questionable=0)
+        assert fr.validate_records(env) == []
+
+    def test_reclassified_pre_existing_confirmed_routes_to_pre_existing(self) -> None:
+        # The assessor may tag a finding `reclassified-pre-existing` (a discovery
+        # misclassification corrected during assessment). It must route exactly like
+        # `pre-existing`: a Confirmed lands in the non-gating pre-existing bucket and
+        # is excluded from run.confirmed (focused-review-7gj.11).
+        env = _valid_envelope()
+        env["findings"][1].update(
+            verdict="Confirmed",
+            introduced_by="reclassified-pre-existing",
+            display_bucket="pre-existing",
+            display_number=1,
+        )
+        # confirmed bucket = 1 (only r1); the pre-existing finding is excluded.
+        env["run"].update(invalid=0, confirmed=1)
+        assert fr.validate_records(env) == []
+
+    def test_reclassified_diff_confirmed_routes_to_confirmed(self) -> None:
+        # `reclassified-diff` is in-scope (a pre-existing tag corrected to diff), so a
+        # Confirmed lands in the gating confirmed bucket and IS counted — unlike the
+        # reclassified-pre-existing case above.
+        env = _valid_envelope()
+        env["findings"][1].update(
+            verdict="Confirmed",
+            introduced_by="reclassified-diff",
+            display_bucket="confirmed",
+            display_number=2,
+        )
+        # Both findings are now in-scope Confirmed: confirmed bucket = 2, contiguous 1,2.
+        env["run"].update(invalid=0, confirmed=2)
         assert fr.validate_records(env) == []
 
 
@@ -462,6 +548,20 @@ class TestRejectFinding:
         # A pre-existing Confirmed finding must be 'pre-existing', not 'confirmed'.
         env = _valid_envelope()
         env["findings"][0]["introduced_by"] = "pre-existing"
+        # display_bucket stays "confirmed" → inconsistent with derived "pre-existing".
+        errors = fr.validate_records(env)
+        assert any(
+            e["path"] == "findings[0].display_bucket" and "inconsistent" in e["message"]
+            for e in errors
+        )
+
+    def test_display_bucket_reclassified_pre_existing_confirmed_mismatch(self) -> None:
+        # Regression (focused-review-7gj.11): a `reclassified-pre-existing` Confirmed
+        # now derives to 'pre-existing', so the old exact-match 'confirmed' label is an
+        # illegal state. Before the fix it derived to 'confirmed' (exact-string match),
+        # the label was accepted, and the finding leaked into the gating Confirmed tally.
+        env = _valid_envelope()
+        env["findings"][0]["introduced_by"] = "reclassified-pre-existing"
         # display_bucket stays "confirmed" → inconsistent with derived "pre-existing".
         errors = fr.validate_records(env)
         assert any(

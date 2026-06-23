@@ -87,9 +87,15 @@ VALID_DISPLAY_BUCKETS = ("confirmed", "needs-decision", "pre-existing", "hidden"
 # display_number sequence of its own. Findings in the `hidden` bucket are recorded
 # only, so their display_number is null.
 _VISIBLE_DISPLAY_BUCKETS = ("confirmed", "needs-decision", "pre-existing")
-# The single introduced_by value that marks a finding as not introduced by the
-# change under review (orthogonal to verdict; routes Confirmed → pre-existing and
-# Questionable → hidden).
+# The introduced_by suffix that marks a finding as not introduced by the change
+# under review (orthogonal to verdict; routes Confirmed → pre-existing and
+# Questionable → hidden). The assessor emits a four-value vocabulary —
+# diff | pre-existing | reclassified-pre-existing | reclassified-diff (see
+# agents/review-assessor.agent.md) — and the two pre-existing spellings share
+# this suffix, so `_is_pre_existing` suffix-matches it instead of comparing for
+# exact equality (an exact match would silently route reclassified-pre-existing
+# into the gating Confirmed tally, breaking the "pre-existing is non-gating"
+# invariant).
 PRE_EXISTING_MARKER = "pre-existing"
 
 # Stable-id formats enforced so the unified canvas action bar can disambiguate a
@@ -98,18 +104,36 @@ _RECORD_ID_RE = re.compile(r"^r[0-9]+$")
 _RULE_QUALITY_NOTE_ID_RE = re.compile(r"^RQ[0-9]+$")
 
 
+def _is_pre_existing(introduced_by: object) -> bool:
+    """Whether ``introduced_by`` marks a finding as *not* introduced by the change.
+
+    Normalizes the assessor's four-value vocabulary (``diff`` | ``pre-existing``
+    | ``reclassified-pre-existing`` | ``reclassified-diff``; see
+    ``agents/review-assessor.agent.md``) onto the binary scope routing Python
+    needs. Both spellings whose canonical scope is *pre-existing* end in
+    :data:`PRE_EXISTING_MARKER`, so a suffix test captures ``pre-existing`` and
+    ``reclassified-pre-existing`` without enumerating each one; everything else
+    (``diff``, ``reclassified-diff``, ``""``, absent, or a non-string) is
+    in-scope. An exact-equality test would route a ``reclassified-pre-existing``
+    Confirmed into the gating Confirmed tally, breaking the "pre-existing is
+    non-gating" invariant.
+    """
+    return isinstance(introduced_by, str) and introduced_by.endswith(PRE_EXISTING_MARKER)
+
+
 def _derive_display_bucket(verdict: object, introduced_by: object) -> str | None:
     """Derive the canonical display_bucket from ``(verdict, introduced_by)``.
 
     Returns ``None`` when ``verdict`` is not a recognized enum value (the caller
-    has already reported that error and must not derive a bucket from it). A
-    finding is *pre-existing* only when ``introduced_by`` is exactly the
-    :data:`PRE_EXISTING_MARKER` string; anything else (``diff``, ``""``, absent,
-    or a non-string) is treated as in-scope.
+    has already reported that error and must not derive a bucket from it). Scope
+    is normalized via :func:`_is_pre_existing`, so both ``pre-existing`` and the
+    assessor's ``reclassified-pre-existing`` route Confirmed → ``pre-existing``
+    and Questionable → ``hidden``; ``diff`` / ``reclassified-diff`` / ``""`` /
+    absent / a non-string all stay in-scope.
     """
     if verdict not in VALID_VERDICTS:
         return None
-    pre_existing = introduced_by == PRE_EXISTING_MARKER
+    pre_existing = _is_pre_existing(introduced_by)
     if verdict == "Invalid":
         return "hidden"
     if verdict == "Confirmed":

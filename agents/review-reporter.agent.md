@@ -90,8 +90,8 @@ You write **one JSON object** (the "envelope"). Python validates it strictly and
 - `display_bucket` — **required** routing enum, one of `confirmed`, `needs-decision`, `pre-existing`, `hidden`. It is **derived** from `(verdict, introduced_by)` — do not invent it (see Step 4). Validation rejects any value inconsistent with that derivation:
   - `confirmed` ← `verdict: Confirmed` and not pre-existing (in-scope; the gating "main tally").
   - `needs-decision` ← `verdict: Questionable` and not pre-existing (rendered as "Needs your decision").
-  - `pre-existing` ← `verdict: Confirmed` and `introduced_by: "pre-existing"` (own non-gating section).
-  - `hidden` ← every `Invalid` finding, **and** `verdict: Questionable` + `introduced_by: "pre-existing"` (recorded but never rendered).
+  - `pre-existing` ← `verdict: Confirmed` and pre-existing (`introduced_by` ends in `pre-existing`: `"pre-existing"` or `"reclassified-pre-existing"`) — own non-gating section.
+  - `hidden` ← every `Invalid` finding, **and** `verdict: Questionable` + pre-existing (`introduced_by` ends in `pre-existing`) — recorded but never rendered.
 - `display_number` — integer ≥ 1, assigned **per visible bucket** as that bucket's own contiguous 1-based sequence (see Step 4): `confirmed`, `needs-decision`, and `pre-existing` each start at 1. Must be **`null`** for `hidden` findings.
 - `title` — non-empty string.
 - `file` — non-empty string (path).
@@ -101,7 +101,7 @@ You write **one JSON object** (the "envelope"). Python validates it strictly and
 - `fix_complexity` — one of `quickfix`, `moderate`, `complex`.
 - `verdict` — one of `Confirmed`, `Questionable`, `Invalid`.
 - `type` — one of `rule`, `concern`, `mixed`.
-- `introduced_by` — (optional) provenance string, e.g. `diff` or `pre-existing`. **Load-bearing:** the exact string `"pre-existing"` routes a finding into the `pre-existing`/`hidden` bucket (see `display_bucket`); any other value (or omission) is treated as in-scope. Pass it through when the source has it; omit the field otherwise.
+- `introduced_by` — (optional) provenance string, e.g. `diff` or `pre-existing`. **Load-bearing:** an `introduced_by` ending in `pre-existing` — i.e. `"pre-existing"` *or* the assessor's `"reclassified-pre-existing"` — routes a finding into the `pre-existing`/`hidden` bucket (see `display_bucket`); any other value (`diff`, `reclassified-diff`, or omission) is treated as in-scope. Pass it through verbatim when the source has it; omit the field otherwise.
 - `description` — string (may be `""`). The finding's description.
 - `assessment` — string (may be `""`). The assessment reasoning (why Confirmed/Questionable). **For Invalid findings, put the one-line reason here** — it becomes the invalid table's "Reason". Use `""` for `consolidated`/`raw_findings` (no assessment).
 - `suggestion` — string (may be `""`). The fix suggestion.
@@ -152,8 +152,8 @@ Provenance entries must be the **canonical source-file labels** `rule--<name>` a
 - **Derive `display_bucket`** for each finding from `(verdict, introduced_by)`:
   - `Confirmed` + not pre-existing → `confirmed`
   - `Questionable` + not pre-existing → `needs-decision`
-  - `Confirmed` + `introduced_by: "pre-existing"` → `pre-existing`
-  - `Questionable` + `introduced_by: "pre-existing"` → `hidden`
+  - `Confirmed` + pre-existing (`introduced_by` ends in `pre-existing`) → `pre-existing`
+  - `Questionable` + pre-existing (`introduced_by` ends in `pre-existing`) → `hidden`
   - any `Invalid` → `hidden`
 - **Number per visible bucket.** Within each of `confirmed`, `needs-decision`, and `pre-existing` separately, order by file path then line number, and assign `display_number` as that bucket's **own** contiguous 1-based sequence (each bucket starts at 1). A `confirmed` #1 and a `pre-existing` #1 coexist — they do not collide.
 - `hidden` findings (Invalid, plus pre-existing Questionable) get `display_number: null`.
