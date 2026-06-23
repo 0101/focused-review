@@ -113,7 +113,7 @@ You write **one JSON object** (the "envelope"). Python validates it strictly and
 **`rule_quality_notes[]`** (array; use `[]` when none): `{ id, rule, rule_source, rule_file, observation, suggestion }`, all non-empty strings.
 - `id` — stable token matching **`^RQ[0-9]+$`** (`RQ1`, `RQ2`, …), **unique** across the notes array (the canvas action bar references it).
 - `rule` — the human-readable rule label (e.g. `no-comments`).
-- `rule_source` — the canonical `rule--<name>` provenance label, matching the `provenance` entries of the findings the note explains.
+- `rule_source` — the canonical `rule--<name>` provenance label, matching the `provenance` entries of the findings the note explains. **Unique** across the notes array — each rule may be named by at most one note (the rule-fix preview maps each source to a single note; duplicates are rejected by validation).
 - `rule_file` — a **safe relative path to the rule's `.md` file under the configured rules directory** (default `review/`, e.g. `review/rules/no-comments.md`). Validation rejects absolute paths, `..` traversal, non-`.md` targets, and anything outside the rules directory (the agent later edits this file to apply a rule fix).
 - `observation` / `suggestion` — the pattern seen and the proposed rule improvement.
 
@@ -172,7 +172,7 @@ Add a `rule_quality_notes[]` entry when any of these hold:
 
 Each entry is `{ id, rule, rule_source, rule_file, observation, suggestion }`:
 - `id` — `RQ1`, `RQ2`, … (unique, `^RQ[0-9]+$`).
-- `rule` — the human-readable rule label; `rule_source` — its `rule--<name>` provenance label (must match the explained findings' provenance).
+- `rule` — the human-readable rule label; `rule_source` — its `rule--<name>` provenance label (must match the explained findings' provenance; **unique** across notes — one note per rule).
 - `rule_file` — the rule's `.md` path under the configured rules directory (default `review/`, e.g. `review/rules/<name>.md`); must be a safe relative `.md` path inside that directory.
 - `observation` describes the pattern seen; `suggestion` is the rule improvement.
 

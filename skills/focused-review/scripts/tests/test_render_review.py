@@ -641,7 +641,12 @@ class TestRuleDependencyMap:
         notes = [_dep_note("RQ-A", "rule--a")]
         assert fr._rule_dependency_map(findings, notes) == {"r2": ["RQ-A"]}
 
-    def test_two_notes_naming_same_source_first_note_wins(self) -> None:
+    def test_duplicate_source_defensive_tiebreak_keeps_first_note(self) -> None:
+        # validate_records now rejects two notes naming the same rule_source
+        # (TestRejectRuleQualityNotes.test_note_rule_source_must_be_unique), so a
+        # validated envelope never reaches here with duplicates. _rule_dependency_map
+        # must still be total, so its setdefault tiebreak deterministically keeps
+        # the first note rather than crashing on such (now schema-rejected) input.
         findings = [_dep_finding("r1", ["rule--a"])]
         notes = [_dep_note("RQ-1", "rule--a"), _dep_note("RQ-2", "rule--a")]
         assert fr._rule_dependency_map(findings, notes) == {"r1": ["RQ-1"]}

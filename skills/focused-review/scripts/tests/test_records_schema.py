@@ -862,6 +862,35 @@ class TestRejectRuleQualityNotes:
             for e in errors
         )
 
+    def test_note_rule_source_must_be_unique(self) -> None:
+        # A distinct id (so the id check passes) but the same rule_source. The
+        # source->note map in _rule_dependency_map would otherwise silently drop
+        # this second note (its setdefault tiebreak keeps the first), leaving the
+        # later note's rule fix unable to invalidate any finding — so validation
+        # must reject the duplicate, mirroring the id uniqueness check.
+        env = _valid_envelope()
+        note = env["rule_quality_notes"][0]
+        env["rule_quality_notes"].append({**note, "id": "RQ2"})
+        errors = fr.validate_records(env)
+        assert any(
+            e["path"] == "rule_quality_notes[1].rule_source" and "duplicate" in e["message"]
+            for e in errors
+        )
+
+    def test_note_rule_source_unique_check_normalises_whitespace(self) -> None:
+        # The dependency map keys on the stripped rule_source, so a whitespace-only
+        # variant collides there too; the uniqueness check normalises on strip so
+        # it is rejected rather than slipping past as "different".
+        env = _valid_envelope()
+        note = env["rule_quality_notes"][0]
+        padded = f"  {note['rule_source']}  "
+        env["rule_quality_notes"].append({**note, "id": "RQ2", "rule_source": padded})
+        errors = fr.validate_records(env)
+        assert any(
+            e["path"] == "rule_quality_notes[1].rule_source" and "duplicate" in e["message"]
+            for e in errors
+        )
+
     def test_note_rule_file_required(self) -> None:
         env = _valid_envelope()
         del env["rule_quality_notes"][0]["rule_file"]

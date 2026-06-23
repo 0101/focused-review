@@ -2457,7 +2457,12 @@ def _validate_rule_file(value: object, rules_dir: str, add) -> None:
 
 
 def _validate_rule_quality_note(
-    item: object, index: int, errors: list[dict], seen_note_ids: set, rules_dir: str
+    item: object,
+    index: int,
+    errors: list[dict],
+    seen_note_ids: set,
+    seen_rule_sources: set,
+    rules_dir: str,
 ) -> None:
     """Validate one rule-quality-note entry.
 
@@ -2467,6 +2472,14 @@ def _validate_rule_quality_note(
     the findings it explains (matched against their provenance); ``rule_file`` is
     the safe path Python/the agent edits to apply the fix. ``rule`` stays as the
     human-readable display label.
+
+    Both ``id`` and ``rule_source`` are uniqueness-checked (via *seen_note_ids* /
+    *seen_rule_sources*, accumulated across the notes array). ``rule_source`` must
+    be unique because :func:`_rule_dependency_map` keys its source->note map on the
+    stripped ``rule_source``; two notes naming the same source would collapse to
+    the first (its ``setdefault`` tiebreak), so the later note's rule fix would
+    silently invalidate no findings. Rejecting the duplicate here keeps that map
+    one-to-one and makes the runtime drop unreachable.
     """
     base_path = f"rule_quality_notes[{index}]"
     if not isinstance(item, dict):
@@ -2497,9 +2510,28 @@ def _validate_rule_quality_note(
     else:
         seen_note_ids.add(note_id)
 
-    for field in ("rule", "rule_source", "observation", "suggestion"):
+    for field in ("rule", "observation", "suggestion"):
         if not _is_nonempty_str(item.get(field, _MISSING)):
             add(field, f"{field} is required and must be a non-empty string")
+
+    # rule_source — required, non-empty, AND unique across notes (mirrors the id
+    # check above). _rule_dependency_map keys its source->note map on the stripped
+    # rule_source, so two notes naming the same source would collapse to the first
+    # and the later note's fix would invalidate nothing. Normalise on strip so
+    # whitespace-only variants (which also collide in that map) are rejected here.
+    rule_source = item.get("rule_source", _MISSING)
+    if not _is_nonempty_str(rule_source):
+        add("rule_source", "rule_source is required and must be a non-empty string")
+    else:
+        normalized_source = rule_source.strip()
+        if normalized_source in seen_rule_sources:
+            add(
+                "rule_source",
+                f"duplicate rule_source {rule_source!r} "
+                "(each rule may be named by at most one rule-quality note)",
+            )
+        else:
+            seen_rule_sources.add(normalized_source)
 
     _validate_rule_file(item.get("rule_file", _MISSING), rules_dir, add)
 
@@ -2624,9 +2656,10 @@ def validate_records(data: object, *, rules_dir: str | None = None) -> list[dict
         )
     else:
         seen_note_ids: set = set()
+        seen_rule_sources: set = set()
         for i, item in enumerate(notes):
             _validate_rule_quality_note(
-                item, i, errors, seen_note_ids, effective_rules_dir
+                item, i, errors, seen_note_ids, seen_rule_sources, effective_rules_dir
             )
 
     # run/findings count cross-checks (only when both are well-formed) ------
@@ -2957,8 +2990,10 @@ def _rule_dependency_map(findings: list, notes: list) -> dict[str, list[str]]:
     corresponding note (which can never be "applied" — no checkbox), is absent
     from the map, so the canvas never live-greys it.
     """
-    # Canonical rule_source label -> the note id that fixes it. First note wins on
-    # the (schema-forbidden) chance two notes name the same source.
+    # Canonical rule_source label -> the note id that fixes it. validate_records
+    # now rejects two notes naming the same rule_source, so this map is one-to-one
+    # for any validated envelope; the setdefault tiebreak below is a defensive
+    # fallback that keeps the first note should unvalidated input ever reach here.
     source_to_note: dict[str, str] = {}
     for note in notes:
         if not isinstance(note, dict):
