@@ -48,8 +48,8 @@
   }
   .summary-badge .count { font-size: 16px; margin-right: 4px; }
   .badge-confirmed { background: #a6e3a122; color: #a6e3a1; }
-  .badge-questionable { background: #f9e2af22; color: #f9e2af; }
-  .badge-invalid { background: #6c708622; color: #6c7086; }
+  .badge-needs-decision { background: #f9e2af22; color: #f9e2af; }
+  .badge-preexisting { background: #89dceb22; color: #89dceb; }
 
   .review-list { width: 100%; }
   .list-header {
@@ -150,6 +150,20 @@
 
   .finding.dimmed { opacity: 0.35; }
   .finding.dimmed .title { text-decoration: line-through; }
+
+  .finding.costly { background: #fab38710; }
+  .fix-tag {
+    display: inline-block;
+    margin-left: 6px;
+    padding: 0 7px;
+    border-radius: 8px;
+    font-size: 11px;
+    font-weight: 600;
+    white-space: nowrap;
+    background: #fab38722;
+    color: #fab387;
+    vertical-align: middle;
+  }
 
   .detail-content {
     background: #11111b;
@@ -293,20 +307,6 @@
   .collapsible-summary::before { content: '▸ '; }
   .collapsible[open] > .collapsible-summary::before { content: '▾ '; }
   .collapsible-body { padding: 0 16px 12px; }
-
-  .invalid-table { width: 100%; border-collapse: collapse; font-size: 13px; }
-  .invalid-table th {
-    text-align: left;
-    padding: 6px 8px;
-    color: #6c7086;
-    border-bottom: 1px solid #45475a;
-    font-weight: 600;
-  }
-  .invalid-table td {
-    padding: 6px 8px;
-    border-bottom: 1px solid #31324488;
-    color: #a6adc8;
-  }
 
   .quality-item { margin: 8px 0; color: #a6adc8; }
   .quality-item strong { color: #f9e2af; }
@@ -531,8 +531,8 @@
   <div class="meta">Scope: branch · 2026-06-04 · 17 rules + 7 concerns → 23 unique → 5 actionable</div>
   <div class="summary-badges">
     <span class="summary-badge badge-confirmed"><span class="count">3</span> Confirmed</span>
-    <span class="summary-badge badge-questionable"><span class="count">2</span> Questionable</span>
-    <span class="summary-badge badge-invalid"><span class="count">2</span> Invalid</span>
+    <span class="summary-badge badge-needs-decision"><span class="count">2</span> Needs your decision</span>
+    <span class="summary-badge badge-preexisting"><span class="count">1</span> Pre-existing</span>
   </div>
 </div>
 
@@ -590,7 +590,7 @@ newDashView.classList.add('active');             // unconditional
       </details>
     </div>
 
-    <div class="finding" data-record-id="A-02">
+    <div class="finding costly" data-record-id="A-02">
       <input type="checkbox" class="row-cb" aria-label="Select finding 2: Blocked-only bead sets treated as no issues - deletes dashboard file">
       <details class="finding-d" name="findings">
         <summary class="finding-summary">
@@ -598,12 +598,12 @@ newDashView.classList.add('active');             // unconditional
           <span class="num">2</span>
           <span class="sev sev-high">High</span>
           <span class="found-by"><span class="found-tag found-tag-concern">bugs(opus,codex)</span></span>
-          <span class="title">Blocked-only bead sets treated as "no issues" — deletes dashboard file</span>
+          <span class="title">Blocked-only bead sets treated as "no issues" — deletes dashboard file <span class="fix-tag">⚠ Large fix</span></span>
         </summary>
         <div class="detail-content">
           <div class="detail-section">
             <div class="detail-label">Location</div>
-            <span class="detail-file">src/Server/RefreshScheduler.fs:457</span> · quickfix
+            <span class="detail-file">src/Server/RefreshScheduler.fs:457</span> · complex
           </div>
           <div class="detail-section">
             <div class="detail-label">Description</div>
@@ -671,10 +671,10 @@ replaceChild(view-dashboard)</div>
     </div>
   </section>
 
-  <section class="finding-section" data-section="questionable">
+  <section class="finding-section" data-section="needs-decision">
     <div class="section-header">
-      <input type="checkbox" class="section-cb" aria-label="Select all questionable findings">
-      <span class="section-title">Questionable Findings (2)</span>
+      <input type="checkbox" class="section-cb" aria-label="Select all needs-your-decision findings">
+      <span class="section-title">Needs Your Decision (2)</span>
     </div>
 
     <div class="finding" data-record-id="A-18">
@@ -726,22 +726,45 @@ replaceChild(view-dashboard)</div>
       </details>
     </div>
   </section>
-</div>
 
-<details class="collapsible invalid-section">
-  <summary class="collapsible-summary">2 findings filtered as invalid</summary>
-  <div class="collapsible-body">
-    <table class="invalid-table">
-      <thead>
-        <tr><th>ID</th><th>Sev</th><th>Title</th><th>Reason</th></tr>
-      </thead>
-      <tbody>
-        <tr><td>A-09</td><td><span class="sev sev-medium">Med</span></td><td>updateDashboard mixes two DOM update strategies</td><td>Rule exempts sequential steps of a single cohesive operation</td></tr>
-        <tr><td>A-13</td><td><span class="sev sev-low">Low</span></td><td>Section divider at line 1454</td><td>Navigational aid in 600+ line embedded JS</td></tr>
-      </tbody>
-    </table>
-  </div>
-</details>
+  <section class="finding-section" data-section="pre-existing">
+    <div class="section-header">
+      <input type="checkbox" class="section-cb" aria-label="Select all pre-existing findings">
+      <span class="section-title">Pre-existing — non-gating (1)</span>
+    </div>
+
+    <div class="finding" data-record-id="A-26">
+      <input type="checkbox" class="row-cb" aria-label="Select finding 1: SQL string built by concatenation in legacy export path">
+      <details class="finding-d" name="findings">
+        <summary class="finding-summary">
+          <span class="caret" aria-hidden="true"></span>
+          <span class="num">1</span>
+          <span class="sev sev-medium">Medium</span>
+          <span class="found-by"><span class="found-tag found-tag-concern">security(opus)</span></span>
+          <span class="title">SQL string built by concatenation in legacy export path</span>
+        </summary>
+        <div class="detail-content">
+          <div class="detail-section">
+            <div class="detail-label">Location</div>
+            <span class="detail-file">src/Server/ExportService.fs:212</span> · moderate
+          </div>
+          <div class="detail-section">
+            <div class="detail-label">Description</div>
+            <p>The export query interpolates <code>reportName</code> straight into the SQL text. The value is operator-supplied today, but the pattern is fragile.</p>
+          </div>
+          <div class="detail-assessment">
+            <div class="detail-label">Assessment</div>
+            <p>Real and worth fixing, but <strong>not introduced by this change</strong> — the concatenation predates the diff. Surfaced here as net-positive, non-gating context.</p>
+          </div>
+          <div class="detail-suggestion">
+            <div class="detail-label">Suggestion</div>
+            <p>Parameterize the export query when this module is next touched.</p>
+          </div>
+        </div>
+      </details>
+    </div>
+  </section>
+</div>
 
 <details class="collapsible quality-notes" open>
   <summary class="collapsible-summary">Rule Quality Notes (2)</summary>

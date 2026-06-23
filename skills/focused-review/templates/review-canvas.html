@@ -18,15 +18,19 @@
                                     messages, so the action-bar channel is origin-validated
                                     (never the wildcard "*"). Default http://localhost:5000.
     <!-- FR:META -->                header meta line (scope · date · rule/concern counts).
-    <!-- FR:SUMMARY_BADGES -->      confirmed/questionable/invalid count badges.
+    <!-- FR:SUMMARY_BADGES -->      confirmed/needs-decision/pre-existing count badges.
     <!-- FR:CONFIRMED_COUNT -->     integer shown in the Confirmed section header.
     <!-- FR:CONFIRMED_ROWS -->      one ".finding" block per confirmed finding (see shape below).
-    <!-- FR:QUESTIONABLE_COUNT -->  integer shown in the Questionable section header.
-    <!-- FR:QUESTIONABLE_ROWS -->   one ".finding" block per questionable finding.
-    <!-- FR:INVALID_SUMMARY -->     e.g. "9 findings filtered as invalid".
-    <!-- FR:INVALID_ROWS -->        <tr>…</tr> rows for the invalid-findings table.
+    <!-- FR:NEEDS_DECISION_COUNT -->  integer shown in the Needs-your-decision section header.
+    <!-- FR:NEEDS_DECISION_ROWS -->   one ".finding" block per needs-your-decision finding.
+    <!-- FR:PREEXISTING_COUNT -->   integer shown in the Pre-existing section header.
+    <!-- FR:PREEXISTING_ROWS -->    one ".finding" block per pre-existing (non-gating) finding.
     <!-- FR:QUALITY_SUMMARY -->     e.g. "Rule Quality Notes (2)".
     <!-- FR:QUALITY_NOTES -->       ".quality-item" blocks.
+
+  Invalid findings are NEVER rendered (no Invalid section, badge, or summary row); they
+  stay in records.json only. A finding's verdict bucket is decided server-side from its
+  display_bucket, so the template just provides the three visible sections below.
 
   The HTML-comment placeholders are forge-proof: html.escape() turns "<" into "&lt;",
   so escaped finding text can never reproduce a "<!-- FR:* -->" marker. Replace each
@@ -121,8 +125,8 @@
   }
   .summary-badge .count { font-size: 16px; margin-right: 4px; }
   .badge-confirmed { background: #a6e3a122; color: #a6e3a1; }
-  .badge-questionable { background: #f9e2af22; color: #f9e2af; }
-  .badge-invalid { background: #6c708622; color: #6c7086; }
+  .badge-needs-decision { background: #f9e2af22; color: #f9e2af; }
+  .badge-preexisting { background: #89dceb22; color: #89dceb; }
 
   /* ── List header (column titles) ────────────────────────────────────────── */
   .review-list { width: 100%; }
@@ -141,7 +145,7 @@
     z-index: 10;
   }
 
-  /* ── Section (Confirmed / Questionable) ─────────────────────────────────── */
+  /* ── Section (Confirmed / Needs your decision / Pre-existing) ───────────── */
   .section-header {
     display: grid;
     grid-template-columns: var(--col-cb) 1fr;
@@ -230,6 +234,23 @@
   /* Dimmed (disregarded) */
   .finding.dimmed { opacity: 0.35; }
   .finding.dimmed .title { text-decoration: line-through; }
+
+  /* Large/costly fix flag (fix_complexity == "complex"), orthogonal to the verdict
+     bucket: a subtle row tint + a tag pill on the title. Pure presentation — it
+     never routes, hides, or downgrades the finding. */
+  .finding.costly { background: #fab38710; }
+  .fix-tag {
+    display: inline-block;
+    margin-left: 6px;
+    padding: 0 7px;
+    border-radius: 8px;
+    font-size: 11px;
+    font-weight: 600;
+    white-space: nowrap;
+    background: #fab38722;
+    color: #fab387;
+    vertical-align: middle;
+  }
 
   /* ── Detail panel (server-rendered structural fields) ───────────────────── */
   .detail-content {
@@ -358,7 +379,7 @@
     .before-after { grid-template-columns: 1fr; }
   }
 
-  /* ── Collapsibles (invalid findings, rule-quality notes) ────────────────── */
+  /* ── Collapsibles (rule-quality notes) ──────────────────────────────────── */
   .collapsible {
     margin-top: 16px;
     background: #313244;
@@ -379,20 +400,6 @@
   .collapsible-summary::before { content: '▸ '; }
   .collapsible[open] > .collapsible-summary::before { content: '▾ '; }
   .collapsible-body { padding: 0 16px 12px; }
-
-  .invalid-table { width: 100%; border-collapse: collapse; font-size: 13px; }
-  .invalid-table th {
-    text-align: left;
-    padding: 6px 8px;
-    color: #6c7086;
-    border-bottom: 1px solid #45475a;
-    font-weight: 600;
-  }
-  .invalid-table td {
-    padding: 6px 8px;
-    border-bottom: 1px solid #31324488;
-    color: #a6adc8;
-  }
 
   .quality-item { margin: 8px 0; color: #a6adc8; }
   .quality-item strong { color: #f9e2af; }
@@ -595,7 +602,7 @@
       if (f.classList.contains("dimmed")) state.disregarded.add(f.getAttribute("data-record-id"));
     });
     // Prune tracked state to record_ids still present: a morph can drop a finding from
-    // the selectable set (e.g. it is re-categorized invalid and loses its checkbox), so
+    // the selectable set (e.g. it is re-categorized into a hidden bucket and loses its checkbox), so
     // the count, button enabled-state and posted record_ids never reference off-screen ids.
     var present = presentIds();
     pruneTo(state.selected, present);
@@ -663,26 +670,22 @@
     <!-- FR:CONFIRMED_ROWS -->
   </section>
 
-  <section class="finding-section" data-section="questionable">
+  <section class="finding-section" data-section="needs-decision">
     <div class="section-header">
-      <input type="checkbox" class="section-cb" aria-label="Select all questionable findings">
-      <span class="section-title">Questionable Findings (<!-- FR:QUESTIONABLE_COUNT -->)</span>
+      <input type="checkbox" class="section-cb" aria-label="Select all needs-your-decision findings">
+      <span class="section-title">Needs Your Decision (<!-- FR:NEEDS_DECISION_COUNT -->)</span>
     </div>
-    <!-- FR:QUESTIONABLE_ROWS -->
+    <!-- FR:NEEDS_DECISION_ROWS -->
+  </section>
+
+  <section class="finding-section" data-section="pre-existing">
+    <div class="section-header">
+      <input type="checkbox" class="section-cb" aria-label="Select all pre-existing findings">
+      <span class="section-title">Pre-existing — non-gating (<!-- FR:PREEXISTING_COUNT -->)</span>
+    </div>
+    <!-- FR:PREEXISTING_ROWS -->
   </section>
 </div>
-
-<details class="collapsible invalid-section">
-  <summary class="collapsible-summary"><!-- FR:INVALID_SUMMARY --></summary>
-  <div class="collapsible-body">
-    <table class="invalid-table">
-      <thead>
-        <tr><th>ID</th><th>Sev</th><th>Title</th><th>Reason</th></tr>
-      </thead>
-      <tbody><!-- FR:INVALID_ROWS --></tbody>
-    </table>
-  </div>
-</details>
 
 <details class="collapsible quality-notes" open>
   <summary class="collapsible-summary"><!-- FR:QUALITY_SUMMARY --></summary>

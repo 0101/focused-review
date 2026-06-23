@@ -63,6 +63,7 @@ def _envelope() -> dict:
                 "record_id": "r1",
                 "assessment_id": "A-01",
                 "display_number": 1,
+                "display_bucket": "confirmed",
                 "title": "Null deref in request handler",
                 "file": "src/a.py",
                 "line": 10,
@@ -71,6 +72,7 @@ def _envelope() -> dict:
                 "fix_complexity": "moderate",
                 "verdict": "Confirmed",
                 "type": "concern",
+                "introduced_by": "diff",
                 "description": "Dereferences req.user without a null check.",
                 "assessment": "Confirmed at the call site.",
                 "suggestion": "Guard req.user before access.",
@@ -81,6 +83,7 @@ def _envelope() -> dict:
                 "record_id": "r2",
                 "assessment_id": "A-02",
                 "display_number": 2,
+                "display_bucket": "confirmed",
                 "title": "Duplicated parsing logic",
                 "file": "src/b.py",
                 "line": 20,
@@ -89,6 +92,7 @@ def _envelope() -> dict:
                 "fix_complexity": "complex",
                 "verdict": "Confirmed",
                 "type": "rule",
+                "introduced_by": "diff",
                 "description": "Same parse block in three methods.",
                 "assessment": "Real duplication.",
                 "suggestion": "Extract a shared parse helper.",
@@ -98,7 +102,8 @@ def _envelope() -> dict:
             {
                 "record_id": "r3",
                 "assessment_id": "A-05",
-                "display_number": 3,
+                "display_number": 1,
+                "display_bucket": "needs-decision",
                 "title": "Magic number in retry loop",
                 "file": "src/c.py",
                 "line": None,
@@ -107,6 +112,7 @@ def _envelope() -> dict:
                 "fix_complexity": "quickfix",
                 "verdict": "Questionable",
                 "type": "concern",
+                "introduced_by": "diff",
                 "description": "Retry count 5 is hardcoded.",
                 "assessment": "",
                 "suggestion": "",
@@ -117,6 +123,7 @@ def _envelope() -> dict:
                 "record_id": "r4",
                 "assessment_id": "A-09",
                 "display_number": None,
+                "display_bucket": "hidden",
                 "title": "Section divider comment",
                 "file": "src/d.py",
                 "line": 5,
@@ -125,6 +132,7 @@ def _envelope() -> dict:
                 "fix_complexity": "quickfix",
                 "verdict": "Invalid",
                 "type": "rule",
+                "introduced_by": "diff",
                 "description": "A // ---- divider.",
                 "assessment": "Navigational aid.",
                 "suggestion": "",
@@ -612,13 +620,28 @@ class TestRunState:
 def _dimmed_ids(canvas_html: str) -> set[str]:
     import re
 
-    return set(re.findall(r'<div class="finding dimmed" data-record-id="([^"]+)"', canvas_html))
+    # Match any .finding block and classify by its class tokens, so an extra
+    # presentation class (e.g. "costly" for a large-fix finding) doesn't hide a
+    # finding from the dimmed/plain partition.
+    return {
+        rid
+        for classes, rid in re.findall(
+            r'<div class="(finding[^"]*)" data-record-id="([^"]+)"', canvas_html
+        )
+        if "dimmed" in classes.split()
+    }
 
 
 def _plain_ids(canvas_html: str) -> set[str]:
     import re
 
-    return set(re.findall(r'<div class="finding" data-record-id="([^"]+)"', canvas_html))
+    return {
+        rid
+        for classes, rid in re.findall(
+            r'<div class="(finding[^"]*)" data-record-id="([^"]+)"', canvas_html
+        )
+        if "dimmed" not in classes.split()
+    }
 
 
 class TestDisregardPersistsAcrossRerender:

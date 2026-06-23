@@ -37,10 +37,15 @@ SCRIPT_PATH = str(Path(__file__).resolve().parent.parent / "focused-review.py")
 def _render_envelope() -> dict:
     """A representative, fully valid envelope used by the golden + format tests.
 
-    Exercises: two Confirmed findings (one multi-source/grouped provenance, one
-    single rule source), one Questionable finding with a null line and empty
-    assessment/suggestion (tests field omission), one Invalid finding (separate
-    table keyed by assessment_id), and a rule-quality note.
+    Exercises the verdict-model display buckets: two in-scope Confirmed findings
+    (one multi-source/grouped provenance, one single rule source whose ``complex``
+    fix triggers the large-fix tag), one in-scope Questionable finding routed to
+    the ``needs-decision`` bucket (null line + empty assessment/suggestion, testing
+    field omission), one Invalid finding routed to ``hidden`` (recorded only, never
+    rendered), and one pre-existing Confirmed finding routed to its own non-gating
+    ``pre-existing`` section. Each visible bucket carries its own contiguous,
+    1-based ``display_number`` run, so numbers repeat across buckets. Plus a
+    rule-quality note in the structured (id/rule_source/rule_file) shape.
     """
     return {
         "schema_version": 1,
@@ -50,7 +55,7 @@ def _render_envelope() -> dict:
             "date": "2026-02-03T10:00:00Z",
             "rule_count": 5,
             "concern_count": 3,
-            "consolidated_count": 4,
+            "consolidated_count": 5,
             "confirmed": 2,
             "questionable": 1,
             "invalid": 1,
@@ -58,7 +63,10 @@ def _render_envelope() -> dict:
         "rebuttal_overrides": [],
         "rule_quality_notes": [
             {
+                "id": "RQ1",
                 "rule": "no-comments",
+                "rule_source": "rule--no-comments",
+                "rule_file": "review/rules/no-comments.md",
                 "observation": "4 findings, all Invalid in embedded template code.",
                 "suggestion": "Add an exception for embedded templates.",
             }
@@ -68,6 +76,7 @@ def _render_envelope() -> dict:
                 "record_id": "r1",
                 "assessment_id": "A-01",
                 "display_number": 1,
+                "display_bucket": "confirmed",
                 "title": "Null deref in request handler",
                 "file": "src/a.py",
                 "line": 10,
@@ -76,6 +85,7 @@ def _render_envelope() -> dict:
                 "fix_complexity": "moderate",
                 "verdict": "Confirmed",
                 "type": "concern",
+                "introduced_by": "diff",
                 "description": "The handler dereferences req.user without a null check.",
                 "assessment": "Confirmed by reading the call site; user can be null on the error path.",
                 "suggestion": "Guard req.user before access.",
@@ -90,6 +100,7 @@ def _render_envelope() -> dict:
                 "record_id": "r2",
                 "assessment_id": "A-02",
                 "display_number": 2,
+                "display_bucket": "confirmed",
                 "title": "Duplicated parsing logic",
                 "file": "src/b.py",
                 "line": 20,
@@ -98,6 +109,7 @@ def _render_envelope() -> dict:
                 "fix_complexity": "complex",
                 "verdict": "Confirmed",
                 "type": "rule",
+                "introduced_by": "diff",
                 "description": "The same parse block appears in three methods.",
                 "assessment": "Real duplication, though refactoring touches a hot path.",
                 "suggestion": "Extract a shared parse helper.",
@@ -107,7 +119,8 @@ def _render_envelope() -> dict:
             {
                 "record_id": "r3",
                 "assessment_id": "A-05",
-                "display_number": 3,
+                "display_number": 1,
+                "display_bucket": "needs-decision",
                 "title": "Magic number in retry loop",
                 "file": "src/c.py",
                 "line": None,
@@ -116,6 +129,7 @@ def _render_envelope() -> dict:
                 "fix_complexity": "quickfix",
                 "verdict": "Questionable",
                 "type": "concern",
+                "introduced_by": "diff",
                 "description": "Retry count 5 is hardcoded.",
                 "assessment": "",
                 "suggestion": "",
@@ -126,6 +140,7 @@ def _render_envelope() -> dict:
                 "record_id": "r4",
                 "assessment_id": "A-09",
                 "display_number": None,
+                "display_bucket": "hidden",
                 "title": "Section divider comment",
                 "file": "src/d.py",
                 "line": 5,
@@ -134,10 +149,31 @@ def _render_envelope() -> dict:
                 "fix_complexity": "quickfix",
                 "verdict": "Invalid",
                 "type": "rule",
+                "introduced_by": "diff",
                 "description": "A // ---- divider.",
                 "assessment": "Navigational aid in long embedded template.",
                 "suggestion": "",
                 "provenance": ["rule--no-comments"],
+                "has_detail": False,
+            },
+            {
+                "record_id": "r5",
+                "assessment_id": "A-12",
+                "display_number": 1,
+                "display_bucket": "pre-existing",
+                "title": "Broad except swallows errors",
+                "file": "src/e.py",
+                "line": 88,
+                "original_severity": "Medium",
+                "severity": "Medium",
+                "fix_complexity": "moderate",
+                "verdict": "Confirmed",
+                "type": "concern",
+                "introduced_by": "pre-existing",
+                "description": "A bare except hides real failures from callers.",
+                "assessment": "Real, but predates this change — not introduced by the diff.",
+                "suggestion": "Catch specific exceptions instead.",
+                "provenance": ["concern--bugs--opus"],
                 "has_detail": False,
             },
         ],
@@ -158,8 +194,8 @@ GOLDEN_REVIEW_MD = """# Unified Review Report
 | Verdict | Count |
 |---------|-------|
 | ✅ Confirmed | 2 |
-| ❓ Questionable | 1 |
-| ❌ Invalid (filtered) | 1 |
+| ❓ Needs your decision | 1 |
+| 📋 Pre-existing | 1 |
 
 ---
 
@@ -193,9 +229,9 @@ The same parse block appears in three methods.
 
 ---
 
-## Questionable Findings
+## Needs Your Decision
 
-### 3. [Low] Magic number in retry loop
+### 1. [Low] Magic number in retry loop
 
 **File:** `src/c.py`
 **Fix complexity:** quickfix
@@ -205,14 +241,21 @@ Retry count 5 is hardcoded.
 
 ---
 
-<details>
-<summary>1 finding filtered as invalid</summary>
+## Pre-existing
 
-| ID | Severity | File | Title | Reason |
-|----|----------|------|-------|--------|
-| A-09 | Medium | `src/d.py:5` | Section divider comment | Navigational aid in long embedded template. |
+### 1. [Medium] Broad except swallows errors
 
-</details>
+**File:** `src/e.py:88`
+**Fix complexity:** moderate
+**Found by:** 1 source: concern:bugs (opus)
+
+A bare except hides real failures from callers.
+
+> **Assessment:** Real, but predates this change — not introduced by the diff.
+
+**Suggestion:** Catch specific exceptions instead.
+
+---
 
 ## Rule Quality Notes
 
@@ -230,6 +273,9 @@ def _render_args(records: Path, **overrides) -> argparse.Namespace:
         records=str(records),
         run_dir=None,
         repo=".",
+        # Pin the rules dir so rule_file validation is deterministic regardless of
+        # any ambient repo/user focused-review.json the test host happens to have.
+        rules_dir="review/",
         review_out=None,
         canvas_out=None,
         template=None,
@@ -254,10 +300,12 @@ class TestReviewMarkdownGolden:
         assert not out.endswith("\n\n")
 
     def test_heading_shape_is_postmortem_parseable(self) -> None:
-        # Post-mortem matches "### {n}. [{sev}] {title}" headings.
+        # Post-mortem matches "### {n}. [{sev}] {title}" headings. Numbers restart
+        # per visible bucket, so the needs-decision finding is "### 1." not "### 3.".
         out = fr.render_review_markdown(_render_envelope())
         assert "### 1. [High] Null deref in request handler" in out
-        assert "### 3. [Low] Magic number in retry loop" in out
+        assert "### 1. [Low] Magic number in retry loop" in out
+        assert "### 1. [Medium] Broad except swallows errors" in out
 
     def test_found_by_labels_are_postmortem_parseable(self) -> None:
         # Post-mortem parses "rule:{name}" and "concern:{name} ({model})".
@@ -276,20 +324,23 @@ class TestReviewMarkdownGolden:
         assert "src/c.py:" not in out
 
     def test_empty_assessment_and_suggestion_omitted(self) -> None:
-        # Only the two Confirmed findings have assessment/suggestion text.
+        # The two Confirmed findings and the Pre-existing finding carry
+        # assessment/suggestion text; the needs-decision finding has neither.
         out = fr.render_review_markdown(_render_envelope())
-        assert out.count("> **Assessment:**") == 2
-        assert out.count("**Suggestion:**") == 2
+        assert out.count("> **Assessment:**") == 3
+        assert out.count("**Suggestion:**") == 3
 
     def test_confirmed_section_omitted_when_none(self) -> None:
         env = _render_envelope()
-        # Keep only the Invalid finding.
+        # Keep only the Invalid (hidden) finding — no visible bucket has findings.
         env["findings"] = [f for f in env["findings"] if f["verdict"] == "Invalid"]
         env["run"].update(consolidated_count=1, confirmed=0, questionable=0, invalid=1)
         out = fr.render_review_markdown(env)
         assert "## Confirmed Findings" not in out
-        assert "## Questionable Findings" not in out
-        assert "filtered as invalid" in out
+        assert "## Needs Your Decision" not in out
+        assert "## Pre-existing" not in out
+        # The Invalid finding is hidden: its content never leaks into review.md.
+        assert "Section divider comment" not in out
 
     def test_quality_notes_section_omitted_when_none(self) -> None:
         env = _render_envelope()
@@ -297,20 +348,23 @@ class TestReviewMarkdownGolden:
         out = fr.render_review_markdown(env)
         assert "## Rule Quality Notes" not in out
 
-    def test_invalid_block_omitted_when_none(self) -> None:
-        env = _render_envelope()
-        env["findings"] = [f for f in env["findings"] if f["verdict"] != "Invalid"]
-        env["run"].update(consolidated_count=3, invalid=0)
-        out = fr.render_review_markdown(env)
+    def test_invalid_findings_never_rendered(self) -> None:
+        # Invalid findings live in records.json only (D-15): no section, no table,
+        # no <details> block, and none of their text leaks into review.md.
+        out = fr.render_review_markdown(_render_envelope())
         assert "filtered as invalid" not in out
         assert "<details>" not in out
+        assert "Section divider comment" not in out  # the A-09 Invalid finding's title
 
-    def test_pipe_in_title_escaped_in_invalid_table(self) -> None:
-        env = _render_envelope()
-        inv = next(f for f in env["findings"] if f["verdict"] == "Invalid")
-        inv["title"] = "use A | B operator"
-        out = fr.render_review_markdown(env)
-        assert r"use A \| B operator" in out
+    def test_pre_existing_section_rendered_non_gating(self) -> None:
+        # Pre-existing Confirmed findings get their own section, separate from the
+        # gating Confirmed tally (D-16).
+        out = fr.render_review_markdown(_render_envelope())
+        assert "## Pre-existing" in out
+        assert "### 1. [Medium] Broad except swallows errors" in out
+        # It is not folded into the Confirmed section.
+        confirmed_block = out.split("## Confirmed Findings", 1)[1].split("## Needs Your Decision", 1)[0]
+        assert "Broad except swallows errors" not in confirmed_block
 
     def test_crlf_in_title_cannot_inject_heading(self) -> None:
         # A raw CR/LF in a Confirmed/Questionable title must be flattened so it can't
@@ -345,14 +399,29 @@ class TestTerminalSummary:
     def test_header_and_pipeline_line(self) -> None:
         out = fr.render_terminal_summary(_render_envelope(), "run/review.md")
         assert out.startswith("📄 run/review.md\n")
-        assert "5 rules + 3 concerns → 4 unique findings → 3 actionable" in out
+        assert "5 rules + 3 concerns → 5 unique findings → 3 actionable" in out
 
     def test_table_rows_and_verdict_icons(self) -> None:
         out = fr.render_terminal_summary(_render_envelope(), "run/review.md")
         assert "| # | Verdict | Severity | Found by | File | Issue |" in out
-        # Confirmed → ✅, Questionable → ❓; grouped short "Found by".
+        # Confirmed → ✅, Questionable → ❓; grouped short "Found by". The
+        # needs-decision row restarts numbering at 1 (per-bucket display_number).
         assert "| 1 | ✅ | High | bugs(opus,codex), rule:null-safety | src/a.py:10 |" in out
-        assert "| 3 | ❓ | Low | style(gemini) | src/c.py |" in out
+        assert "| 1 | ❓ | Low | style(gemini) | src/c.py |" in out
+        # Per-bucket numbering repeats "1", so the actionable table must be the
+        # buckets CONCATENATED (confirmed then needs-decision), never re-sorted by
+        # display_number (which would interleave as 1✅, 1❓, 2✅). Lock the order.
+        assert out.index("src/a.py:10") < out.index("src/b.py:20") < out.index("src/c.py")
+
+    def test_pre_existing_block_is_separate_and_non_gating(self) -> None:
+        # Pre-existing is surfaced in its own block, excluded from the actionable
+        # count/table (D-16).
+        out = fr.render_terminal_summary(_render_envelope(), "run/review.md")
+        assert "📋 Pre-existing (non-gating)" in out
+        assert "- [Medium] Broad except swallows errors (src/e.py:88)" in out
+        # Not a row in the actionable table.
+        table = out.split("| # | Verdict |", 1)[1].split("📋 Pre-existing", 1)[0]
+        assert "Broad except swallows errors" not in table
 
     def test_quality_notes_block(self) -> None:
         out = fr.render_terminal_summary(_render_envelope(), "run/review.md")
@@ -433,10 +502,18 @@ class TestCanvasRender:
     def test_section_and_badge_counts(self) -> None:
         out = _canvas(_render_envelope())
         assert "Confirmed Findings (2)" in out
-        assert "Questionable Findings (1)" in out
-        assert "1 finding filtered as invalid" in out
+        assert "Needs Your Decision (1)" in out
+        assert "Pre-existing — non-gating (1)" in out
+        assert "Questionable" not in out
+        assert "filtered as invalid" not in out
         assert "Rule Quality Notes (1)" in out
         assert '<span class="count">2</span> Confirmed' in out
+        assert '<span class="count">1</span> Needs your decision' in out
+        assert '<span class="count">1</span> Pre-existing' in out
+        # D-16: the canvas "actionable" headline count excludes pre-existing
+        # (2 confirmed + 1 needs-decision = 3), mirroring the terminal summary; the
+        # 1 pre-existing finding is surfaced only via its own badge/section.
+        assert "5 unique → 3 actionable" in out
 
     def test_found_tags_grouped_and_classed(self) -> None:
         out = _canvas(_render_envelope())
@@ -449,11 +526,32 @@ class TestCanvasRender:
         assert '<span class="sev sev-high">High</span>' in out
         assert '<span class="sev sev-low">Low</span>' in out
 
-    def test_invalid_row_uses_abbreviated_severity(self) -> None:
+    def test_invalid_findings_absent_from_canvas(self) -> None:
+        # The Invalid (hidden) finding is recorded only — its record id, title, and
+        # assessment_id never appear in the canvas (D-15).
         out = _canvas(_render_envelope())
-        # The Invalid finding's final severity is Medium → "Med".
-        assert "<td>A-09</td>" in out
-        assert '<span class="sev sev-medium">Med</span>' in out
+        assert 'data-record-id="r4"' not in out
+        assert "Section divider comment" not in out
+        assert "A-09" not in out
+
+    def test_pre_existing_finding_rendered_in_its_section(self) -> None:
+        # The pre-existing Confirmed finding renders in the Pre-existing section.
+        out = _canvas(_render_envelope())
+        assert 'data-record-id="r5"' in out
+        pre = out.split('data-section="pre-existing"', 1)[1]
+        assert "Broad except swallows errors" in pre
+
+    def test_costly_fix_tagged_and_tinted(self) -> None:
+        # The single Confirmed finding whose fix_complexity is "complex" gets the
+        # costly row class + the large-fix pill; the moderate/quickfix findings do not.
+        out = _canvas(_render_envelope())
+        complex_block = out.split('data-record-id="r2"', 1)[1].split("</details>", 1)[0]
+        assert 'class="finding costly"' in out
+        assert '<span class="fix-tag">⚠ Large fix</span>' in complex_block
+        # A non-complex finding stays untagged.
+        moderate_block = out.split('data-record-id="r1"', 1)[1].split("</details>", 1)[0]
+        assert "fix-tag" not in moderate_block
+        assert 'data-record-id="r1"' in out and 'class="finding"' in out
 
     def test_null_line_location_no_colon(self) -> None:
         out = _canvas(_render_envelope())
@@ -549,15 +647,27 @@ class TestEscaping:
         assert '"><img' not in block
         assert 'class="sev sev-low&quot;&gt;&lt;img src=x onerror=alert(1)&gt;"' in block
 
-    def test_hostile_severity_escaped_in_invalid_row(self) -> None:
-        # Same attribute boundary in the invalid-findings table row.
-        hostile = 'low"><script>evil()</script>'
-        row = fr._canvas_invalid_row(
-            {"assessment_id": "A-01", "severity": hostile, "title": "t", "assessment": ""}
-        )
-        assert "<script>evil()</script>" not in row
-        assert '"><script>' not in row
-        assert 'class="sev sev-low&quot;&gt;&lt;script&gt;evil()&lt;/script&gt;"' in row
+    def test_costly_fix_tag_does_not_defeat_title_escaping(self) -> None:
+        # The large-fix tag is appended AFTER html.escape(title) as trusted constant
+        # markup, so a hostile title on a costly finding is still fully escaped and
+        # cannot inject markup ahead of the tag. The finding carries no display_bucket,
+        # so this also locks D-5: the costly class/tag is applied bucket-agnostically.
+        finding = {
+            "record_id": "r1",
+            "display_number": 1,
+            "title": "</span><script>evil()</script>",
+            "severity": "High",
+            "file": "src/a.py",
+            "line": 1,
+            "fix_complexity": "complex",
+        }
+        block = fr._canvas_finding_block(finding)
+        assert "<script>evil()</script>" not in block
+        assert "&lt;script&gt;evil()&lt;/script&gt;" in block
+        # The trusted tag is still appended (after the escaped title) and the row tint
+        # class is present regardless of the (absent) verdict bucket.
+        assert '<span class="fix-tag">⚠ Large fix</span>' in block
+        assert 'class="finding costly"' in block
 
 
 # ---------------------------------------------------------------------------
@@ -736,6 +846,10 @@ class TestRenderReviewSubprocess:
                 str(tmp_path),
                 "--repo",
                 str(tmp_path),
+                # Pin rules-dir so the note's rule_file validates deterministically,
+                # independent of any focused-review.json on the test host.
+                "--rules-dir",
+                "review/",
             ],
             capture_output=True,
             env=child_env,

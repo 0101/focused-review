@@ -2711,9 +2711,6 @@ def validate_records_command(args: argparse.Namespace) -> None:
 # See docs/spec/canvas-review-report.md.
 # ---------------------------------------------------------------------------
 
-# Severity → abbreviation shown in the (space-constrained) canvas invalid table.
-_SEV_ABBREV = {"Critical": "Crit", "High": "High", "Medium": "Med", "Low": "Low"}
-
 # Relay trailer is intentionally NOT emitted here — see render_terminal_summary.
 
 
@@ -2726,11 +2723,6 @@ def _sev_class(severity: str) -> str:
     so the escape stays visible at the attribute boundary like every other field.
     """
     return "sev-" + str(severity).strip().lower()
-
-
-def _sev_abbrev(severity: str) -> str:
-    """Short severity label for the canvas invalid table."""
-    return _SEV_ABBREV.get(severity, str(severity))
 
 
 def _location_str(file: object, line: object) -> str:
@@ -2760,11 +2752,6 @@ def _md_cell(text: object) -> str:
 def _flatten(text: object) -> str:
     """Collapse a value to a single line (for table 'reason' cells)."""
     return " ".join(str("" if text is None else text).split())
-
-
-def _invalid_summary_text(n: int) -> str:
-    """e.g. '1 finding filtered as invalid' / '3 findings filtered as invalid'."""
-    return f"{n} finding{'' if n == 1 else 's'} filtered as invalid"
 
 
 # ── provenance → "Found by" labels ───────────────────────────────────────────
@@ -2883,19 +2870,34 @@ def _found_tags_html(provenance: object) -> str:
 # ── finding partitioning ─────────────────────────────────────────────────────
 
 
-def _partition_findings(findings: list) -> tuple[list, list, list]:
-    """Split findings into (confirmed, questionable, invalid) display order.
+def _finding_bucket(finding: dict) -> str | None:
+    """The finding's ``display_bucket`` — the validated visible/hidden routing key.
 
-    Confirmed/Questionable share one numbered sequence and sort by
-    ``display_number``; Invalid render in a table keyed by ``assessment_id``.
+    Prefers the carried (validated) ``display_bucket`` and falls back to deriving
+    it from ``(verdict, introduced_by)``, so the renderer still routes a hand-built
+    envelope that omitted the derived field. See :func:`_derive_display_bucket`.
     """
-    confirmed = [f for f in findings if f.get("verdict") == "Confirmed"]
-    questionable = [f for f in findings if f.get("verdict") == "Questionable"]
-    invalid = [f for f in findings if f.get("verdict") == "Invalid"]
-    confirmed.sort(key=lambda f: (f.get("display_number") is None, f.get("display_number") or 0))
-    questionable.sort(key=lambda f: (f.get("display_number") is None, f.get("display_number") or 0))
-    invalid.sort(key=lambda f: str(f.get("assessment_id") or ""))
-    return confirmed, questionable, invalid
+    bucket = finding.get("display_bucket")
+    if bucket in VALID_DISPLAY_BUCKETS:
+        return bucket
+    return _derive_display_bucket(finding.get("verdict"), finding.get("introduced_by"))
+
+
+def _partition_findings(findings: list) -> tuple[list, list, list]:
+    """Split findings into the three *visible* sections by ``display_bucket``.
+
+    Returns ``(confirmed, needs_decision, pre_existing)`` in display order. Each
+    visible bucket carries its own contiguous ``display_number`` sequence, so each
+    sorts independently. The ``hidden`` bucket — every Invalid finding plus any
+    pre-existing Questionable — is recorded in ``records.json`` only and is
+    intentionally dropped here: it is never rendered in review.md or the canvas.
+    """
+    confirmed = [f for f in findings if _finding_bucket(f) == "confirmed"]
+    needs_decision = [f for f in findings if _finding_bucket(f) == "needs-decision"]
+    pre_existing = [f for f in findings if _finding_bucket(f) == "pre-existing"]
+    for bucket in (confirmed, needs_decision, pre_existing):
+        bucket.sort(key=lambda f: (f.get("display_number") is None, f.get("display_number") or 0))
+    return confirmed, needs_decision, pre_existing
 
 
 # ── review.md ────────────────────────────────────────────────────────────────
@@ -2928,28 +2930,6 @@ def _md_finding_block(finding: dict) -> str:
     return "\n\n".join(parts)
 
 
-def _md_invalid_block(invalid: list) -> str:
-    """The collapsible invalid-findings <details> table for review.md."""
-    lines = [
-        "<details>",
-        f"<summary>{_invalid_summary_text(len(invalid))}</summary>",
-        "",
-        "| ID | Severity | File | Title | Reason |",
-        "|----|----------|------|-------|--------|",
-    ]
-    for f in invalid:
-        lines.append(
-            f"| {_md_cell(f.get('assessment_id') or '')} "
-            f"| {_md_cell(f.get('severity', ''))} "
-            f"| `{_md_cell(_location_str(f.get('file', ''), f.get('line')))}` "
-            f"| {_md_cell(f.get('title', ''))} "
-            f"| {_md_cell(_flatten(f.get('assessment', '')))} |"
-        )
-    lines.append("")
-    lines.append("</details>")
-    return "\n".join(lines)
-
-
 def _md_quality_block(notes: list) -> str:
     """The Rule Quality Notes section for review.md."""
     lines = ["## Rule Quality Notes", ""]
@@ -2966,13 +2946,14 @@ def render_review_markdown(data: dict) -> str:
 
     Preserves the heading/field shape the reporter agent used to hand-author, so
     downstream LLM readers (post-comments / post-mortem) and the golden-file test
-    keep working. Empty Confirmed/Questionable/Invalid/quality sections are
-    omitted (the reporter's "omit a section with no findings" rule).
+    keep working. Empty Confirmed / Needs-your-decision / Pre-existing / quality
+    sections are omitted (the reporter's "omit a section with no findings" rule).
+    Invalid findings are never rendered — they live in ``records.json`` only.
     """
     run = data.get("run", {})
     findings = data.get("findings", [])
     notes = data.get("rule_quality_notes", []) or []
-    confirmed, questionable, invalid = _partition_findings(findings)
+    confirmed, needs_decision, pre_existing = _partition_findings(findings)
 
     blocks: list[str] = ["# Unified Review Report"]
     blocks.append(
@@ -2993,8 +2974,8 @@ def render_review_markdown(data: dict) -> str:
                 "| Verdict | Count |",
                 "|---------|-------|",
                 f"| ✅ Confirmed | {len(confirmed)} |",
-                f"| ❓ Questionable | {len(questionable)} |",
-                f"| ❌ Invalid (filtered) | {len(invalid)} |",
+                f"| ❓ Needs your decision | {len(needs_decision)} |",
+                f"| 📋 Pre-existing | {len(pre_existing)} |",
             ]
         )
     )
@@ -3003,11 +2984,12 @@ def render_review_markdown(data: dict) -> str:
     if confirmed:
         blocks.append("## Confirmed Findings")
         blocks.extend(_md_finding_block(f) for f in confirmed)
-    if questionable:
-        blocks.append("## Questionable Findings")
-        blocks.extend(_md_finding_block(f) for f in questionable)
-    if invalid:
-        blocks.append(_md_invalid_block(invalid))
+    if needs_decision:
+        blocks.append("## Needs Your Decision")
+        blocks.extend(_md_finding_block(f) for f in needs_decision)
+    if pre_existing:
+        blocks.append("## Pre-existing")
+        blocks.extend(_md_finding_block(f) for f in pre_existing)
     if notes:
         blocks.append(_md_quality_block(notes))
 
@@ -3021,18 +3003,22 @@ def render_terminal_summary(data: dict, report_path: str) -> str:
     """Render the user-facing terminal summary string.
 
     Shape matches the reporter agent's relayed summary: report path, pipeline
-    stats, a findings table (ALL Confirmed + Questionable, with a "Found by"
-    column), and rule-quality notes. The "relay everything above this line"
-    trailer is intentionally NOT emitted here: it was a control instruction for
-    an LLM agent's output; render-review is a tool whose stdout is pure data, and
-    the orchestrator (SKILL.md) owns the relay-verbatim guarantee.
+    stats, an actionable findings table (Confirmed + Needs-your-decision, with a
+    "Found by" column), a non-gating Pre-existing block, and rule-quality notes.
+    The "relay everything above this line" trailer is intentionally NOT emitted
+    here: it was a control instruction for an LLM agent's output; render-review is
+    a tool whose stdout is pure data, and the orchestrator (SKILL.md) owns the
+    relay-verbatim guarantee.
     """
     run = data.get("run", {})
     findings = data.get("findings", [])
     notes = data.get("rule_quality_notes", []) or []
-    confirmed, questionable, _invalid = _partition_findings(findings)
-    actionable = confirmed + questionable
-    actionable.sort(key=lambda f: (f.get("display_number") is None, f.get("display_number") or 0))
+    confirmed, needs_decision, pre_existing = _partition_findings(findings)
+    # Pre-existing is non-gating (Decision 16), so the headline "actionable" count
+    # and the main table are the in-scope buckets only; pre-existing is surfaced in
+    # its own block below. Each bucket is already sorted by its own display_number,
+    # so concatenating (not re-sorting) keeps Confirmed ahead of Needs-your-decision.
+    actionable = confirmed + needs_decision
 
     blocks: list[str] = [f"📄 {report_path}"]
     blocks.append(
@@ -3058,6 +3044,15 @@ def render_terminal_summary(data: dict, report_path: str) -> str:
         blocks.append("\n".join(table))
     else:
         blocks.append("✅ No actionable findings.")
+
+    if pre_existing:
+        pre = ["📋 Pre-existing (non-gating)"]
+        for f in pre_existing:
+            pre.append(
+                f"- [{f.get('severity', '')}] {_flatten(f.get('title', ''))} "
+                f"({_location_str(f.get('file', ''), f.get('line'))})"
+            )
+        blocks.append("\n".join(pre))
 
     if notes:
         quality = ["📝 Rule Quality Notes"]
@@ -3249,6 +3244,18 @@ def _resolve_finding_detail(run_dir: str | None, finding: dict) -> str | None:
     return cleaned
 
 
+# A "complex" fix is the large/costly tier of the fix_complexity ordinal. It is
+# flagged visually (a tag + subtle row tint) ORTHOGONALLY to the verdict bucket —
+# a costly fix can appear in Confirmed, Needs-your-decision, or Pre-existing — and
+# the tag is pure presentation: it never routes, hides, or downgrades a finding.
+_COSTLY_FIX_COMPLEXITY = "complex"
+
+
+def _is_costly_fix(finding: dict) -> bool:
+    """True when the finding's ``fix_complexity`` is the large/costly tier."""
+    return finding.get("fix_complexity") == _COSTLY_FIX_COMPLEXITY
+
+
 def _canvas_finding_block(
     finding: dict, detail_html: str | None = None, dimmed: bool = False
 ) -> str:
@@ -3264,6 +3271,10 @@ def _canvas_finding_block(
     across every re-render — not just within the live JS session. The action-bar
     script seeds its own disregarded set from these server-rendered classes, so the
     persisted dim survives a cold canvas load too, not only an in-session morph.
+
+    A large/costly fix (``fix_complexity == "complex"``) additionally gets the
+    ``costly`` row class (a subtle tint) and a ``fix-tag`` pill on the title —
+    pure presentation, orthogonal to the verdict bucket.
     """
     rid = finding.get("record_id", "")
     number = finding.get("display_number")
@@ -3271,6 +3282,7 @@ def _canvas_finding_block(
     severity = finding.get("severity", "")
     location = _location_str(finding.get("file", ""), finding.get("line"))
     aria = f"Select finding {number}: {title}"
+    costly = _is_costly_fix(finding)
 
     sections = [
         "          <div class=\"detail-section\">\n"
@@ -3310,7 +3322,18 @@ def _canvas_finding_block(
         )
     detail_content = "\n".join(sections)
 
-    classes = "finding dimmed" if dimmed else "finding"
+    # The fix-tag is trusted constant markup appended AFTER the escaped title, so a
+    # hostile title can never break out of the span (it is still html.escape()-d).
+    title_html = html.escape(str(title))
+    if costly:
+        title_html += ' <span class="fix-tag">⚠ Large fix</span>'
+
+    class_names = ["finding"]
+    if dimmed:
+        class_names.append("dimmed")
+    if costly:
+        class_names.append("costly")
+    classes = " ".join(class_names)
     return (
         f'      <div class="{classes}" data-record-id="{html.escape(str(rid), quote=True)}">\n'
         f'        <input type="checkbox" class="row-cb" aria-label="{html.escape(aria, quote=True)}">\n'
@@ -3320,25 +3343,13 @@ def _canvas_finding_block(
         f'            <span class="num">{html.escape(str(number))}</span>\n'
         f'            <span class="sev {html.escape(_sev_class(severity), quote=True)}">{html.escape(str(severity))}</span>\n'
         f'            <span class="found-by">{_found_tags_html(finding.get("provenance"))}</span>\n'
-        f'            <span class="title">{html.escape(str(title))}</span>\n'
+        f'            <span class="title">{title_html}</span>\n'
         '          </summary>\n'
         '          <div class="detail-content">\n'
         f"{detail_content}\n"
         '          </div>\n'
         '        </details>\n'
         '      </div>'
-    )
-
-
-def _canvas_invalid_row(finding: dict) -> str:
-    """One ``<tr>`` for the canvas invalid-findings table."""
-    aid = finding.get("assessment_id") or ""
-    severity = finding.get("severity", "")
-    return (
-        f"        <tr><td>{html.escape(str(aid))}</td>"
-        f'<td><span class="sev {html.escape(_sev_class(severity), quote=True)}">{html.escape(_sev_abbrev(severity))}</span></td>'
-        f"<td>{html.escape(str(finding.get('title', '')))}</td>"
-        f"<td>{html.escape(_flatten(finding.get('assessment', '')))}</td></tr>"
     )
 
 
@@ -3386,8 +3397,11 @@ def render_canvas_html(
     run = data.get("run", {})
     findings = data.get("findings", [])
     notes = data.get("rule_quality_notes", []) or []
-    confirmed, questionable, invalid = _partition_findings(findings)
-    actionable_count = len(confirmed) + len(questionable)
+    confirmed, needs_decision, pre_existing = _partition_findings(findings)
+    # Pre-existing is non-gating (Decision 16), so the headline "actionable" count
+    # is the in-scope buckets only; the Pre-existing section is rendered but counted
+    # separately. The hidden bucket (Invalid + pre-existing Questionable) is dropped.
+    actionable_count = len(confirmed) + len(needs_decision)
 
     def block(finding: dict) -> str:
         rid = finding.get("record_id")
@@ -3401,8 +3415,8 @@ def render_canvas_html(
     )
     badges = (
         f'<span class="summary-badge badge-confirmed"><span class="count">{len(confirmed)}</span> Confirmed</span>'
-        f'<span class="summary-badge badge-questionable"><span class="count">{len(questionable)}</span> Questionable</span>'
-        f'<span class="summary-badge badge-invalid"><span class="count">{len(invalid)}</span> Invalid</span>'
+        f'<span class="summary-badge badge-needs-decision"><span class="count">{len(needs_decision)}</span> Needs your decision</span>'
+        f'<span class="summary-badge badge-preexisting"><span class="count">{len(pre_existing)}</span> Pre-existing</span>'
     )
 
     replacements = {
@@ -3412,10 +3426,10 @@ def render_canvas_html(
         "<!-- FR:SUMMARY_BADGES -->": badges,
         "<!-- FR:CONFIRMED_COUNT -->": str(len(confirmed)),
         "<!-- FR:CONFIRMED_ROWS -->": "\n".join(block(f) for f in confirmed),
-        "<!-- FR:QUESTIONABLE_COUNT -->": str(len(questionable)),
-        "<!-- FR:QUESTIONABLE_ROWS -->": "\n".join(block(f) for f in questionable),
-        "<!-- FR:INVALID_SUMMARY -->": html.escape(_invalid_summary_text(len(invalid))),
-        "<!-- FR:INVALID_ROWS -->": "\n".join(_canvas_invalid_row(f) for f in invalid),
+        "<!-- FR:NEEDS_DECISION_COUNT -->": str(len(needs_decision)),
+        "<!-- FR:NEEDS_DECISION_ROWS -->": "\n".join(block(f) for f in needs_decision),
+        "<!-- FR:PREEXISTING_COUNT -->": str(len(pre_existing)),
+        "<!-- FR:PREEXISTING_ROWS -->": "\n".join(block(f) for f in pre_existing),
         "<!-- FR:QUALITY_SUMMARY -->": html.escape(f"Rule Quality Notes ({len(notes)})"),
         "<!-- FR:QUALITY_NOTES -->": "\n".join(_canvas_quality_item(n) for n in notes),
     }
