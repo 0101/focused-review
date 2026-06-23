@@ -73,10 +73,49 @@ VALID_VERDICTS = ("Confirmed", "Questionable", "Invalid")
 VALID_FINDING_TYPES = ("rule", "concern", "mixed")
 # Mirrors the prepare-review --scope choices.
 VALID_RUN_SCOPES = ("branch", "commit", "staged", "unstaged", "full")
-# Findings that are shown in the numbered (actionable) sections must carry a
-# positional display_number; Invalid findings render in a separate table keyed
-# by assessment id, so their display_number is optional.
-_VERDICTS_REQUIRING_DISPLAY_NUMBER = ("Confirmed", "Questionable")
+
+# display_bucket makes the scope/display routing explicit and illegal states
+# unrepresentable: it is DERIVED from (verdict, introduced_by) and carried on
+# every finding so hidden / pre-existing items don't break the visible counts or
+# the per-bucket display_number numbering. See docs/spec/verdict-model-redesign.md.
+#   confirmed     — in-scope Confirmed (the gating "main tally")
+#   needs-decision — in-scope Questionable (rendered as "Needs your decision")
+#   pre-existing  — Confirmed but not introduced by this change (own section, non-gating)
+#   hidden        — recorded but never shown (pre-existing Questionable + every Invalid)
+VALID_DISPLAY_BUCKETS = ("confirmed", "needs-decision", "pre-existing", "hidden")
+# Buckets that render in a numbered section: each carries a contiguous, 1-based
+# display_number sequence of its own. Findings in the `hidden` bucket are recorded
+# only, so their display_number is null.
+_VISIBLE_DISPLAY_BUCKETS = ("confirmed", "needs-decision", "pre-existing")
+# The single introduced_by value that marks a finding as not introduced by the
+# change under review (orthogonal to verdict; routes Confirmed → pre-existing and
+# Questionable → hidden).
+PRE_EXISTING_MARKER = "pre-existing"
+
+# Stable-id formats enforced so the unified canvas action bar can disambiguate a
+# flat id list by prefix: findings are r#, rule-quality notes are RQ#.
+_RECORD_ID_RE = re.compile(r"^r[0-9]+$")
+_RULE_QUALITY_NOTE_ID_RE = re.compile(r"^RQ[0-9]+$")
+
+
+def _derive_display_bucket(verdict: object, introduced_by: object) -> str | None:
+    """Derive the canonical display_bucket from ``(verdict, introduced_by)``.
+
+    Returns ``None`` when ``verdict`` is not a recognized enum value (the caller
+    has already reported that error and must not derive a bucket from it). A
+    finding is *pre-existing* only when ``introduced_by`` is exactly the
+    :data:`PRE_EXISTING_MARKER` string; anything else (``diff``, ``""``, absent,
+    or a non-string) is treated as in-scope.
+    """
+    if verdict not in VALID_VERDICTS:
+        return None
+    pre_existing = introduced_by == PRE_EXISTING_MARKER
+    if verdict == "Invalid":
+        return "hidden"
+    if verdict == "Confirmed":
+        return "pre-existing" if pre_existing else "confirmed"
+    # Questionable
+    return "hidden" if pre_existing else "needs-decision"
 
 CONFIG_FILENAME = "focused-review.json"
 CONFIG_SCAN_LOCATIONS: list[str] = [
@@ -2033,42 +2072,61 @@ def _validate_run(run: dict, errors: list[dict]) -> None:
 
 
 def _validate_run_counts(run: dict, findings: list, errors: list[dict]) -> None:
-    """Cross-check ``run`` tallies against the verdicts present in ``findings``.
+    """Cross-check ``run`` tallies against the bucketed ``findings``.
 
     Only runs when every finding is an object (otherwise a structural error was
     already reported). Catches truncation and miscounts — both real reporter
     failure modes the spec calls out.
+
+    Count semantics (verdict-model redesign):
+
+    - ``confirmed`` / ``questionable`` are the **visible bucket** tallies, so
+      pre-existing Confirmed (its own non-gating section) and hidden pre-existing
+      Questionable are excluded from the headline actionable counts.
+    - ``invalid`` stays the **verdict** tally — the false-positive count — even
+      though every Invalid finding is hidden from the rendered report.
     """
     if not all(isinstance(rec, dict) for rec in findings):
         return
 
-    tally = {verdict: 0 for verdict in VALID_VERDICTS}
-    for rec in findings:
-        verdict = rec.get("verdict")
-        if verdict in tally:
-            tally[verdict] += 1
-
     def add(field: str, message: str) -> None:
         errors.append(_records_error("run", None, f"run.{field}", field, message))
 
-    # Only cross-check the per-verdict tallies when every finding has a valid
-    # verdict. A finding with a bad/missing verdict drops out of the tally and
-    # would otherwise produce a *misleading* "run.confirmed is N but M findings
-    # have verdict 'Confirmed'" error — pointing the reporter at the wrong field
-    # and risking a wasted retry. The real (verdict) error is reported per-finding.
-    if all(rec.get("verdict") in tally for rec in findings):
-        for field, verdict in (
-            ("confirmed", "Confirmed"),
-            ("questionable", "Questionable"),
-            ("invalid", "Invalid"),
-        ):
+    verdicts_ok = all(rec.get("verdict") in VALID_VERDICTS for rec in findings)
+    introduced_ok = all(
+        rec.get("introduced_by", _MISSING) is _MISSING
+        or isinstance(rec.get("introduced_by"), str)
+        for rec in findings
+    )
+
+    # Visible-bucket tallies (confirmed / needs-decision). Gated on valid verdict
+    # AND well-formed introduced_by so a bad field doesn't yield a *misleading*
+    # count mismatch — the real error is reported per finding.
+    if verdicts_ok and introduced_ok:
+        bucket_tally = {bucket: 0 for bucket in VALID_DISPLAY_BUCKETS}
+        for rec in findings:
+            bucket = _derive_display_bucket(rec.get("verdict"), rec.get("introduced_by"))
+            if bucket in bucket_tally:
+                bucket_tally[bucket] += 1
+        for field, bucket in (("confirmed", "confirmed"), ("questionable", "needs-decision")):
             value = run.get(field)
-            if _is_int(value) and value >= 0 and value != tally[verdict]:
+            if _is_int(value) and value >= 0 and value != bucket_tally[bucket]:
                 add(
                     field,
-                    f"run.{field} is {value} but {tally[verdict]} finding(s) have "
-                    f"verdict '{verdict}'",
+                    f"run.{field} is {value} but {bucket_tally[bucket]} finding(s) "
+                    f"are in the '{bucket}' display bucket",
                 )
+
+    # invalid — verdict tally (false-positive count). Gated only on valid verdict.
+    if verdicts_ok:
+        invalid_count = sum(1 for rec in findings if rec.get("verdict") == "Invalid")
+        value = run.get("invalid")
+        if _is_int(value) and value >= 0 and value != invalid_count:
+            add(
+                "invalid",
+                f"run.invalid is {value} but {invalid_count} finding(s) have "
+                f"verdict 'Invalid'",
+            )
 
     # Length-based, independent of verdicts — always safe to check, and the
     # primary signal for a truncated findings array.
@@ -2115,7 +2173,7 @@ def _validate_finding(
     errors: list[dict],
     seen_record_ids: set,
     seen_assessment_ids: set,
-    seen_display_numbers: set,
+    seen_display_numbers_by_bucket: dict[str, set],
 ) -> None:
     """Validate a single finding object and accumulate structured errors."""
     base_path = f"findings[{index}]"
@@ -2164,10 +2222,17 @@ def _validate_finding(
         elif value not in allowed:
             add(field, f"{field} must be one of {', '.join(allowed)} (got {value!r})")
 
-    # Stable identifier — required, unique.
+    # Stable identifier — required, format-checked (r#), unique. The r# format is
+    # enforced so the unified canvas action bar can disambiguate a flat id list by
+    # prefix (findings r#, rule-quality notes RQ#).
     record_id = rec.get("record_id", _MISSING)
     if not _is_nonempty_str(record_id):
         add("record_id", "record_id is required and must be a non-empty string")
+    elif not _RECORD_ID_RE.match(record_id):
+        add(
+            "record_id",
+            f"record_id must match ^r[0-9]+$ (e.g. r1, r2); got {record_id!r}",
+        )
     elif record_id in seen_record_ids:
         add("record_id", f"duplicate record_id {record_id!r} (record_ids must be unique)")
     else:
@@ -2222,30 +2287,68 @@ def _validate_finding(
     if line is not None and not (_is_int(line) and line >= 0):
         add("line", "line must be an integer >= 0 or null")
 
-    # display_number — positional. Required and unique for the numbered
-    # (actionable) Confirmed/Questionable sections; optional for Invalid findings
-    # (which render in a separate table keyed by assessment_id), so an Invalid
-    # finding's number does not participate in the uniqueness set.
+    # display_bucket — the canonical scope/display routing, DERIVED from
+    # (verdict, introduced_by). It is carried explicitly (not recomputed
+    # downstream) so the visible/counted set is unambiguous, but it must agree
+    # with the derivation so illegal states (e.g. an Invalid finding tagged
+    # "confirmed") are unrepresentable.
     verdict = rec.get("verdict")
-    requires_number = verdict in _VERDICTS_REQUIRING_DISPLAY_NUMBER
+    introduced_by_value = introduced_by if introduced_by is not _MISSING else None
+    derived_bucket = _derive_display_bucket(verdict, introduced_by_value)
+    declared_bucket = rec.get("display_bucket", _MISSING)
+    if declared_bucket is _MISSING:
+        add(
+            "display_bucket",
+            "display_bucket is required and must be one of " + ", ".join(VALID_DISPLAY_BUCKETS),
+        )
+    elif declared_bucket not in VALID_DISPLAY_BUCKETS:
+        add(
+            "display_bucket",
+            f"display_bucket must be one of {', '.join(VALID_DISPLAY_BUCKETS)} "
+            f"(got {declared_bucket!r})",
+        )
+    elif derived_bucket is not None and declared_bucket != derived_bucket:
+        # Only cross-check when the verdict is a valid enum (otherwise the bucket
+        # can't be derived and the real error is the per-finding verdict error).
+        add(
+            "display_bucket",
+            f"display_bucket {declared_bucket!r} is inconsistent with "
+            f"(verdict={verdict!r}, introduced_by={introduced_by_value!r}); "
+            f"expected {derived_bucket!r}",
+        )
+
+    # display_number — positional within a *visible* bucket. Visible buckets
+    # (confirmed / needs-decision / pre-existing) each carry their own contiguous
+    # 1-based sequence, so numbers are unique within a bucket but may repeat
+    # across buckets. `hidden` findings (pre-existing Questionable + every
+    # Invalid) are recorded only, so their display_number must be null.
     display_number = rec.get("display_number", None)
+    bucket_visible = derived_bucket in _VISIBLE_DISPLAY_BUCKETS
     if display_number is None:
-        if requires_number:
+        if bucket_visible:
             add(
                 "display_number",
-                "display_number is required (integer >= 1) for "
-                "Confirmed/Questionable findings",
+                "display_number is required (integer >= 1) for findings in a "
+                "visible bucket (confirmed / needs-decision / pre-existing)",
             )
     elif not _is_int(display_number) or display_number < 1:
         add("display_number", "display_number must be an integer >= 1 or null")
-    elif requires_number:
-        if display_number in seen_display_numbers:
+    elif derived_bucket == "hidden":
+        add(
+            "display_number",
+            "display_number must be null for hidden findings "
+            "(pre-existing Questionable + Invalid are recorded, not shown)",
+        )
+    elif bucket_visible:
+        seen = seen_display_numbers_by_bucket.setdefault(derived_bucket, set())
+        if display_number in seen:
             add(
                 "display_number",
-                f"duplicate display_number {display_number} (display numbers must be unique)",
+                f"duplicate display_number {display_number} in the "
+                f"{derived_bucket!r} bucket (display numbers must be unique per bucket)",
             )
         else:
-            seen_display_numbers.add(display_number)
+            seen.add(display_number)
 
     _validate_provenance(rec.get("provenance", _MISSING), base_path, add)
 
@@ -2294,8 +2397,53 @@ def _validate_rebuttal_override(
         add("reasoning", "reasoning is required and must be a non-empty string")
 
 
-def _validate_rule_quality_note(item: object, index: int, errors: list[dict]) -> None:
-    """Validate one rule-quality-note entry."""
+def _validate_rule_file(value: object, rules_dir: str, add) -> None:
+    """Validate a rule-quality note's ``rule_file`` path.
+
+    The trust boundary stays in Python: the agent later edits this file to apply
+    a rule fix, so the path must be a *safe relative path under the configured
+    rules directory*. Rejects absolute paths, ``..`` traversal, non-``.md``
+    targets, and anything outside ``rules_dir``. ``add`` is the note-scoped error
+    accumulator.
+    """
+    if not _is_nonempty_str(value):
+        add("rule_file", "rule_file is required and must be a non-empty string")
+        return
+    raw = value.replace("\\", "/")
+    if raw.startswith("/") or (len(raw) >= 2 and raw[0].isalpha() and raw[1] == ":"):
+        add(
+            "rule_file",
+            "rule_file must be a relative path under the rules directory, not absolute",
+        )
+        return
+    parts = PurePosixPath(raw).parts
+    if ".." in parts:
+        add("rule_file", "rule_file must not contain '..' path segments")
+        return
+    if not raw.endswith(".md"):
+        add("rule_file", "rule_file must point to a .md rule file")
+        return
+    norm_file = "/".join(parts)
+    norm_dir = "/".join(PurePosixPath(rules_dir.replace("\\", "/")).parts) if rules_dir else ""
+    if norm_dir and not norm_file.startswith(norm_dir + "/"):
+        add(
+            "rule_file",
+            f"rule_file must live under the rules directory '{norm_dir}/' (got {value!r})",
+        )
+
+
+def _validate_rule_quality_note(
+    item: object, index: int, errors: list[dict], seen_note_ids: set, rules_dir: str
+) -> None:
+    """Validate one rule-quality-note entry.
+
+    The note is now structured so Python can resolve the rule deterministically
+    and safely: ``id`` (``RQ#``, unique) anchors the canvas checkbox + action id;
+    ``rule_source`` is the canonical ``rule--<name>`` label that ties the note to
+    the findings it explains (matched against their provenance); ``rule_file`` is
+    the safe path Python/the agent edits to apply the fix. ``rule`` stays as the
+    human-readable display label.
+    """
     base_path = f"rule_quality_notes[{index}]"
     if not isinstance(item, dict):
         errors.append(
@@ -2314,18 +2462,38 @@ def _validate_rule_quality_note(item: object, index: int, errors: list[dict]) ->
             _records_error("rule_quality_note", index, f"{base_path}.{field}", field, message)
         )
 
-    for field in ("rule", "observation", "suggestion"):
+    # id — required, RQ# format, unique (the canvas action bar references it).
+    note_id = item.get("id", _MISSING)
+    if not _is_nonempty_str(note_id):
+        add("id", "id is required and must be a non-empty string")
+    elif not _RULE_QUALITY_NOTE_ID_RE.match(note_id):
+        add("id", f"id must match ^RQ[0-9]+$ (e.g. RQ1, RQ2); got {note_id!r}")
+    elif note_id in seen_note_ids:
+        add("id", f"duplicate id {note_id!r} (rule-quality note ids must be unique)")
+    else:
+        seen_note_ids.add(note_id)
+
+    for field in ("rule", "rule_source", "observation", "suggestion"):
         if not _is_nonempty_str(item.get(field, _MISSING)):
             add(field, f"{field} is required and must be a non-empty string")
 
+    _validate_rule_file(item.get("rule_file", _MISSING), rules_dir, add)
 
-def validate_records(data: object) -> list[dict]:
+
+def validate_records(data: object, *, rules_dir: str | None = None) -> list[dict]:
     """Validate a parsed ``records.json`` envelope against the schema.
 
     Returns a list of structured, per-record error dicts; an empty list means
     the envelope is valid. Never raises on malformed *data* — every problem is
     reported as an error entry so the caller can relay it back to the reporter.
+
+    ``rules_dir`` is the configured review-rules directory; a rule-quality note's
+    ``rule_file`` is validated to live under it (the trust boundary for the
+    rule-fix flow). When ``None`` it falls back to :data:`DEFAULT_RULES_DIR` so a
+    caller that omits it still gets a secure-by-default ``review/`` prefix check;
+    the CLI commands resolve and pass the repository's configured value.
     """
+    effective_rules_dir = DEFAULT_RULES_DIR if rules_dir is None else rules_dir
     errors: list[dict] = []
 
     if not isinstance(data, dict):
@@ -2380,23 +2548,26 @@ def validate_records(data: object) -> list[dict]:
         add_envelope("findings", f"findings must be an array, got {_json_type_name(findings)}")
     else:
         assessment_ids: set = set()
-        display_numbers: set = set()
+        display_numbers_by_bucket: dict[str, set] = {}
         for i, rec in enumerate(findings):
-            _validate_finding(rec, i, errors, record_ids, assessment_ids, display_numbers)
-        # The numbered Confirmed/Questionable sequence must be a gap-free 1..N run so
-        # the rendered report (review.md headings, terminal table, canvas) has no
-        # skipped numbers. The per-finding checks above already enforce integer >= 1
-        # and uniqueness; this cross-finding check catches gaps a reporter retry can
-        # leave behind when it renumbers one finding without adjusting the rest.
-        if display_numbers and sorted(display_numbers) != list(
-            range(1, len(display_numbers) + 1)
-        ):
-            add_envelope(
-                "findings",
-                "display_number values for Confirmed/Questionable findings must form "
-                f"a contiguous 1..{len(display_numbers)} sequence with no gaps "
-                f"(got {sorted(display_numbers)})",
+            _validate_finding(
+                rec, i, errors, record_ids, assessment_ids, display_numbers_by_bucket
             )
+        # Each VISIBLE bucket (confirmed / needs-decision / pre-existing) carries
+        # its own gap-free 1..N display_number run, so the rendered report has no
+        # skipped numbers within a section. The per-finding checks above enforce
+        # integer >= 1 and per-bucket uniqueness; this cross-finding check catches
+        # gaps a reporter retry can leave behind when it renumbers one finding
+        # without adjusting the rest of that bucket.
+        for bucket in _VISIBLE_DISPLAY_BUCKETS:
+            numbers = display_numbers_by_bucket.get(bucket)
+            if numbers and sorted(numbers) != list(range(1, len(numbers) + 1)):
+                add_envelope(
+                    "findings",
+                    f"display_number values for the '{bucket}' bucket must form a "
+                    f"contiguous 1..{len(numbers)} sequence with no gaps "
+                    f"(got {sorted(numbers)})",
+                )
 
     # rebuttal_overrides ----------------------------------------------------
     overrides = data.get("rebuttal_overrides", _MISSING)
@@ -2428,8 +2599,11 @@ def validate_records(data: object) -> list[dict]:
             f"rule_quality_notes must be an array, got {_json_type_name(notes)}",
         )
     else:
+        seen_note_ids: set = set()
         for i, item in enumerate(notes):
-            _validate_rule_quality_note(item, i, errors)
+            _validate_rule_quality_note(
+                item, i, errors, seen_note_ids, effective_rules_dir
+            )
 
     # run/findings count cross-checks (only when both are well-formed) ------
     if isinstance(run, dict) and findings_is_list:
@@ -2438,11 +2612,14 @@ def validate_records(data: object) -> list[dict]:
     return errors
 
 
-def load_and_validate_records(path: str | os.PathLike) -> tuple[object, list[dict]]:
+def load_and_validate_records(
+    path: str | os.PathLike, *, rules_dir: str | None = None
+) -> tuple[object, list[dict]]:
     """Load *path* and validate it.
 
     Returns ``(data, errors)``. On a read/parse failure, ``data`` is ``None`` and
-    ``errors`` holds a single envelope-scoped error.
+    ``errors`` holds a single envelope-scoped error. ``rules_dir`` is forwarded to
+    :func:`validate_records` for the ``rule_file`` under-rules-dir check.
     """
     try:
         with open(path, encoding="utf-8") as f:
@@ -2463,7 +2640,7 @@ def load_and_validate_records(path: str | os.PathLike) -> tuple[object, list[dic
             _records_error("envelope", None, "$", None, f"records.json is not valid JSON: {exc}")
         ]
 
-    return data, validate_records(data)
+    return data, validate_records(data, rules_dir=rules_dir)
 
 
 def _emit_validation_errors(records_path: str, errors: list[dict]) -> None:
@@ -2490,9 +2667,16 @@ def validate_records_command(args: argparse.Namespace) -> None:
     On success, prints a small summary JSON to stdout (exit 0). On failure,
     prints the structured per-record errors as JSON to stderr and exits 1, so the
     orchestrator can relay them to the reporter for a retry.
+
+    The review-rules directory (for the ``rule_file`` under-rules-dir check) comes
+    from ``--rules-dir`` when given, else from the repo's resolved config
+    (``--repo``). ``getattr`` keeps programmatic callers that build a bare
+    Namespace working.
     """
     path: str = args.records
-    data, errors = load_and_validate_records(path)
+    repo = getattr(args, "repo", None) or "."
+    rules_dir = getattr(args, "rules_dir", None) or _resolve_rules_dir(repo)
+    data, errors = load_and_validate_records(path, rules_dir=rules_dir)
 
     if errors:
         _emit_validation_errors(path, errors)
@@ -3300,7 +3484,13 @@ def render_review(args: argparse.Namespace) -> None:
     stdout for the orchestrator to relay.
     """
     records_path: str = args.records
-    data, errors = load_and_validate_records(records_path)
+    # The rule_file under-rules-dir check uses the repo's configured rules dir
+    # (--rules-dir override, else resolved from --repo config). getattr keeps
+    # callers that build a bare Namespace working.
+    rules_dir = getattr(args, "rules_dir", None) or _resolve_rules_dir(
+        getattr(args, "repo", None) or "."
+    )
+    data, errors = load_and_validate_records(records_path, rules_dir=rules_dir)
 
     if errors:
         _emit_validation_errors(records_path, errors)
@@ -3881,6 +4071,16 @@ def main() -> int:
         required=True,
         help="Path to the records.json file to validate",
     )
+    validate_parser.add_argument(
+        "--repo",
+        default=".",
+        help="Repository root, used to resolve the configured rules_dir (default: .)",
+    )
+    validate_parser.add_argument(
+        "--rules-dir",
+        default=None,
+        help="Override the review-rules directory used to validate note rule_file paths",
+    )
     validate_parser.set_defaults(func=validate_records_command)
 
     # capabilities subcommand
@@ -3909,6 +4109,11 @@ def main() -> int:
         "--repo",
         default=".",
         help="Repository root, used to resolve the default canvas path (default: .)",
+    )
+    render_parser.add_argument(
+        "--rules-dir",
+        default=None,
+        help="Override the review-rules directory used to validate note rule_file paths",
     )
     render_parser.add_argument(
         "--review-out",

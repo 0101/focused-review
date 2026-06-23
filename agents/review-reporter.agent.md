@@ -42,12 +42,13 @@ You write **one JSON object** (the "envelope"). Python validates it strictly and
     { "record_id": "r7", "original_severity": "High", "severity": "High", "reasoning": "Reinstated: the guard is unreachable on the error path." }
   ],
   "rule_quality_notes": [
-    { "rule": "no-comments", "observation": "4 findings, all Invalid in embedded template code.", "suggestion": "Add an exception for embedded templates." }
+    { "id": "RQ1", "rule": "no-comments", "rule_source": "rule--no-comments", "rule_file": "review/rules/no-comments.md", "observation": "4 findings, all Invalid in embedded template code.", "suggestion": "Add an exception for embedded templates." }
   ],
   "findings": [
     {
       "record_id": "r1",
       "assessment_id": "A-01",
+      "display_bucket": "confirmed",
       "display_number": 1,
       "title": "Null deref in request handler",
       "file": "src/a.py",
@@ -78,12 +79,20 @@ You write **one JSON object** (the "envelope"). Python validates it strictly and
 - `date` — non-empty string. Use the current ISO-8601 timestamp.
 - `rule_count`, `concern_count` — integers ≥ 0 (from Input).
 - `consolidated_count` — integer ≥ 0. **Must equal `len(findings)`.**
-- `confirmed`, `questionable`, `invalid` — integers ≥ 0. **Each must equal the number of findings with that verdict.** (A mismatch is the most common cause of a rejected envelope — count carefully.)
+- `confirmed` — integer ≥ 0. **Must equal the number of findings in the `confirmed` display bucket** (in-scope Confirmed). Pre-existing Confirmed findings are in the `pre-existing` bucket and are **excluded** from this count.
+- `questionable` — integer ≥ 0. **Must equal the number of findings in the `needs-decision` display bucket** (in-scope Questionable). Pre-existing Questionable findings are `hidden` and **excluded**.
+- `invalid` — integer ≥ 0. **Must equal the number of findings with verdict `Invalid`** (the false-positive tally — every Invalid finding is hidden from the report but still counted here).
+  *(A count mismatch is the most common cause of a rejected envelope — derive each from `display_bucket` / `verdict` and count carefully.)*
 
 **`findings[]`** (one object per finding; every field required unless marked nullable/optional):
-- `record_id` — short, **non-empty, unique** stable token. Assign `r1`, `r2`, … in finding order. The canvas action bar references it, so it must be unique across the whole array (including Invalid findings).
+- `record_id` — stable token matching **`^r[0-9]+$`** (`r1`, `r2`, …, multi-digit allowed). Assign in finding order. **Non-empty and unique** across the whole array (including hidden/Invalid findings) — the canvas action bar references it.
 - `assessment_id` — the assessment id (`A-XX`) in `assessed` mode; **`null`** in `consolidated`/`raw_findings` mode (no assessment was performed). When non-null it must be **unique**. Must be a non-empty string whenever `has_detail` is `true` (the detail sidecar is located by it).
-- `display_number` — integer ≥ 1, **unique** across Confirmed+Questionable, assigned as one continuous sequence (see Step 4). **`null`** for Invalid findings.
+- `display_bucket` — **required** routing enum, one of `confirmed`, `needs-decision`, `pre-existing`, `hidden`. It is **derived** from `(verdict, introduced_by)` — do not invent it (see Step 4). Validation rejects any value inconsistent with that derivation:
+  - `confirmed` ← `verdict: Confirmed` and not pre-existing (in-scope; the gating "main tally").
+  - `needs-decision` ← `verdict: Questionable` and not pre-existing (rendered as "Needs your decision").
+  - `pre-existing` ← `verdict: Confirmed` and `introduced_by: "pre-existing"` (own non-gating section).
+  - `hidden` ← every `Invalid` finding, **and** `verdict: Questionable` + `introduced_by: "pre-existing"` (recorded but never rendered).
+- `display_number` — integer ≥ 1, assigned **per visible bucket** as that bucket's own contiguous 1-based sequence (see Step 4): `confirmed`, `needs-decision`, and `pre-existing` each start at 1. Must be **`null`** for `hidden` findings.
 - `title` — non-empty string.
 - `file` — non-empty string (path).
 - `line` — integer ≥ 0, or `null` when the finding has no specific line.
@@ -92,7 +101,7 @@ You write **one JSON object** (the "envelope"). Python validates it strictly and
 - `fix_complexity` — one of `quickfix`, `moderate`, `complex`.
 - `verdict` — one of `Confirmed`, `Questionable`, `Invalid`.
 - `type` — one of `rule`, `concern`, `mixed`.
-- `introduced_by` — (optional) display-metadata string (e.g. `diff`, `pre-existing`). Pass it through when the source has it; omit the field otherwise.
+- `introduced_by` — (optional) provenance string, e.g. `diff` or `pre-existing`. **Load-bearing:** the exact string `"pre-existing"` routes a finding into the `pre-existing`/`hidden` bucket (see `display_bucket`); any other value (or omission) is treated as in-scope. Pass it through when the source has it; omit the field otherwise.
 - `description` — string (may be `""`). The finding's description.
 - `assessment` — string (may be `""`). The assessment reasoning (why Confirmed/Questionable). **For Invalid findings, put the one-line reason here** — it becomes the invalid table's "Reason". Use `""` for `consolidated`/`raw_findings` (no assessment).
 - `suggestion` — string (may be `""`). The fix suggestion.
@@ -101,7 +110,12 @@ You write **one JSON object** (the "envelope"). Python validates it strictly and
 
 **`rebuttal_overrides[]`** (array; use `[]` when none): one entry per applied override — `{ record_id, original_severity, severity, reasoning }`. `record_id` must match a finding; `original_severity`/`severity` are severity enums; `reasoning` is a non-empty string.
 
-**`rule_quality_notes[]`** (array; use `[]` when none): `{ rule, observation, suggestion }`, all non-empty strings.
+**`rule_quality_notes[]`** (array; use `[]` when none): `{ id, rule, rule_source, rule_file, observation, suggestion }`, all non-empty strings.
+- `id` — stable token matching **`^RQ[0-9]+$`** (`RQ1`, `RQ2`, …), **unique** across the notes array (the canvas action bar references it).
+- `rule` — the human-readable rule label (e.g. `no-comments`).
+- `rule_source` — the canonical `rule--<name>` provenance label, matching the `provenance` entries of the findings the note explains.
+- `rule_file` — a **safe relative path to the rule's `.md` file under the configured rules directory** (default `review/`, e.g. `review/rules/no-comments.md`). Validation rejects absolute paths, `..` traversal, non-`.md` targets, and anything outside the rules directory (the agent later edits this file to apply a rule fix).
+- `observation` / `suggestion` — the pattern seen and the proposed rule improvement.
 
 ## Procedure
 
@@ -133,13 +147,17 @@ Provenance entries must be the **canonical source-file labels** `rule--<name>` a
 
 `provenance` must be non-empty for every finding.
 
-### 4. Classify and number
+### 4. Classify, bucket, and number
 
-- Partition findings into Confirmed, Questionable, Invalid by verdict.
-- Order the actionable findings: all **Confirmed** first, then all **Questionable**; within each group, order by file path, then by line number.
-- Assign `display_number` as one continuous 1-based sequence over that ordered Confirmed+Questionable list (so every number is unique).
-- Invalid findings get `display_number: null` (they render in a separate table keyed by `assessment_id`).
-- Assign every finding — all three verdicts — a unique `record_id` (`r1`, `r2`, …).
+- **Derive `display_bucket`** for each finding from `(verdict, introduced_by)`:
+  - `Confirmed` + not pre-existing → `confirmed`
+  - `Questionable` + not pre-existing → `needs-decision`
+  - `Confirmed` + `introduced_by: "pre-existing"` → `pre-existing`
+  - `Questionable` + `introduced_by: "pre-existing"` → `hidden`
+  - any `Invalid` → `hidden`
+- **Number per visible bucket.** Within each of `confirmed`, `needs-decision`, and `pre-existing` separately, order by file path then line number, and assign `display_number` as that bucket's **own** contiguous 1-based sequence (each bucket starts at 1). A `confirmed` #1 and a `pre-existing` #1 coexist — they do not collide.
+- `hidden` findings (Invalid, plus pre-existing Questionable) get `display_number: null`.
+- Assign every finding — all buckets — a unique `record_id` (`r1`, `r2`, …) in finding order.
 
 ### 5. Determine `has_detail`
 
@@ -152,11 +170,17 @@ Add a `rule_quality_notes[]` entry when any of these hold:
 - A single rule produced **3+ findings assessed as Invalid** (the rule may be too broad/noisy).
 - Multiple findings from the same rule were assessed as **Questionable** (the rule may need tightening).
 
-Each entry is `{ rule, observation, suggestion }` — *observation* describes the pattern seen, *suggestion* is the rule improvement. These help the user decide whether to run `/focused-review:review post-mortem`. Use `[]` when there are none.
+Each entry is `{ id, rule, rule_source, rule_file, observation, suggestion }`:
+- `id` — `RQ1`, `RQ2`, … (unique, `^RQ[0-9]+$`).
+- `rule` — the human-readable rule label; `rule_source` — its `rule--<name>` provenance label (must match the explained findings' provenance).
+- `rule_file` — the rule's `.md` path under the configured rules directory (default `review/`, e.g. `review/rules/<name>.md`); must be a safe relative `.md` path inside that directory.
+- `observation` describes the pattern seen; `suggestion` is the rule improvement.
+
+These help the user decide whether to run `/focused-review:review post-mortem`. Use `[]` when there are none.
 
 ### 7. Build the `run` object and self-check the counts
 
-Set `consolidated_count = len(findings)`, and set `confirmed` / `questionable` / `invalid` to the exact verdict tallies. **Re-count from your finished `findings[]` right before writing** — these cross-checks are validated and any mismatch forces a retry.
+Set `consolidated_count = len(findings)`. Set `confirmed` / `questionable` to the **display-bucket** tallies (`confirmed` bucket and `needs-decision` bucket respectively — *not* raw verdict counts; pre-existing findings are excluded), and `invalid` to the number of findings with `verdict: Invalid`. **Re-derive each from your finished `findings[]` right before writing** — these cross-checks are validated and any mismatch forces a retry.
 
 ### 8. Write `records.json`
 

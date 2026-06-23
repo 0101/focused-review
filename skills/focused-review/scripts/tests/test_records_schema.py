@@ -55,13 +55,21 @@ def _valid_envelope() -> dict:
             }
         ],
         "rule_quality_notes": [
-            {"rule": "no-foo", "observation": "noisy on tests", "suggestion": "scope to src/"}
+            {
+                "id": "RQ1",
+                "rule": "no-foo",
+                "rule_source": "rule--no-foo",
+                "rule_file": "review/no-foo.md",
+                "observation": "noisy on tests",
+                "suggestion": "scope to src/",
+            }
         ],
         "findings": [
             {
                 "record_id": "r1",
                 "assessment_id": "A-01",
                 "display_number": 1,
+                "display_bucket": "confirmed",
                 "title": "Null deref in handler",
                 "file": "src/app.py",
                 "line": 42,
@@ -83,6 +91,7 @@ def _valid_envelope() -> dict:
                 "record_id": "r2",
                 "assessment_id": None,
                 "display_number": None,
+                "display_bucket": "hidden",
                 "title": "Unused import",
                 "file": "src/util.py",
                 "line": None,
@@ -167,6 +176,44 @@ class TestAccept:
         env = _valid_envelope()
         env["findings"][0]["severity"] = severity
         env["findings"][0]["original_severity"] = severity
+        assert fr.validate_records(env) == []
+
+    def test_all_four_buckets_accepted(self) -> None:
+        # One finding per display_bucket, each numbered correctly: visible buckets
+        # (confirmed / needs-decision / pre-existing) carry their own 1-based
+        # number; the hidden finding carries null.
+        env = _valid_envelope()
+        base = env["findings"][0]
+        env["findings"] = [
+            {**base, "record_id": "r1", "assessment_id": None, "has_detail": False,
+             "verdict": "Confirmed", "introduced_by": "diff",
+             "display_bucket": "confirmed", "display_number": 1},
+            {**base, "record_id": "r2", "assessment_id": None, "has_detail": False,
+             "verdict": "Questionable", "introduced_by": "diff",
+             "display_bucket": "needs-decision", "display_number": 1},
+            {**base, "record_id": "r3", "assessment_id": None, "has_detail": False,
+             "verdict": "Confirmed", "introduced_by": "pre-existing",
+             "display_bucket": "pre-existing", "display_number": 1},
+            {**base, "record_id": "r4", "assessment_id": None, "has_detail": False,
+             "verdict": "Questionable", "introduced_by": "pre-existing",
+             "display_bucket": "hidden", "display_number": None},
+        ]
+        env["rebuttal_overrides"] = []
+        # confirmed bucket = 1, needs-decision bucket = 1, invalid verdict = 0.
+        env["run"].update(consolidated_count=4, confirmed=1, questionable=1, invalid=0)
+        assert fr.validate_records(env) == []
+
+    def test_pre_existing_questionable_is_hidden(self) -> None:
+        # A pre-existing Questionable finding routes to the hidden bucket and
+        # therefore must carry a null display_number (recorded, not shown).
+        env = _valid_envelope()
+        env["findings"][1].update(
+            verdict="Questionable",
+            introduced_by="pre-existing",
+            display_bucket="hidden",
+            display_number=None,
+        )
+        env["run"].update(invalid=0, questionable=0)
         assert fr.validate_records(env) == []
 
 
@@ -277,10 +324,10 @@ class TestRejectRun:
 class TestRejectCountConsistency:
     def test_confirmed_count_mismatch(self) -> None:
         env = _valid_envelope()
-        env["run"]["confirmed"] = 5  # actually 1 Confirmed finding
+        env["run"]["confirmed"] = 5  # actually 1 finding in the confirmed bucket
         errors = fr.validate_records(env)
         msgs = [e["message"] for e in errors if e["path"] == "run.confirmed"]
-        assert msgs and "verdict 'Confirmed'" in msgs[0]
+        assert msgs and "'confirmed' display bucket" in msgs[0]
 
     def test_invalid_count_mismatch(self) -> None:
         env = _valid_envelope()
@@ -304,6 +351,42 @@ class TestRejectCountConsistency:
         assert any(e["path"] == "findings[0].verdict" for e in errors)
         assert not any(
             e["path"] in ("run.confirmed", "run.questionable", "run.invalid")
+            for e in errors
+        )
+
+    def test_pre_existing_confirmed_excluded_from_confirmed_count(self) -> None:
+        # A pre-existing Confirmed finding lives in the 'pre-existing' bucket and is
+        # excluded from run.confirmed (the gating main tally). Counting it inflates
+        # confirmed and is rejected.
+        env = _valid_envelope()
+        env["findings"][1].update(
+            verdict="Confirmed",
+            introduced_by="pre-existing",
+            display_bucket="pre-existing",
+            display_number=1,
+        )
+        env["run"].update(invalid=0, confirmed=2)  # confirmed bucket is really 1
+        errors = fr.validate_records(env)
+        assert any(
+            e["path"] == "run.confirmed" and "'confirmed' display bucket" in e["message"]
+            for e in errors
+        )
+
+    def test_needs_decision_count_excludes_hidden_pre_existing(self) -> None:
+        # A pre-existing Questionable finding is hidden, so it does NOT count toward
+        # run.questionable (the visible needs-decision tally).
+        env = _valid_envelope()
+        env["findings"][1].update(
+            verdict="Questionable",
+            introduced_by="pre-existing",
+            display_bucket="hidden",
+            display_number=None,
+        )
+        env["run"].update(invalid=0, questionable=1)  # hidden → really 0
+        errors = fr.validate_records(env)
+        assert any(
+            e["path"] == "run.questionable"
+            and "'needs-decision' display bucket" in e["message"]
             for e in errors
         )
 
@@ -333,6 +416,58 @@ class TestRejectFinding:
         errors = fr.validate_records(env)
         dupes = [e for e in errors if e["field"] == "record_id" and "duplicate" in e["message"]]
         assert dupes
+
+    @pytest.mark.parametrize("bad", ["x1", "R1", "r", "1", "rr1", "r1a", "r 1", "record-1"])
+    def test_record_id_must_match_r_number_format(self, bad: str) -> None:
+        # The r# format lets the unified canvas action bar disambiguate ids by
+        # prefix (findings r#, rule-quality notes RQ#).
+        env = _valid_envelope()
+        env["findings"][0]["record_id"] = bad
+        errors = fr.validate_records(env)
+        assert any(
+            e["path"] == "findings[0].record_id" and "^r[0-9]+$" in e["message"]
+            for e in errors
+        )
+
+    def test_record_id_format_accepts_multi_digit(self) -> None:
+        env = _valid_envelope()
+        env["findings"][0]["record_id"] = "r1024"
+        env["rebuttal_overrides"][0]["record_id"] = "r1024"
+        assert fr.validate_records(env) == []
+
+    def test_display_bucket_required(self) -> None:
+        env = _valid_envelope()
+        del env["findings"][0]["display_bucket"]
+        errors = fr.validate_records(env)
+        assert any(e["path"] == "findings[0].display_bucket" for e in errors)
+
+    def test_display_bucket_bad_enum(self) -> None:
+        env = _valid_envelope()
+        env["findings"][0]["display_bucket"] = "visible"
+        errors = fr.validate_records(env)
+        assert any(e["path"] == "findings[0].display_bucket" for e in errors)
+
+    def test_display_bucket_must_match_derivation(self) -> None:
+        # An Invalid finding always derives to 'hidden'; tagging it 'confirmed'
+        # is an illegal state and is rejected.
+        env = _valid_envelope()
+        env["findings"][1]["display_bucket"] = "confirmed"  # finding 1 is Invalid
+        errors = fr.validate_records(env)
+        assert any(
+            e["path"] == "findings[1].display_bucket" and "inconsistent" in e["message"]
+            for e in errors
+        )
+
+    def test_display_bucket_confirmed_pre_existing_mismatch(self) -> None:
+        # A pre-existing Confirmed finding must be 'pre-existing', not 'confirmed'.
+        env = _valid_envelope()
+        env["findings"][0]["introduced_by"] = "pre-existing"
+        # display_bucket stays "confirmed" → inconsistent with derived "pre-existing".
+        errors = fr.validate_records(env)
+        assert any(
+            e["path"] == "findings[0].display_bucket" and "inconsistent" in e["message"]
+            for e in errors
+        )
 
     def test_error_carries_finding_identity(self) -> None:
         env = _valid_envelope()
@@ -408,7 +543,7 @@ class TestRejectFinding:
 
     def test_confirmed_finding_requires_display_number(self) -> None:
         env = _valid_envelope()
-        env["findings"][0]["display_number"] = None  # Confirmed → required
+        env["findings"][0]["display_number"] = None  # visible bucket → required
         errors = fr.validate_records(env)
         assert any(e["path"] == "findings[0].display_number" for e in errors)
 
@@ -420,38 +555,66 @@ class TestRejectFinding:
 
     def test_duplicate_display_number(self) -> None:
         env = _valid_envelope()
-        # Make finding 1 a second *numbered* finding (Questionable) that collides
-        # with finding 0's display_number.
-        env["findings"][1]["verdict"] = "Questionable"
-        env["findings"][1]["display_number"] = 1  # collides with finding 0
-        env["run"].update(questionable=1, invalid=0)
+        # A second finding in the SAME visible bucket reusing finding 0's number.
+        env["findings"][1].update(
+            verdict="Confirmed",
+            introduced_by="diff",
+            display_bucket="confirmed",
+            display_number=1,  # collides within the 'confirmed' bucket
+        )
+        env["run"].update(confirmed=2, invalid=0)
         errors = fr.validate_records(env)
         assert any(
             e["field"] == "display_number" and "duplicate" in e["message"] for e in errors
         )
 
-    def test_invalid_finding_number_does_not_collide_with_numbered(self) -> None:
-        # An Invalid finding's display_number is not part of the numbered set, so
-        # it may coincide with a Confirmed/Questionable number without rejection.
+    def test_numbers_are_independent_across_buckets(self) -> None:
+        # Each visible bucket numbers from 1, so a confirmed #1 and a pre-existing
+        # #1 coexist without collision (uniqueness is per-bucket, not global).
         env = _valid_envelope()
-        env["findings"][1]["display_number"] = 1  # finding 1 is Invalid
+        env["findings"][1].update(
+            verdict="Confirmed",
+            introduced_by="pre-existing",
+            display_bucket="pre-existing",
+            display_number=1,
+        )
+        env["run"].update(confirmed=1, invalid=0)
         assert fr.validate_records(env) == []
 
-    def test_contiguous_display_numbers_pass(self) -> None:
-        # Two numbered findings forming a gap-free 1..N run ({1, 2}) are accepted.
+    def test_hidden_finding_must_not_carry_a_number(self) -> None:
+        # finding 1 is hidden (Invalid); a non-null display_number is rejected —
+        # hidden findings are recorded, not shown, so they have no number.
         env = _valid_envelope()
-        env["findings"][1]["verdict"] = "Questionable"
-        env["findings"][1]["display_number"] = 2
-        env["run"].update(questionable=1, invalid=0)
+        env["findings"][1]["display_number"] = 1
+        errors = fr.validate_records(env)
+        assert any(
+            e["path"] == "findings[1].display_number" and "null" in e["message"]
+            for e in errors
+        )
+
+    def test_contiguous_display_numbers_pass(self) -> None:
+        # Two findings in the same visible bucket forming a gap-free 1..N run.
+        env = _valid_envelope()
+        env["findings"][1].update(
+            verdict="Confirmed",
+            introduced_by="diff",
+            display_bucket="confirmed",
+            display_number=2,
+        )
+        env["run"].update(confirmed=2, invalid=0)
         assert fr.validate_records(env) == []
 
     def test_noncontiguous_display_numbers_rejected(self) -> None:
-        # A gap in the numbered Confirmed/Questionable sequence ({1, 3}) would render
-        # skipped numbers downstream, so validation rejects it at the envelope level.
+        # A gap in a visible bucket's sequence ({1, 3}) would render skipped
+        # numbers downstream, so validation rejects it at the envelope level.
         env = _valid_envelope()
-        env["findings"][1]["verdict"] = "Questionable"
-        env["findings"][1]["display_number"] = 3  # gap: {1, 3}
-        env["run"].update(questionable=1, invalid=0)
+        env["findings"][1].update(
+            verdict="Confirmed",
+            introduced_by="diff",
+            display_bucket="confirmed",
+            display_number=3,  # gap within 'confirmed': {1, 3}
+        )
+        env["run"].update(confirmed=2, invalid=0)
         errors = fr.validate_records(env)
         assert any(
             e["path"] == "findings" and "contiguous" in e["message"] for e in errors
@@ -564,12 +727,82 @@ class TestRejectRuleQualityNotes:
         errors = fr.validate_records(env)
         assert any(e["path"] == "rule_quality_notes[0]" for e in errors)
 
-    @pytest.mark.parametrize("field", ["rule", "observation", "suggestion"])
+    @pytest.mark.parametrize(
+        "field", ["rule", "rule_source", "observation", "suggestion"]
+    )
     def test_note_missing_field(self, field: str) -> None:
         env = _valid_envelope()
         del env["rule_quality_notes"][0][field]
         errors = fr.validate_records(env)
         assert any(e["path"] == f"rule_quality_notes[0].{field}" for e in errors)
+
+    def test_note_missing_id(self) -> None:
+        env = _valid_envelope()
+        del env["rule_quality_notes"][0]["id"]
+        errors = fr.validate_records(env)
+        assert any(e["path"] == "rule_quality_notes[0].id" for e in errors)
+
+    @pytest.mark.parametrize("bad", ["rq1", "RQ", "R1", "Q1", "RQ1a", "1", "RQ-1"])
+    def test_note_id_must_match_rq_format(self, bad: str) -> None:
+        env = _valid_envelope()
+        env["rule_quality_notes"][0]["id"] = bad
+        errors = fr.validate_records(env)
+        assert any(
+            e["path"] == "rule_quality_notes[0].id" and "^RQ[0-9]+$" in e["message"]
+            for e in errors
+        )
+
+    def test_note_id_must_be_unique(self) -> None:
+        env = _valid_envelope()
+        note = env["rule_quality_notes"][0]
+        env["rule_quality_notes"].append({**note})  # same id RQ1
+        errors = fr.validate_records(env)
+        assert any(
+            e["path"] == "rule_quality_notes[1].id" and "duplicate" in e["message"]
+            for e in errors
+        )
+
+    def test_note_rule_file_required(self) -> None:
+        env = _valid_envelope()
+        del env["rule_quality_notes"][0]["rule_file"]
+        errors = fr.validate_records(env)
+        assert any(e["path"] == "rule_quality_notes[0].rule_file" for e in errors)
+
+    @pytest.mark.parametrize(
+        "bad_path",
+        [
+            "/etc/passwd",          # absolute (POSIX)
+            "C:/secrets.md",        # absolute (Windows drive)
+            "review/../escape.md",  # traversal
+            "../review/escape.md",  # traversal at the root
+            "other/rule.md",        # outside the rules dir
+            "review/rule.txt",      # not a .md file
+            "rule.md",              # at repo root, not under rules dir
+        ],
+    )
+    def test_note_rule_file_rejects_unsafe_paths(self, bad_path: str) -> None:
+        env = _valid_envelope()
+        env["rule_quality_notes"][0]["rule_file"] = bad_path
+        errors = fr.validate_records(env)
+        assert any(e["path"] == "rule_quality_notes[0].rule_file" for e in errors)
+
+    def test_note_rule_file_accepts_nested_under_rules_dir(self) -> None:
+        env = _valid_envelope()
+        env["rule_quality_notes"][0]["rule_file"] = "review/sub/no-foo.md"
+        assert fr.validate_records(env) == []
+
+    def test_note_rule_file_honours_custom_rules_dir(self) -> None:
+        # When the caller passes a configured rules_dir, the under-dir check uses
+        # it instead of the default "review/".
+        env = _valid_envelope()
+        env["rule_quality_notes"][0]["rule_file"] = "custom-rules/no-foo.md"
+        # Valid under the configured dir...
+        assert fr.validate_records(env, rules_dir="custom-rules/") == []
+        # ...but rejected under the default "review/".
+        assert any(
+            e["path"] == "rule_quality_notes[0].rule_file"
+            for e in fr.validate_records(env)
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -649,7 +882,9 @@ class TestLoadAndValidate:
 
 
 def _make_args(records: Path) -> argparse.Namespace:
-    return argparse.Namespace(records=str(records))
+    # Pin rules_dir to the default "review/" so the rule_file under-rules-dir
+    # check is deterministic regardless of any repo/user config on the host.
+    return argparse.Namespace(records=str(records), repo=".", rules_dir="review/")
 
 
 class TestValidateRecordsCommand:
