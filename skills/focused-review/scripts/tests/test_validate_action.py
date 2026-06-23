@@ -227,6 +227,57 @@ def _envelope_with_notes() -> dict:
     }
 
 
+def _two_rule_renderable_envelope() -> dict:
+    """A schema-valid (renderable) envelope where ``r2`` depends on TWO rules.
+
+    Unlike ``_envelope_with_notes`` (whose findings carry no ``display_number`` —
+    fine for the pure ``validate_action`` tests), this one is contiguous-numbered so
+    it round-trips through ``render-review``. ``r1`` dies on RQ1 alone; ``r2`` has
+    *both* rule sources (RQ1 + RQ2) and no concern source, so it dies only once BOTH
+    rules are fixed — the multi-step-apply case in Finding C-11 / Decision 12.
+    """
+    return {
+        "schema_version": 1,
+        "run": {
+            "run_id": RUN_ID,
+            "scope": "branch",
+            "date": "2026-06-17T12:00:00Z",
+            "rule_count": 2,
+            "concern_count": 0,
+            "consolidated_count": 2,
+            "confirmed": 2,
+            "questionable": 0,
+            "invalid": 0,
+        },
+        "rebuttal_overrides": [],
+        "rule_quality_notes": [
+            {
+                "id": "RQ1",
+                "rule": "Avoid explanatory comments",
+                "rule_source": "rule--no-comments",
+                "rule_file": "review/rules/no-comments.md",
+                "observation": "Flagged a navigational divider as a smell.",
+                "suggestion": "Exempt section dividers from the no-comments rule.",
+            },
+            {
+                "id": "RQ2",
+                "rule": "Prefer simple code",
+                "rule_source": "rule--simplicity",
+                "rule_file": "review/rules/simplicity.md",
+                "observation": "Flagged a two-line helper as over-engineered.",
+                "suggestion": "Only flag helpers used in a single call site.",
+            },
+        ],
+        "findings": [
+            {**_finding("r1", "Single rule source", ["rule--no-comments"]), "display_number": 1},
+            {
+                **_finding("r2", "Two rule sources", ["rule--no-comments", "rule--simplicity"]),
+                "display_number": 2,
+            },
+        ],
+    }
+
+
 def _write_records(tmp_path: Path, env: dict | None = None) -> Path:
     records = tmp_path / "records.json"
     records.write_text(json.dumps(env if env is not None else _envelope()), encoding="utf-8")
@@ -1005,6 +1056,12 @@ def _plain_ids(canvas_html: str) -> set[str]:
     }
 
 
+def _applied_by_rule(run_dir: Path) -> dict[str, list[str]]:
+    """Read run-state.json and return ``{rule_id: invalidated_record_ids}``."""
+    state = json.loads((run_dir / "run-state.json").read_text(encoding="utf-8"))
+    return {e["rule_id"]: e["invalidated_record_ids"] for e in state["rule_fixes_applied"]}
+
+
 class TestDisregardPersistsAcrossRerender:
     def test_disregard_dims_on_render_and_persists_on_rerender(self, tmp_path: Path) -> None:
         records = _write_records(tmp_path)
@@ -1116,3 +1173,61 @@ class TestRuleFixInvalidationPersistsAcrossRerender:
         canvas = tmp_path / "canvas.html"
         fr.render_review(_render_args(records, run_dir=str(tmp_path), canvas_out=str(canvas)))
         assert _dimmed_ids(canvas.read_text(encoding="utf-8")) == set()
+
+    def test_multi_rule_finding_dies_across_separate_apply_actions(
+        self, tmp_path: Path
+    ) -> None:
+        """Finding C-11: a two-rule finding fixed in SEPARATE applies still dies.
+
+        The user fixes the rules one at a time — RQ1 in one action, RQ2 in a second.
+        ``rule_fixes_applied`` is an add-only accumulator and each ``validate-action``
+        call only sees its own posted batch, so the batch-local computation alone
+        would leave ``r2`` (which needs BOTH rules) permanently visible — never a
+        subset {RQ1,RQ2} in either single-rule call. The apply path re-derives
+        invalidation against the ACCUMULATED union, so after both actions ``r2`` is
+        persisted as invalidated and the re-render dims it with a reason naming both
+        rules (Decision 12).
+        """
+        records = _write_records(tmp_path, _two_rule_renderable_envelope())
+        canvas = tmp_path / "canvas.html"
+
+        # Action 1 — fix RQ1 alone. r1 (single rule) dies; r2 still needs RQ2.
+        fr.validate_action_command(
+            _action_args(
+                records, RUN_ID, "RQ1",
+                action="focused-review.fix",
+                apply_rule_fixes=True, run_dir=str(tmp_path),
+            )
+        )
+        inv1 = _applied_by_rule(tmp_path)
+        assert inv1["RQ1"] == ["r1"]
+        assert all("r2" not in ids for ids in inv1.values())  # r2 NOT yet invalidated
+
+        # Render after action 1 — r1 is dimmed, r2 stays plain (only one rule fixed).
+        fr.render_review(
+            _render_args(records, run_dir=str(tmp_path), canvas_out=str(canvas), rules_dir="review/")
+        )
+        html1 = canvas.read_text(encoding="utf-8")
+        assert "r1" in _dimmed_ids(html1)
+        assert "r2" in _plain_ids(html1)
+
+        # Action 2 — fix RQ2 alone. Now BOTH of r2's rules are applied → r2 dies.
+        fr.validate_action_command(
+            _action_args(
+                records, RUN_ID, "RQ2",
+                action="focused-review.fix",
+                apply_rule_fixes=True, run_dir=str(tmp_path),
+            )
+        )
+        inv2 = _applied_by_rule(tmp_path)
+        # r2 is attributed to EVERY rule it depends on; r1 stays under RQ1 only.
+        assert inv2["RQ1"] == ["r1", "r2"]
+        assert inv2["RQ2"] == ["r2"]
+
+        # Re-render — r2 is now dimmed with a reason naming BOTH fixed rules.
+        fr.render_review(
+            _render_args(records, run_dir=str(tmp_path), canvas_out=str(canvas), rules_dir="review/")
+        )
+        html2 = canvas.read_text(encoding="utf-8")
+        assert {"r1", "r2"} <= _dimmed_ids(html2)
+        assert '<span class="dim-reason">invalidated — rules RQ1, RQ2 fixed</span>' in html2

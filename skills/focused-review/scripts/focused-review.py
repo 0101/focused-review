@@ -3979,6 +3979,68 @@ def _invalidated_reasons(rule_fixes_applied: object) -> dict[str, str]:
     return reasons
 
 
+def _accumulated_rule_fixes(
+    data: dict,
+    run_dir: str | None,
+    run_id: str,
+    resolved_rules: list[dict],
+) -> list[dict]:
+    """Re-derive every applied rule's invalidated ids against the ACCUMULATED set.
+
+    Finding C-11 / Decision 12: a finding whose only sources are rules dies once
+    *all* of those rules are fixed — but rules can be fixed across **separate** apply
+    actions. ``rule_fixes_applied`` is an add-only accumulator, so invalidation must
+    be recomputed from the dependency map against the UNION of the rules already
+    persisted in run-state and the rules in the current batch, not the posted batch
+    alone. Otherwise a multi-rule finding whose rules are applied in different
+    actions is never invalidated — each call only ever sees its own batch, never a
+    superset of the finding's dependency set — so it stays permanently visible.
+
+    Returns a :func:`persist_rule_fixes`-shaped list with one entry per applied rule
+    (previously-persisted ones first, then this batch's, first-seen). A dying record
+    is attributed to *every* applied rule it depends on, so the persisted state — the
+    source of truth the re-render dims from — accounts for all the rules that fixed
+    it (and :func:`_invalidated_reasons` names them all in the dim reason).
+    """
+    findings = data.get("findings")
+    findings = findings if isinstance(findings, list) else []
+    notes = data.get("rule_quality_notes")
+    notes = notes if isinstance(notes, list) else []
+
+    # Canonical rule_source for every rule applied so far: the already-persisted
+    # entries plus the rules resolved from the current batch (the batch value
+    # refreshes/fills the source). Insertion order — persisted first, then this
+    # batch — gives the rebuilt entries a deterministic first-seen order.
+    existing = load_run_state(run_dir, expected_run_id=run_id).get("rule_fixes_applied", [])
+    rule_source: dict[str, str] = {}
+    for entry in existing:
+        rid = entry.get("rule_id")
+        if _is_nonempty_str(rid):
+            rule_source.setdefault(rid, entry.get("rule_source") or "")
+    for rule in resolved_rules:
+        rid = rule.get("rule_id")
+        if _is_nonempty_str(rid):
+            rule_source[rid] = rule.get("rule_source") or rule_source.get(rid, "")
+
+    # Dying = findings whose full rule-dependency set is within the accumulated
+    # applied set (Decision 12). _rule_dependency_map already excludes findings kept
+    # alive by a concern/unrecognised source or carrying an un-noted rule.
+    applied_ids = set(rule_source)
+    dep_map = _rule_dependency_map(findings, notes)
+    dying = {rid: deps for rid, deps in dep_map.items() if set(deps) <= applied_ids}
+
+    return [
+        {
+            "rule_id": rule_id,
+            "rule_source": source,
+            "invalidated_record_ids": [
+                rid for rid, deps in dying.items() if rule_id in deps
+            ],
+        }
+        for rule_id, source in rule_source.items()
+    ]
+
+
 def _resolve_action_finding(finding: dict) -> dict:
     """Resolve a finding to the fields the orchestrator needs to act on it.
 
@@ -4008,8 +4070,10 @@ def _resolve_action_rule(note: dict, invalidated_record_ids: list[str]) -> dict:
     give the orchestrator (and the human) enough context to describe the change.
     ``rule_file`` is the schema-validated safe path under the rules directory the
     agent edits; ``invalidated_record_ids`` are the findings this rule fix knocks
-    out *given the full posted RQ set* (Decision 12 — see :func:`validate_action`),
-    written into run-state so the re-render dims them with a reason.
+    out *given the full posted RQ set* (Decision 12 — see :func:`validate_action`).
+    These resolved ids are what the action reports back; the *persisted* invalidation
+    is re-derived against the accumulated applied set by :func:`_accumulated_rule_fixes`
+    (so a finding whose rules span separate applies still dims) — see Finding C-11.
     """
     return {
         "rule_id": note.get("id"),
@@ -4355,22 +4419,17 @@ def validate_action_command(args: argparse.Namespace) -> None:
         resolved["run_state_path"] = _run_state_path(run_dir)
 
     # Rule fixes are the other persisted side effect: after the agent has edited
-    # the rule files (the human-confirmed manual step), this writes the resolved
-    # rules' invalidated record_ids into run-state so the re-render dims them with
-    # an audit reason. The invalidation was computed by validate_action against the
-    # *full* posted RQ set (Decision 12), so persisting all the scheduled rule ids
-    # in one call is what makes a multi-rule finding die. ``persist_rule_fixes`` is
-    # add-only and preserves the sibling ``disregarded`` set.
+    # the rule files (the human-confirmed manual step), this writes the invalidated
+    # record_ids into run-state so the re-render dims them with an audit reason.
+    # Invalidation is recomputed by ``_accumulated_rule_fixes`` against the UNION of
+    # the rules already persisted and this batch — not the posted batch alone — so a
+    # multi-rule finding still dies when its rules are fixed across SEPARATE apply
+    # actions (Finding C-11 / Decision 12); the add-only accumulator alone never
+    # would. ``persist_rule_fixes`` is add-only and preserves the sibling
+    # ``disregarded`` set.
     if getattr(args, "apply_rule_fixes", False) and action == FIX_ACTION:
         run_dir = args.run_dir or os.path.dirname(path) or "."
-        fixes = [
-            {
-                "rule_id": rule["rule_id"],
-                "rule_source": rule.get("rule_source", ""),
-                "invalidated_record_ids": rule.get("invalidated_record_ids", []),
-            }
-            for rule in resolved["rules"]
-        ]
+        fixes = _accumulated_rule_fixes(data, run_dir, posted_run_id, resolved["rules"])
         state = persist_rule_fixes(run_dir, posted_run_id, fixes)
         resolved["rule_fixes_applied"] = state.get("rule_fixes_applied", [])
         resolved["run_state_path"] = _run_state_path(run_dir)
