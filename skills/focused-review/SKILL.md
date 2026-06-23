@@ -347,10 +347,10 @@ When the Treemon canvas is live, its sticky action bar posts one **unified** mes
 **1. Validate/expand the action against `records.json` (always — never trust the payload).** Map `button` to the namespaced `--action focused-review.{button}`, pass the whole heterogeneous `ids` list to `--ids`, and the box to `--instructions`:
 
 ```bash
-python {script_path} validate-action --records "{run_dir}/records.json" --run-id "{run_id}" --ids "{comma-joined ids}" --action "focused-review.{button}" --instructions "{text}"
+python {script_path} validate-action --records "{run_dir}/records.json" --repo . --run-id "{run_id}" --ids "{comma-joined ids}" --action "focused-review.{button}" --instructions "{text}"
 ```
 
-- **Non-zero exit ⇒ reject the action, execute nothing, stop.** **Exit 1** (forged/mismatched `run_id`; an `r#` not in `records.json`; an `RQ#` not in `records.json`; an id matching neither prefix; `--apply-disregard`/`--apply-rule-fixes` paired with the wrong verb; or an unreadable `records.json`) writes a structured error JSON to **stderr** — tell the user it was rejected and why (relay the `errors[].message` fields). A `button` that maps to a verb not on the allowlist is rejected by the argument parser itself (**exit 2**, an `invalid choice` usage message on stderr — no structured JSON). Either way, do **not** execute anything. Stop.
+- **Non-zero exit ⇒ reject the action, execute nothing, stop.** **Exit 1** (forged/mismatched `run_id`; an `r#` not in `records.json`; an `RQ#` not in `records.json`; an id matching neither prefix; an `RQ#` whose `rule_file` is unsafe — absolute, `..`, non-`.md`, or outside the rules dir — or whose `rule_file` is inconsistent with its `rule_source`; `--apply-disregard`/`--apply-rule-fixes` paired with the wrong verb; or an unreadable `records.json`) writes a structured error JSON to **stderr** — tell the user it was rejected and why (relay the `errors[].message` fields). A `button` that maps to a verb not on the allowlist is rejected by the argument parser itself (**exit 2**, an `invalid choice` usage message on stderr — no structured JSON). Either way, do **not** execute anything. Stop.
 - **Exit 0**: **stdout** is the expanded action with two resolved lists. Use **these resolved values**, never anything from the raw payload:
   - `findings[]` — each `r#` resolved to `record_id` / `file` / `line` / `title` / `severity` / `verdict` / `fix_complexity` / `suggestion`.
   - `rules[]` — each `RQ#` resolved to `rule_id` / `rule` / `rule_source` / `rule_file` (the safe path to edit) / `observation` / `suggestion` (the suggested rule change) / `invalidated_record_ids` (the findings this rule fix removes).
@@ -364,7 +364,7 @@ python {script_path} validate-action --records "{run_dir}/records.json" --run-id
   - **Rules (`RQ#`)** — For each resolved rule, edit its `rule_file` (a safe path under `review/`): when `text` is **empty**, apply the rule's `suggestion` (accept the suggested change); when `text` is **present**, do what the text says (the `suggestion` is context). After the rule files are edited, persist the invalidation and re-render so the now-moot findings disappear:
 
     ```bash
-    python {script_path} validate-action --records {run_dir}/records.json --run-id {run_id} --ids {the RQ# ids, comma-joined} --action focused-review.fix --apply-rule-fixes --run-dir {run_dir}
+    python {script_path} validate-action --records {run_dir}/records.json --repo . --run-id {run_id} --ids {the RQ# ids, comma-joined} --action focused-review.fix --apply-rule-fixes --run-dir {run_dir}
     python {script_path} render-review --records {run_dir}/records.json --repo .
     ```
 
@@ -373,7 +373,7 @@ python {script_path} validate-action --records "{run_dir}/records.json" --run-id
 - **`disregard`** — Persist the disregard as run state (the resolved **finding** ids only; any `RQ#` in the mix is ignored, since rules are fixed, not disregarded), then re-render so the canvas dims those findings on this and every future render:
 
   ```bash
-  python {script_path} validate-action --records {run_dir}/records.json --run-id {run_id} --ids {ids} --action focused-review.disregard --apply-disregard --run-dir {run_dir}
+  python {script_path} validate-action --records {run_dir}/records.json --repo . --run-id {run_id} --ids {ids} --action focused-review.disregard --apply-disregard --run-dir {run_dir}
   python {script_path} render-review --records {run_dir}/records.json --repo .
   ```
 

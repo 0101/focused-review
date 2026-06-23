@@ -206,7 +206,7 @@ def _envelope_with_notes() -> dict:
                 "id": "RQ1",
                 "rule": "Avoid explanatory comments",
                 "rule_source": "rule--no-comments",
-                "rule_file": "rules/no-comments.md",
+                "rule_file": "review/rules/no-comments.md",
                 "observation": "Flagged a navigational divider as a smell.",
                 "suggestion": "Exempt section dividers from the no-comments rule.",
             },
@@ -214,7 +214,7 @@ def _envelope_with_notes() -> dict:
                 "id": "RQ2",
                 "rule": "Prefer simple code",
                 "rule_source": "rule--simplicity",
-                "rule_file": "rules/simplicity.md",
+                "rule_file": "review/rules/simplicity.md",
                 "observation": "Flagged a two-line helper as over-engineered.",
                 "suggestion": "Only flag helpers used in a single call site.",
             },
@@ -294,6 +294,11 @@ def _action_args(records: Path, run_id: str, ids: str, **overrides) -> argparse.
         apply_disregard=False,
         apply_rule_fixes=False,
         run_dir=None,
+        # Pin the rules dir so the action-time rule_file re-validation (C-12/C-13)
+        # is deterministic regardless of the cwd's configured rules_dir; the note
+        # fixtures live under "review/rules/", which is under this prefix.
+        repo=".",
+        rules_dir="review/",
     )
     for key, value in overrides.items():
         setattr(ns, key, value)
@@ -403,7 +408,7 @@ class TestValidateActionRuleResolution:
         rule = expanded["rules"][0]
         assert rule["rule_id"] == "RQ1"
         assert rule["rule_source"] == "rule--no-comments"
-        assert rule["rule_file"] == "rules/no-comments.md"
+        assert rule["rule_file"] == "review/rules/no-comments.md"
         assert rule["suggestion"] == "Exempt section dividers from the no-comments rule."
         assert rule["observation"] == "Flagged a navigational divider as a smell."
         # RQ1 alone kills r1 (its only rule source) but NOT r2 (also needs RQ2).
@@ -443,6 +448,101 @@ class TestValidateActionRuleResolution:
         assert expanded["record_count"] == 1
         assert [r["rule_id"] for r in expanded["rules"]] == ["RQ2"]
         assert expanded["rule_count"] == 1
+
+
+# ---------------------------------------------------------------------------
+# validate_action — rule_file trust boundary re-validation (C-12 / C-13)
+# ---------------------------------------------------------------------------
+
+
+class TestValidateActionRuleFileTrustBoundary:
+    """``validate_action`` re-validates each resolved note's ``rule_file``.
+
+    The action round-trip loads records.json via ``_load_records_only``, which
+    deliberately skips schema validation — so the path-safety and rule_source
+    consistency checks ``render-review`` applied are NOT in force at the point the
+    agent consumes ``rule_file`` to *edit* it. These tests pin the defense-in-depth
+    re-validation that closes the TOCTOU / never-rendered-records.json gap.
+    """
+
+    @pytest.mark.parametrize(
+        "bad_path",
+        [
+            "/etc/passwd",                  # absolute (POSIX)
+            "C:/secrets.md",                # absolute (Windows drive)
+            "review/../escape.md",          # traversal
+            "outside/no-comments.md",       # outside the rules dir
+            "review/rules/no-comments.txt", # not a .md file
+        ],
+    )
+    def test_unsafe_rule_file_rejected_at_action_time(self, bad_path: str) -> None:
+        env = copy.deepcopy(_envelope_with_notes())
+        env["rule_quality_notes"][0]["rule_file"] = bad_path
+        expanded, errors = fr.validate_action(
+            env, RUN_ID, ["RQ1"], action="focused-review.fix", rules_dir="review/"
+        )
+        assert expanded is None
+        assert any(
+            e["path"] == "rules[0].rule_file" and e["field"] == "rule_file"
+            for e in errors
+        )
+
+    def test_rule_file_source_mismatch_rejected_at_action_time(self) -> None:
+        # Safe path, but its stem names a DIFFERENT rule than rule_source (C-12): the
+        # fix would edit simplicity.md while the no-comments findings are invalidated.
+        env = copy.deepcopy(_envelope_with_notes())
+        env["rule_quality_notes"][0]["rule_file"] = "review/rules/simplicity.md"
+        expanded, errors = fr.validate_action(
+            env, RUN_ID, ["RQ1"], action="focused-review.fix", rules_dir="review/"
+        )
+        assert expanded is None
+        assert any(
+            e["path"] == "rules[0].rule_file"
+            and "does not match rule_source" in e["message"]
+            for e in errors
+        )
+
+    def test_safe_matching_rule_file_accepted(self) -> None:
+        # The unchanged fixture (safe path under review/, stem matches rule_source)
+        # still resolves cleanly — the re-validation adds no false positives.
+        expanded, errors = fr.validate_action(
+            _envelope_with_notes(), RUN_ID, ["RQ1"],
+            action="focused-review.fix", rules_dir="review/",
+        )
+        assert errors == []
+        assert expanded is not None and expanded["rule_count"] == 1
+
+    def test_defaults_to_review_prefix_when_rules_dir_omitted(self) -> None:
+        # With no rules_dir passed, the check falls back to the secure-by-default
+        # "review/" prefix (mirroring validate_records): a note outside review/ is
+        # rejected, while the under-review/ fixture is accepted.
+        env = copy.deepcopy(_envelope_with_notes())
+        env["rule_quality_notes"][0]["rule_file"] = "outside/no-comments.md"
+        expanded, errors = fr.validate_action(
+            env, RUN_ID, ["RQ1"], action="focused-review.fix"
+        )
+        assert expanded is None
+        assert any(e["path"] == "rules[0].rule_file" for e in errors)
+
+        ok, errors2 = fr.validate_action(
+            _envelope_with_notes(), RUN_ID, ["RQ1"], action="focused-review.fix"
+        )
+        assert errors2 == []
+        assert ok is not None
+
+    def test_unsafe_rule_file_attributes_error_to_its_note(self) -> None:
+        # Two notes posted; only the second carries an unsafe rule_file. The error is
+        # attributed to that note's index/id so the orchestrator can pinpoint it.
+        env = copy.deepcopy(_envelope_with_notes())
+        env["rule_quality_notes"][1]["rule_file"] = "review/../escape.md"
+        expanded, errors = fr.validate_action(
+            env, RUN_ID, ["RQ1", "RQ2"], action="focused-review.fix", rules_dir="review/"
+        )
+        assert expanded is None
+        offending = [e for e in errors if e["field"] == "rule_file"]
+        assert len(offending) == 1
+        assert offending[0]["path"] == "rules[1].rule_file"
+        assert offending[0]["record_id"] == "RQ2"
 
 
 # ---------------------------------------------------------------------------
@@ -827,6 +927,31 @@ class TestValidateActionCommand:
         # The disregard path writes no rule-fix state.
         assert state.get("rule_fixes_applied", []) == []
 
+    def test_apply_rule_fixes_rejects_unsafe_rule_file_and_persists_nothing(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # End-to-end defense-in-depth (C-13): an unsafe rule_file in records.json
+        # makes validate-action exit 1 and persist NO rule-fix state, even though
+        # _load_records_only skips schema validation. This is the TOCTOU /
+        # never-rendered-records.json path the action-time re-validation closes.
+        env = copy.deepcopy(_envelope_with_notes())
+        env["rule_quality_notes"][0]["rule_file"] = "review/../escape.md"
+        records = _write_records(tmp_path, env)
+        with pytest.raises(SystemExit) as exc:
+            fr.validate_action_command(
+                _action_args(
+                    records, RUN_ID, "RQ1",
+                    action="focused-review.fix",
+                    apply_rule_fixes=True, run_dir=str(tmp_path),
+                )
+            )
+        assert exc.value.code == 1
+        payload = json.loads(capsys.readouterr().err)
+        assert payload["valid"] is False
+        assert any(e["field"] == "rule_file" for e in payload["errors"])
+        # The persisted side effect is gated behind a clean validation.
+        assert not (tmp_path / "run-state.json").exists()
+
 
 class TestValidateActionParser:
     def test_parser_rejects_unknown_action_choice(
@@ -892,6 +1017,31 @@ class TestValidateActionParser:
                 fr.main()
         assert captured["apply_rule_fixes"] is True
         assert captured["ids"] == "RQ1"
+
+    def test_parser_accepts_rules_dir_and_repo(self, tmp_path: Path) -> None:
+        # The validate-action subparser gained --repo / --rules-dir (mirroring
+        # render-review / validate-records) so the action-time rule_file trust
+        # boundary is configurable and resolves from the same config as the rest.
+        records = _write_records(tmp_path)
+        captured: dict[str, object] = {}
+
+        def spy(args: argparse.Namespace) -> None:
+            captured["repo"] = args.repo
+            captured["rules_dir"] = args.rules_dir
+
+        argv = [
+            "focused-review", "validate-action",
+            "--records", str(records),
+            "--run-id", RUN_ID,
+            "--ids", "r1",
+            "--repo", "some/repo",
+            "--rules-dir", "custom-rules/",
+        ]
+        with patch("sys.argv", argv):
+            with patch.object(fr, "validate_action_command", spy):
+                fr.main()
+        assert captured["repo"] == "some/repo"
+        assert captured["rules_dir"] == "custom-rules/"
 
 
 # ---------------------------------------------------------------------------

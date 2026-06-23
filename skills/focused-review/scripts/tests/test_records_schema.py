@@ -933,6 +933,32 @@ class TestRejectRuleQualityNotes:
             for e in fr.validate_records(env)
         )
 
+    def test_note_rule_file_must_match_rule_source(self) -> None:
+        # Finding C-12: rule_source (the canonical invalidation key) and rule_file
+        # (the path the agent edits) are authored independently and can drift. A
+        # path that is perfectly safe but whose stem names a DIFFERENT rule than
+        # rule_source must be rejected — otherwise the fix edits one rule's file
+        # while the OTHER rule's findings are marked invalidated (silent corruption).
+        env = _valid_envelope()
+        # rule_source stays "rule--no-foo"; point rule_file at a different safe rule.
+        env["rule_quality_notes"][0]["rule_file"] = "review/simplicity.md"
+        errors = fr.validate_records(env)
+        assert any(
+            e["path"] == "rule_quality_notes[0].rule_file"
+            and "does not match rule_source" in e["message"]
+            for e in errors
+        )
+
+    def test_note_rule_file_match_skipped_for_non_canonical_rule_source(self) -> None:
+        # The stem cross-check only applies to canonical "rule--<name>" sources (the
+        # only form that matches finding provenance). A non-"rule--" rule_source has
+        # no derivable name and matches no finding, so its fix is a harmless no-op —
+        # the cross-check is skipped rather than firing a spurious mismatch error.
+        env = _valid_envelope()
+        env["rule_quality_notes"][0]["rule_source"] = "freeform-label"
+        env["rule_quality_notes"][0]["rule_file"] = "review/anything.md"
+        assert fr.validate_records(env) == []
+
 
 # ---------------------------------------------------------------------------
 # Structured-error shape

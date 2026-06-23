@@ -2456,6 +2456,67 @@ def _validate_rule_file(value: object, rules_dir: str, add) -> None:
         )
 
 
+def _rule_file_source_mismatch(rule_source: object, rule_file: object) -> str | None:
+    """Return an error message when *rule_file* is not the file *rule_source* names.
+
+    ``rule_source`` is the canonical ``rule--<name>`` provenance label that ties a
+    rule-quality note to the findings its fix invalidates (matched against their
+    provenance by :func:`_rule_dependency_map`); ``rule_file`` is the *separate*
+    path the agent later edits to apply that fix. The two are authored independently
+    and can drift (Finding C-12): a note naming ``rule--no-comments`` while pointing
+    ``rule_file`` at ``simplicity.md`` passes every path-safety check, yet the fix
+    then edits ``simplicity.md`` while the no-comments findings are marked
+    invalidated — silent, cross-wired corruption. This cross-check ties the two
+    together: the ``rule_file`` stem must equal the name part of ``rule_source``.
+
+    Returns ``None`` (nothing to report) when either field is empty/non-string or
+    when ``rule_source`` is not in canonical ``rule--`` form — there is then no name
+    to derive, and an un-prefixed source matches no finding provenance anyway, so its
+    fix invalidates nothing (a no-op, not a corruption).
+    """
+    if not _is_nonempty_str(rule_source) or not _is_nonempty_str(rule_file):
+        return None
+    source = rule_source.strip()
+    if not source.startswith("rule--"):
+        return None
+    expected_stem = source[len("rule--"):]
+    actual_stem = PurePosixPath(rule_file.replace("\\", "/")).stem
+    if actual_stem == expected_stem:
+        return None
+    return (
+        f"rule_file stem {actual_stem!r} does not match rule_source {source!r} "
+        f"(rule_source names rule {expected_stem!r}, so rule_file must be that "
+        f"rule's {expected_stem}.md file under the rules directory); the file the "
+        f"agent edits must be the rule whose findings the fix invalidates"
+    )
+
+
+def _collect_rule_file_errors(
+    rule_file: object, rule_source: object, rules_dir: str
+) -> list[str]:
+    """Trust-boundary errors for a rule-quality note's ``rule_file`` path.
+
+    Shared by the schema validator (:func:`_validate_rule_quality_note`, the
+    render-review / validate-records path) and the action validator
+    (:func:`validate_action`, the canvas round-trip) so both apply the *same* two
+    checks at their respective trust boundaries: first the path-safety check
+    (absolute / ``..`` traversal / non-``.md`` / outside ``rules_dir``), then — only
+    when the path is safe — the ``rule_source`` consistency cross-check (Finding
+    C-12 via :func:`_rule_file_source_mismatch`). The cross-check is skipped on an
+    unsafe path because the path error is the actionable one and the stem of a
+    traversal/absolute path is meaningless. Returns the messages in order; an empty
+    list means the ``rule_file`` is trustworthy to edit.
+    """
+    messages: list[str] = []
+    _validate_rule_file(rule_file, rules_dir, lambda _field, message: messages.append(message))
+    if messages:
+        return messages
+    mismatch = _rule_file_source_mismatch(rule_source, rule_file)
+    if mismatch is not None:
+        messages.append(mismatch)
+    return messages
+
+
 def _validate_rule_quality_note(
     item: object,
     index: int,
@@ -2533,7 +2594,15 @@ def _validate_rule_quality_note(
         else:
             seen_rule_sources.add(normalized_source)
 
-    _validate_rule_file(item.get("rule_file", _MISSING), rules_dir, add)
+    # rule_file — path safety AND consistency with the canonical rule_source. The
+    # two fields are authored independently and can drift (Finding C-12): without
+    # this cross-check a note naming rule_source "rule--no-comments" but pointing
+    # rule_file at "simplicity.md" would validate, and the fix would then edit the
+    # wrong rule file while the no-comments findings are marked invalidated.
+    for message in _collect_rule_file_errors(
+        item.get("rule_file", _MISSING), rule_source, rules_dir
+    ):
+        add("rule_file", message)
 
 
 def validate_records(data: object, *, rules_dir: str | None = None) -> list[dict]:
@@ -4093,6 +4162,7 @@ def validate_action(
     *,
     action: str | None = None,
     instructions: str = "",
+    rules_dir: str | None = None,
 ) -> tuple[dict | None, list[dict]]:
     """Validate/expand a posted canvas action against a records.json envelope.
 
@@ -4109,6 +4179,13 @@ def validate_action(
 
     The ``action`` verb (when present) must be one of :data:`VALID_ACTIONS`; a
     mismatched/forged ``run_id`` is rejected. Never raises; never executes anything.
+
+    ``rules_dir`` is the configured review-rules directory; each resolved rule's
+    ``rule_file`` is re-validated against it (path safety + ``rule_source``
+    consistency) because the action round-trip loads records.json *without* schema
+    validation, so this is the only place those checks run at action time (Findings
+    C-12 / C-13). When ``None`` it defaults to :data:`DEFAULT_RULES_DIR` so a caller
+    that omits it still gets the secure-by-default ``review/`` prefix check.
     """
     errors: list[dict] = []
 
@@ -4236,6 +4313,28 @@ def validate_action(
                     f"unrecognized id {token!r}: must be a finding id (r#) or a "
                     f"rule-quality note id (RQ#)",
                     record_id=token,
+                )
+            )
+
+    # Defense-in-depth (Findings C-12 / C-13): the action round-trip loads
+    # records.json via _load_records_only, which deliberately SKIPS schema
+    # validation — so the rule_file path-safety check and the rule_source
+    # consistency check that render-review applied are NOT in force here, at the
+    # very point the agent consumes rule_file to *edit* it. Re-apply both against
+    # the configured rules_dir (defaulting to the secure-by-default review/ prefix
+    # when omitted, mirroring validate_records) so validate_action is a
+    # self-sufficient trust boundary — closing the TOCTOU window and the
+    # never-rendered-records.json path — instead of trusting an upstream render.
+    effective_rules_dir = DEFAULT_RULES_DIR if rules_dir is None else rules_dir
+    for note_index, note in enumerate(matched_notes):
+        note_id = note.get("id")
+        for message in _collect_rule_file_errors(
+            note.get("rule_file", ""), note.get("rule_source"), effective_rules_dir
+        ):
+            errors.append(
+                _records_error(
+                    "action", note_index, f"rules[{note_index}].rule_file",
+                    "rule_file", message, record_id=note_id,
                 )
             )
 
@@ -4395,8 +4494,19 @@ def validate_action_command(args: argparse.Namespace) -> None:
         _emit_action_error(path, posted_run_id, action, [load_error])
         sys.exit(1)
 
+    # Resolve the review-rules directory the same way render-review/validate-records
+    # do (--rules-dir override, else the repo's configured value). validate_action
+    # re-validates each resolved rule_file against it, so the action path enforces
+    # the same rule_file trust boundary as the render path even though records.json
+    # is loaded here without schema validation. getattr keeps programmatic callers
+    # that build a bare Namespace working.
+    rules_dir = getattr(args, "rules_dir", None) or _resolve_rules_dir(
+        getattr(args, "repo", None) or "."
+    )
+
     resolved, errors = validate_action(
-        data, posted_run_id, ids, action=action, instructions=instructions
+        data, posted_run_id, ids, action=action, instructions=instructions,
+        rules_dir=rules_dir,
     )
     if errors:
         _emit_action_error(path, posted_run_id, action, errors)
@@ -4680,6 +4790,16 @@ def main() -> int:
         "--records",
         required=True,
         help="Path to the records.json envelope the canvas was rendered from",
+    )
+    action_parser.add_argument(
+        "--repo",
+        default=".",
+        help="Repository root, used to resolve the configured rules_dir (default: .)",
+    )
+    action_parser.add_argument(
+        "--rules-dir",
+        default=None,
+        help="Override the review-rules directory used to re-validate note rule_file paths",
     )
     action_parser.add_argument(
         "--run-id",
