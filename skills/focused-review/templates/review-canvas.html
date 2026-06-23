@@ -547,9 +547,18 @@
     all("[data-action]").forEach(function (b) { b.disabled = n === 0; });
   }
 
+  // Actionable rows only. A section select-all (and the tri-state that mirrors it) skips
+  // .dimmed (disregarded) and .pending-invalid (rule-fix scheduled) findings: they carry
+  // no actionable selection, so bulk-checking them would push non-actionable ids into
+  // state.selected and the posted payload (C-01). .pending-invalid is new in this diff,
+  // which is exactly why the previously unfiltered all(".row-cb", sec) had to narrow.
+  var ACTIONABLE_ROW_CB = ".finding:not(.dimmed):not(.pending-invalid) .row-cb";
+
   function syncSections() {
     all(".finding-section").forEach(function (sec) {
-      var cbs = all(".row-cb", sec);
+      // Count only actionable rows so a section's select-all reads "fully checked" exactly
+      // when every row it would actually select is checked (never the dimmed/pending ones).
+      var cbs = all(ACTIONABLE_ROW_CB, sec);
       var total = cbs.length, checked = 0;
       cbs.forEach(function (cb) { if (cb.checked) checked++; });
       var sc = sec.querySelector(".section-cb");
@@ -584,7 +593,7 @@
     } else if (t.classList.contains("section-cb")) {
       var sec = t.closest(".finding-section");
       if (!sec) return;
-      all(".row-cb", sec).forEach(function (cb) {
+      all(ACTIONABLE_ROW_CB, sec).forEach(function (cb) {
         cb.checked = t.checked;
         var rid = recordId(cb);
         if (rid) { if (t.checked) state.selected.add(rid); else state.selected.delete(rid); }

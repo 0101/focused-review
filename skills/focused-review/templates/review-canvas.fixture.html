@@ -431,9 +431,12 @@
     all("[data-action]").forEach(function (b) { b.disabled = n === 0; });
   }
 
+  // Actionable rows only: section select-all skips .dimmed / .pending-invalid findings.
+  var ACTIONABLE_ROW_CB = ".finding:not(.dimmed):not(.pending-invalid) .row-cb";
+
   function syncSections() {
     all(".finding-section").forEach(function (sec) {
-      var cbs = all(".row-cb", sec);
+      var cbs = all(ACTIONABLE_ROW_CB, sec);
       var total = cbs.length, checked = 0;
       cbs.forEach(function (cb) { if (cb.checked) checked++; });
       var sc = sec.querySelector(".section-cb");
@@ -467,7 +470,7 @@
     } else if (t.classList.contains("section-cb")) {
       var sec = t.closest(".finding-section");
       if (!sec) return;
-      all(".row-cb", sec).forEach(function (cb) {
+      all(ACTIONABLE_ROW_CB, sec).forEach(function (cb) {
         cb.checked = t.checked;
         var rid = recordId(cb);
         if (rid) { if (t.checked) state.selected.add(rid); else state.selected.delete(rid); }
