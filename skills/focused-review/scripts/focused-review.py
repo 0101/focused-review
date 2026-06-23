@@ -2285,9 +2285,9 @@ def _validate_finding(
     if not isinstance(has_detail, bool):
         add("has_detail", "has_detail is required and must be a boolean")
 
-    # assessment_id — nullable; the detail sidecar is located by it AND the
-    # Invalid-findings table is keyed by it, so a non-null assessment_id must be
-    # a non-empty string, unique across findings, and present when has_detail.
+    # assessment_id — nullable; the detail sidecar is located by it, so a non-null
+    # assessment_id must be a non-empty string, unique across findings, and present
+    # when has_detail.
     assessment_id = rec.get("assessment_id", None)
     if assessment_id is not None and not _is_nonempty_str(assessment_id):
         add("assessment_id", "assessment_id must be a non-empty string or null")
