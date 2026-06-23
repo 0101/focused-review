@@ -82,7 +82,7 @@ Each run has a `run-state.json` beside `records.json` that already persists `dis
 
 **Implementation note (Python APIs already in place).** The preview/persist plumbing exists and is the contract the apply path wires up:
 - `_rule_dependency_map(findings, notes) -> {record_id: [RQ#, …]}` is the single source of truth for *which* findings a scheduled set of rule fixes invalidates (per D-12: rule-only sources, every rule noted). Given an applied RQ-id set `A`, the dying records are `[rid for rid, deps in map.items() if set(deps) <= A]`. The canvas also threads each row's deps onto `data-rule-deps` for the live-grey preview.
-- `persist_rule_fixes(run_dir, run_id, fixes) -> state` writes the `rule_fixes_applied` sibling key (add-only, merged by `rule_id`, `run_id`-stamped, preserves `disregarded`) — the mirror of `persist_disregard`. `render-review` reads it back via `_invalidated_reasons` and dims with the reason pill. The apply path just resolves the posted RQ ids → `fixes` and calls this.
+- `persist_rule_fixes(run_dir, run_id, fixes) -> state` writes the `rule_fixes_applied` sibling key (add-only, merged by `rule_id`, `run_id`-stamped, preserves `disregarded`) — the mirror of `persist_disregard`. `render-review` reads it back via `_invalidated_reasons` and dims with the reason pill. The production caller is `validate-action --apply-rule-fixes` (bound to the `fix` verb, post-confirmation): it resolves the posted RQ ids → `fixes` (computing each rule's `invalidated_record_ids` against the *full* posted set per D-12) and calls `persist_rule_fixes`. Persist **all** scheduled RQ ids in one call — a multi-rule finding only dies once every one of its rules is in that call.
 
 ### Message contract — one message, prefix-disambiguated ids
 
@@ -93,6 +93,8 @@ One unified message handles whatever the user selected — findings, rule-qualit
 ```
 
 (`run_id` is retained from today's payload because run-state matching requires it.) The **agent resolves each id by prefix and handles any combination**. Rule semantics: a rule id with **no text = accept its suggested change**; **with text = do what the text says** (the suggestion is context). Python's action-expander resolves the mixed id list deterministically → per finding (file/line/title/suggestion) and per rule (file path, suggested change, invalidated `record_id`s), so the agent has full context regardless of the mix.
+
+**CLI surface.** The orchestrator translates the payload to `validate-action`: `ids` → `--ids` (the heterogeneous list), `text` → `--instructions`, and `button` → `--action focused-review.{button}`. The CLI keeps the **namespaced** verb (`--action`, `choices=VALID_ACTIONS`) as the allowlist/trust boundary — the payload's bare `button` is never trusted as a verb; an off-allowlist value is rejected by argparse (exit 2). `validate-action` returns both `findings[]` and `rules[]`; two gated, verb-bound flags persist run-state after a confirmed action — `--apply-disregard` (disregard verb, resolved **finding** ids) and `--apply-rule-fixes` (fix verb, resolved **rules'** `invalidated_record_ids`).
 
 ## Expected Behavior (by component)
 

@@ -423,7 +423,9 @@
   }
 
   function updateBar() {
-    var n = state.selected.size;
+    // Findings + scheduled rule fixes both count, so the bar enables for a
+    // findings-only, rules-only, or mixed action.
+    var n = state.selected.size + state.scheduledRules.size;
     var c = document.querySelector("[data-sel-count]");
     if (c) c.textContent = n + " selected";
     all("[data-action]").forEach(function (b) { b.disabled = n === 0; });
@@ -476,28 +478,34 @@
       var rq = t.getAttribute("data-rq-id");
       if (rq) { if (t.checked) state.scheduledRules.add(rq); else state.scheduledRules.delete(rq); }
       applyRulePreview();
+      updateBar();
     }
   });
 
+  // Action buttons → postMessage to the Treemon parent. Unified prefix-disambiguated
+  // payload: ids (r# findings + RQ# rule fixes), button (bare verb), text, run_id.
   document.addEventListener("click", function (e) {
     var btn = e.target && e.target.closest ? e.target.closest("[data-action]") : null;
     if (!btn || btn.disabled) return;
     var action = btn.getAttribute("data-action") || "";
     if (action.indexOf(NS) !== 0) return;
-    var ids = Array.from(state.selected);
+    var ids = Array.from(state.selected).concat(Array.from(state.scheduledRules));
     if (!ids.length) return;
 
     window.parent.postMessage({
-      action: action,
-      run_id: getRunId(),
-      record_ids: ids,
-      instructions: instructions()
+      ids: ids,
+      button: action.slice(NS.length),
+      text: instructions(),
+      run_id: getRunId()
     }, getParentOrigin());
 
     // No optimistic disregard dimming (C-17): dimming is server-seeded via restoreState.
 
     state.selected.clear();
+    state.scheduledRules.clear();
     all(".row-cb").forEach(function (cb) { cb.checked = false; });
+    all(".quality-cb").forEach(function (cb) { cb.checked = false; });
+    applyRulePreview();
     syncSections();
     updateBar();
   });

@@ -538,7 +538,10 @@
   }
 
   function updateBar() {
-    var n = state.selected.size;
+    // Findings (row checkboxes) and scheduled rule fixes (RQ checkboxes) both count
+    // toward an actionable selection, so the bar enables for a findings-only,
+    // rules-only, or mixed action — the unified payload carries whatever is selected.
+    var n = state.selected.size + state.scheduledRules.size;
     var c = document.querySelector("[data-sel-count]");
     if (c) c.textContent = n + " selected";
     all("[data-action]").forEach(function (b) { b.disabled = n === 0; });
@@ -592,23 +595,29 @@
       var rq = t.getAttribute("data-rq-id");
       if (rq) { if (t.checked) state.scheduledRules.add(rq); else state.scheduledRules.delete(rq); }
       applyRulePreview();
+      updateBar();
     }
   });
 
-  // Action buttons → postMessage to the Treemon parent.
+  // Action buttons → postMessage to the Treemon parent. One unified, prefix-
+  // disambiguated payload carries the whole selection: `ids` mixes finding ids (r#)
+  // with scheduled rule-fix ids (RQ#), `button` is the bare verb pressed
+  // (fix/disregard/document), `text` is the free-text box, and `run_id` lets the
+  // orchestrator match the action to the rendered run. Python's validate-action
+  // resolves each id by prefix and is the trust boundary — the canvas only posts.
   document.addEventListener("click", function (e) {
     var btn = e.target && e.target.closest ? e.target.closest("[data-action]") : null;
     if (!btn || btn.disabled) return;
     var action = btn.getAttribute("data-action") || "";
     if (action.indexOf(NS) !== 0) return;             // only our namespaced actions
-    var ids = Array.from(state.selected);
+    var ids = Array.from(state.selected).concat(Array.from(state.scheduledRules));
     if (!ids.length) return;
 
     window.parent.postMessage({
-      action: action,
-      run_id: getRunId(),
-      record_ids: ids,
-      instructions: instructions()
+      ids: ids,
+      button: action.slice(NS.length),
+      text: instructions(),
+      run_id: getRunId()
     }, getParentOrigin());
 
     // No optimistic disregard dimming (C-17): the confirmed server round-trip
@@ -617,9 +626,14 @@
     // declined/rejected confirmation can never leave a finding dimmed out of step
     // with persisted run-state until a reload.
 
-    // Clear selection after dispatch (matches the validated prototype).
+    // Clear the selection after dispatch (matches the validated prototype): both the
+    // finding checkboxes and the scheduled rule-fix checkboxes reset, and the live
+    // rule-fix preview is re-derived so a follow-up action starts from a clean slate.
     state.selected.clear();
+    state.scheduledRules.clear();
     all(".row-cb").forEach(function (cb) { cb.checked = false; });
+    all(".quality-cb").forEach(function (cb) { cb.checked = false; });
+    applyRulePreview();
     syncSections();
     updateBar();
   });
@@ -656,7 +670,7 @@
     });
     // Prune tracked state to record_ids still present: a morph can drop a finding from
     // the selectable set (e.g. it is re-categorized into a hidden bucket and loses its checkbox), so
-    // the count, button enabled-state and posted record_ids never reference off-screen ids.
+    // the count, button enabled-state and posted ids never reference off-screen ids.
     var present = presentIds();
     pruneTo(state.selected, present);
     pruneTo(state.disregarded, present);

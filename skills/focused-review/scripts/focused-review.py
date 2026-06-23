@@ -3706,26 +3706,34 @@ def render_review(args: argparse.Namespace) -> None:
 # ---------------------------------------------------------------------------
 # validate-action (Phase 6): the canvas action-bar round-trip.
 #
-# The canvas posts {action, run_id, record_ids[], instructions} to the
-# orchestrator. Before the orchestrator does anything (and only after a human
-# confirms), it calls `validate-action` to validate/expand the payload against
-# records.json: the posted run_id must match the rendered run (rejecting a forged
-# action from injected canvas JS), every record_id must exist, and each resolves
-# to its file/line/title/suggestion. Python's role stays mechanical — it validates
-# a schema-defined contract and resolves stable ids; it never executes anything.
+# The canvas posts {ids[], button, text, run_id} to the orchestrator. The `ids`
+# are a single, prefix-disambiguated list: findings keep their record_id (r#),
+# rule-quality notes use RQ#. Before the orchestrator does anything (and only
+# after a human confirms), it calls `validate-action` to validate/expand the
+# payload against records.json: the posted run_id must match the rendered run
+# (rejecting a forged action from injected canvas JS), every id must resolve by
+# prefix (r# -> finding file/line/title/suggestion; RQ# -> rule file + suggested
+# change + the record_ids its fix invalidates), and an id matching neither prefix
+# (or absent from the envelope) is rejected. Python's role stays mechanical — it
+# validates a schema-defined contract and resolves stable ids; it never executes
+# anything.
 #
 # `disregard` is the one action with persisted state: `--apply-disregard` records
-# the ids in run-state.json so render-review re-applies the dim across re-renders.
-# See docs/spec/canvas-review-report.md (postMessage actions + Security Model).
+# the resolved finding ids in run-state.json so render-review re-applies the dim
+# across re-renders. See docs/spec/canvas-review-report.md and
+# docs/spec/verdict-model-redesign.md (postMessage actions + Security Model).
 # ---------------------------------------------------------------------------
 
 # The canvas action bar posts exactly these namespaced verbs (the data-action
 # values in templates/review-canvas.html). validate-action is fail-closed on the
 # verb: anything outside this allowlist is rejected, never echoed back as a
-# resolved action. disregard is the one verb that carries a persisted side
-# effect (run-state.json), so it is named separately and gated on its own.
+# resolved action. Two verbs carry a persisted side effect (run-state.json) and
+# are named separately so each can be gated on its own: ``disregard`` dims the
+# selected findings, and ``fix`` is the verb under which scheduled rule fixes are
+# applied (``--apply-rule-fixes`` writes their invalidated record_ids).
+FIX_ACTION = "focused-review.fix"
 DISREGARD_ACTION = "focused-review.disregard"
-VALID_ACTIONS = ("focused-review.fix", DISREGARD_ACTION, "focused-review.document")
+VALID_ACTIONS = (FIX_ACTION, DISREGARD_ACTION, "focused-review.document")
 
 # Per-run state the canvas re-applies across renders: the `disregarded` record_ids
 # (a silent dim) and `rule_fixes_applied` — the rule fixes the agent has committed,
@@ -3933,22 +3941,51 @@ def _resolve_action_finding(finding: dict) -> dict:
     }
 
 
+def _resolve_action_rule(note: dict, invalidated_record_ids: list[str]) -> dict:
+    """Resolve a rule-quality note to the fields needed to apply its rule fix.
+
+    The spec requires the rule file path, the suggested change, and the
+    ``record_id``s the fix invalidates; ``rule`` / ``rule_source`` / ``observation``
+    give the orchestrator (and the human) enough context to describe the change.
+    ``rule_file`` is the schema-validated safe path under the rules directory the
+    agent edits; ``invalidated_record_ids`` are the findings this rule fix knocks
+    out *given the full posted RQ set* (Decision 12 — see :func:`validate_action`),
+    written into run-state so the re-render dims them with a reason.
+    """
+    return {
+        "rule_id": note.get("id"),
+        "rule": note.get("rule", ""),
+        "rule_source": note.get("rule_source", ""),
+        "rule_file": note.get("rule_file", ""),
+        "observation": note.get("observation", ""),
+        "suggestion": note.get("suggestion", ""),
+        "invalidated_record_ids": invalidated_record_ids,
+    }
+
+
 def validate_action(
     data: object,
     run_id: object,
-    record_ids: list[str],
+    ids: list[str],
     *,
     action: str | None = None,
     instructions: str = "",
 ) -> tuple[dict | None, list[dict]]:
     """Validate/expand a posted canvas action against a records.json envelope.
 
-    Returns ``(expanded, errors)``. ``errors`` is a list of structured per-record
-    error dicts (same shape as :func:`validate_records`, scope ``"action"``); when
-    it is empty, ``expanded`` is the resolved action — every targeted ``record_id``
-    resolved to file/line/title/suggestion. The ``action`` verb (when present) must
-    be one of :data:`VALID_ACTIONS`; a mismatched/forged ``run_id`` or any unknown
-    ``record_id`` is rejected. Never raises; never executes anything.
+    Returns ``(expanded, errors)``. ``errors`` is a list of structured per-id error
+    dicts (same shape as :func:`validate_records`, scope ``"action"``); when it is
+    empty, ``expanded`` is the resolved action. ``ids`` is the unified,
+    prefix-disambiguated id list the canvas posts — findings keep their
+    ``record_id`` (``r#``) and rule-quality notes use ``RQ#``. Each id is resolved
+    **by prefix**: an ``r#`` to a finding (file/line/title/suggestion) in
+    ``expanded["findings"]``, an ``RQ#`` to a rule (rule_file/suggested change/the
+    ``record_id``s its fix invalidates) in ``expanded["rules"]``. An id matching
+    *neither* prefix, or a well-formed id absent from the envelope, is rejected —
+    the trust boundary stays in Python because the canvas content is untrusted.
+
+    The ``action`` verb (when present) must be one of :data:`VALID_ACTIONS`; a
+    mismatched/forged ``run_id`` is rejected. Never raises; never executes anything.
     """
     errors: list[dict] = []
 
@@ -4004,48 +4041,99 @@ def validate_action(
             )
         )
 
-    # Index findings by stable record_id so each posted id resolves (or doesn't).
-    findings = data.get("findings")
-    by_id: dict[str, dict] = {}
-    if isinstance(findings, list):
-        for finding in findings:
-            if isinstance(finding, dict):
-                rid = finding.get("record_id")
-                if _is_nonempty_str(rid):
-                    by_id.setdefault(rid, finding)
+    # Index findings by stable record_id and rule-quality notes by RQ id so each
+    # posted id resolves by prefix (or is rejected as unknown).
+    findings_list = data.get("findings")
+    findings_list = findings_list if isinstance(findings_list, list) else []
+    by_record_id: dict[str, dict] = {}
+    for finding in findings_list:
+        if isinstance(finding, dict):
+            fid = finding.get("record_id")
+            if _is_nonempty_str(fid):
+                by_record_id.setdefault(fid, finding)
 
-    resolved: list[dict] = []
-    if not record_ids:
+    notes_list = data.get("rule_quality_notes")
+    notes_list = notes_list if isinstance(notes_list, list) else []
+    by_note_id: dict[str, dict] = {}
+    for note in notes_list:
+        if isinstance(note, dict):
+            nid = note.get("id")
+            if _is_nonempty_str(nid):
+                by_note_id.setdefault(nid, note)
+
+    resolved_findings: list[dict] = []
+    matched_notes: list[dict] = []
+    if not ids:
         errors.append(
             _records_error(
-                "action", None, "record_ids", "record_ids",
-                "no record_ids provided; a canvas action must target at least one finding",
+                "action", None, "ids", "ids",
+                "no ids provided; a canvas action must target at least one finding "
+                "(r#) or rule-quality note (RQ#)",
             )
         )
-    for i, rid in enumerate(record_ids):
-        if not _is_nonempty_str(rid):
+    for i, raw in enumerate(ids):
+        if not _is_nonempty_str(raw):
             errors.append(
                 _records_error(
-                    "action", i, f"record_ids[{i}]", "record_id",
-                    "record_id must be a non-empty string",
-                    record_id=rid if isinstance(rid, str) else None,
+                    "action", i, f"ids[{i}]", "id",
+                    "id must be a non-empty string",
+                    record_id=raw if isinstance(raw, str) else None,
                 )
             )
             continue
-        finding = by_id.get(rid)
-        if finding is None:
+        token = raw.strip()
+        if _RECORD_ID_RE.match(token):
+            finding = by_record_id.get(token)
+            if finding is None:
+                errors.append(
+                    _records_error(
+                        "action", i, f"ids[{i}]", "record_id",
+                        f"unknown record_id {token!r}: not present in records.json",
+                        record_id=token,
+                    )
+                )
+            else:
+                resolved_findings.append(_resolve_action_finding(finding))
+        elif _RULE_QUALITY_NOTE_ID_RE.match(token):
+            note = by_note_id.get(token)
+            if note is None:
+                errors.append(
+                    _records_error(
+                        "action", i, f"ids[{i}]", "rule_id",
+                        f"unknown rule-quality note id {token!r}: not present in records.json",
+                        record_id=token,
+                    )
+                )
+            else:
+                matched_notes.append(note)
+        else:
             errors.append(
                 _records_error(
-                    "action", i, f"record_ids[{i}]", "record_id",
-                    f"unknown record_id {rid!r}: not present in records.json",
-                    record_id=rid,
+                    "action", i, f"ids[{i}]", "id",
+                    f"unrecognized id {token!r}: must be a finding id (r#) or a "
+                    f"rule-quality note id (RQ#)",
+                    record_id=token,
                 )
             )
-        else:
-            resolved.append(_resolve_action_finding(finding))
 
     if errors:
         return None, errors
+
+    # Resolve each matched rule-quality note to its rule file + suggested change +
+    # the record_ids its fix invalidates. Per Decision 12 a finding dies only when
+    # *all* of its rule sources are in the applied set, so the invalidation is
+    # computed against the *full* set of posted RQ ids and then attributed back to
+    # each rule that knocked the finding out — a multi-rule finding lists under
+    # every rule it depends on, which is exactly what persist_rule_fixes expects.
+    resolved_rules: list[dict] = []
+    if matched_notes:
+        applied = {n.get("id") for n in matched_notes}
+        dep_map = _rule_dependency_map(findings_list, notes_list)
+        dying = {rid: deps for rid, deps in dep_map.items() if set(deps) <= applied}
+        for note in matched_notes:
+            note_id = note.get("id")
+            invalidated = [rid for rid, deps in dying.items() if note_id in deps]
+            resolved_rules.append(_resolve_action_rule(note, invalidated))
 
     expanded = {
         "valid": True,
@@ -4053,8 +4141,10 @@ def validate_action(
         "action": action,
         "run_id": run_id,
         "instructions": instructions or "",
-        "record_count": len(resolved),
-        "findings": resolved,
+        "record_count": len(resolved_findings),
+        "rule_count": len(resolved_rules),
+        "findings": resolved_findings,
+        "rules": resolved_rules,
     }
     return expanded, []
 
@@ -4087,11 +4177,13 @@ def _load_records_only(path: str | os.PathLike) -> tuple[object, dict | None]:
         )
 
 
-def _split_record_ids(raw: str | None) -> list[str]:
-    """Parse the comma-separated ``--record-ids`` value into a de-duped list.
+def _split_ids(raw: str | None) -> list[str]:
+    """Parse the comma-separated ``--ids`` value into a de-duped list.
 
-    record_ids are per-run tokens (``r1``, ``r2``, …) so a comma is a safe
-    separator. Order is preserved (first-seen) and blanks/dupes are dropped.
+    The posted ids are per-run tokens (findings ``r1``, ``r2``, …; rule-quality
+    notes ``RQ1``, ``RQ2``, …) so a comma is a safe separator. Order is preserved
+    (first-seen) and blanks/dupes are dropped. The id *type* is disambiguated later
+    by prefix in :func:`validate_action`.
     """
     if not raw:
         return []
@@ -4124,20 +4216,24 @@ def _emit_action_error(
 def validate_action_command(args: argparse.Namespace) -> None:
     """CLI: validate/expand a posted canvas action against records.json.
 
-    On success prints the resolved action JSON to stdout (exit 0). On a forged
-    run_id, unknown record_id, an unknown action verb, or a missing/unparseable
-    records.json, prints the structured errors to stderr and exits 1 — so the
-    orchestrator rejects the action instead of executing it. ``--apply-disregard``
-    additionally persists the (validated) ids as disregarded run state after a
-    successful validation; it is the only side effect, is bound to the
-    ``focused-review.disregard`` verb (rejected for any other action), and is
-    gated behind the human-confirmation step in SKILL.md.
+    On success prints the resolved action JSON to stdout (exit 0) — ``findings[]``
+    (resolved ``r#`` ids) and ``rules[]`` (resolved ``RQ#`` ids). On a forged
+    run_id, an unknown/unrecognised id, an unknown action verb, or a
+    missing/unparseable records.json, prints the structured errors to stderr and
+    exits 1 — so the orchestrator rejects the action instead of executing it.
+
+    Two flags persist run-state after a successful validation, each bound to its
+    verb and gated behind the human-confirmation step in SKILL.md:
+    ``--apply-disregard`` (``focused-review.disregard`` only) dims the resolved
+    **finding** ids; ``--apply-rule-fixes`` (``focused-review.fix`` only) writes the
+    resolved **rules'** invalidated record_ids so the re-render dims them with a
+    reason. Both refuse to run for any other verb.
     """
     path: str = args.records
     posted_run_id = args.run_id
     action = args.action
     instructions = args.instructions or ""
-    record_ids = _split_record_ids(args.record_ids)
+    ids = _split_ids(args.ids)
 
     # --apply-disregard is bound to the disregard verb only: it is the one side
     # effect that persists state, so refuse the flag for any other (or absent)
@@ -4155,13 +4251,29 @@ def validate_action_command(args: argparse.Namespace) -> None:
         )
         sys.exit(1)
 
+    # --apply-rule-fixes is the symmetric gate for rule-fix invalidation: it is
+    # bound to the fix verb (rule fixes are applied under "Fix"), so refuse it for
+    # any other (or absent) action rather than writing rule-fix run-state for a
+    # disregard/document call. Fail-closed and fail-fast, before any records IO.
+    if getattr(args, "apply_rule_fixes", False) and action != FIX_ACTION:
+        _emit_action_error(
+            path, posted_run_id, action,
+            [_records_error(
+                "action", None, "apply_rule_fixes", "action",
+                f"--apply-rule-fixes requires --action {FIX_ACTION!r}, "
+                f"got {action!r}; refusing to persist rule-fix state for a "
+                f"non-fix action",
+            )],
+        )
+        sys.exit(1)
+
     data, load_error = _load_records_only(path)
     if load_error is not None:
         _emit_action_error(path, posted_run_id, action, [load_error])
         sys.exit(1)
 
     resolved, errors = validate_action(
-        data, posted_run_id, record_ids, action=action, instructions=instructions
+        data, posted_run_id, ids, action=action, instructions=instructions
     )
     if errors:
         _emit_action_error(path, posted_run_id, action, errors)
@@ -4170,14 +4282,38 @@ def validate_action_command(args: argparse.Namespace) -> None:
     assert resolved is not None  # errors empty => resolved populated
     resolved["records_path"] = str(path)
 
-    # Disregard is the one action that persists state. Only after a successful
-    # validation (so a forged run_id / unknown id can never write state). The
-    # ``action == DISREGARD_ACTION`` guard is co-located with the side effect so
-    # it holds even for a caller that bypasses the argparse/early gate above.
+    # Disregard is one of the two actions that persist state. Only after a
+    # successful validation (so a forged run_id / unknown id can never write
+    # state). The ``action == DISREGARD_ACTION`` guard is co-located with the side
+    # effect so it holds even for a caller that bypasses the argparse/early gate
+    # above. Only the resolved *finding* ids are disregarded — any RQ# in the mix
+    # is a rule fix, not a record to dim, so it is never written to the disregarded set.
     if getattr(args, "apply_disregard", False) and action == DISREGARD_ACTION:
         run_dir = args.run_dir or os.path.dirname(path) or "."
-        state = persist_disregard(run_dir, posted_run_id, record_ids)
+        disregard_ids = [f["record_id"] for f in resolved["findings"]]
+        state = persist_disregard(run_dir, posted_run_id, disregard_ids)
         resolved["disregarded"] = state.get("disregarded", [])
+        resolved["run_state_path"] = _run_state_path(run_dir)
+
+    # Rule fixes are the other persisted side effect: after the agent has edited
+    # the rule files (the human-confirmed manual step), this writes the resolved
+    # rules' invalidated record_ids into run-state so the re-render dims them with
+    # an audit reason. The invalidation was computed by validate_action against the
+    # *full* posted RQ set (Decision 12), so persisting all the scheduled rule ids
+    # in one call is what makes a multi-rule finding die. ``persist_rule_fixes`` is
+    # add-only and preserves the sibling ``disregarded`` set.
+    if getattr(args, "apply_rule_fixes", False) and action == FIX_ACTION:
+        run_dir = args.run_dir or os.path.dirname(path) or "."
+        fixes = [
+            {
+                "rule_id": rule["rule_id"],
+                "rule_source": rule.get("rule_source", ""),
+                "invalidated_record_ids": rule.get("invalidated_record_ids", []),
+            }
+            for rule in resolved["rules"]
+        ]
+        state = persist_rule_fixes(run_dir, posted_run_id, fixes)
+        resolved["rule_fixes_applied"] = state.get("rule_fixes_applied", [])
         resolved["run_state_path"] = _run_state_path(run_dir)
 
     # ensure_ascii (default) keeps this pure-ASCII, so a plain print is encoding
@@ -4433,9 +4569,10 @@ def main() -> int:
         help="The run_id from the posted action (must match records.json's run.run_id)",
     )
     action_parser.add_argument(
-        "--record-ids",
+        "--ids",
         required=True,
-        help="Comma-separated stable record_ids the action targets (e.g. r1,r3,r7)",
+        help="Comma-separated stable ids the action targets: finding ids (r#) "
+             "and/or rule-quality note ids (RQ#), e.g. r1,r3,RQ2",
     )
     action_parser.add_argument(
         "--action",
@@ -4451,8 +4588,17 @@ def main() -> int:
     action_parser.add_argument(
         "--apply-disregard",
         action="store_true",
-        help="After validation, persist the record_ids as disregarded run state "
-             "(canvas dims them across re-renders). Use only after human confirmation.",
+        help="After validation, persist the resolved finding ids as disregarded "
+             "run state (canvas dims them across re-renders). Use only after human "
+             "confirmation.",
+    )
+    action_parser.add_argument(
+        "--apply-rule-fixes",
+        action="store_true",
+        help="After validation, persist the resolved rules' invalidated record_ids "
+             "as rule-fix run state (canvas dims them with a reason across "
+             "re-renders). Bound to --action focused-review.fix. Use only after the "
+             "rule files have been edited and the human has confirmed.",
     )
     action_parser.add_argument(
         "--run-dir",

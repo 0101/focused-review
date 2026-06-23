@@ -3,10 +3,12 @@
 Covers the canvas action-bar round-trip:
 
 * ``validate_action`` — the pure validate/expand contract: a posted
-  ``{run_id, record_ids[], instructions}`` is accepted only when the ``run_id``
-  matches the rendered run and every ``record_id`` exists, resolving each to
-  file/line/title/suggestion. A forged ``run_id`` or any unknown ``record_id`` is
-  rejected with the same structured-error shape as ``validate_records``.
+  ``{run_id, ids[], action, instructions}`` is accepted only when the ``run_id``
+  matches the rendered run and every id resolves *by prefix* — a finding id
+  (``r#``) to file/line/title/suggestion, a rule-quality note id (``RQ#``) to its
+  rule file + suggested change + the record_ids its fix invalidates. A forged
+  ``run_id``, an unknown id, or an id matching neither prefix is rejected with the
+  same structured-error shape as ``validate_records``.
 * ``validate_action_command`` — the CLI handler (stdout on success, structured
   errors to stderr + exit 1 on failure, ``--apply-disregard`` persistence).
 * run-state helpers ``persist_disregard`` / ``load_run_state``.
@@ -146,20 +148,100 @@ def _envelope() -> dict:
 RUN_ID = "20260617-120000"
 
 
+def _finding(record_id: str, title: str, provenance: list[str]) -> dict:
+    """A minimal-but-resolvable finding for the RQ / invalidation fixtures."""
+    return {
+        "record_id": record_id,
+        "assessment_id": f"A-{record_id}",
+        "display_number": None,
+        "display_bucket": "confirmed",
+        "title": title,
+        "file": f"src/{record_id}.py",
+        "line": 1,
+        "original_severity": "Low",
+        "severity": "Low",
+        "fix_complexity": "quickfix",
+        "verdict": "Confirmed",
+        "type": "rule",
+        "introduced_by": "diff",
+        "description": "",
+        "assessment": "",
+        "suggestion": f"fix {record_id}",
+        "provenance": provenance,
+        "has_detail": False,
+    }
+
+
+def _envelope_with_notes() -> dict:
+    """Envelope wired for rule-quality (RQ) resolution + Decision-12 invalidation.
+
+    The findings exercise the rule "a finding dies only when *all* of its rule
+    sources are fixed, and never while a concern keeps it alive":
+
+    * ``r1`` — single rule source ``rule--no-comments`` (← RQ1). Dies on RQ1.
+    * ``r2`` — two rule sources ``rule--no-comments`` + ``rule--simplicity``
+      (← RQ1 **and** RQ2). Dies only when *both* are applied in one call.
+    * ``r3`` — ``rule--simplicity`` **plus** a ``concern--`` source: the concern
+      is an independent justification, so no rule fix can invalidate it.
+
+    Two notes resolve the RQ ids: RQ1 (``rule--no-comments``) and RQ2
+    (``rule--simplicity``).
+    """
+    return {
+        "schema_version": 1,
+        "run": {
+            "run_id": RUN_ID,
+            "scope": "branch",
+            "date": "2026-06-17T12:00:00Z",
+            "rule_count": 2,
+            "concern_count": 1,
+            "consolidated_count": 3,
+            "confirmed": 3,
+            "questionable": 0,
+            "invalid": 0,
+        },
+        "rebuttal_overrides": [],
+        "rule_quality_notes": [
+            {
+                "id": "RQ1",
+                "rule": "Avoid explanatory comments",
+                "rule_source": "rule--no-comments",
+                "rule_file": "rules/no-comments.md",
+                "observation": "Flagged a navigational divider as a smell.",
+                "suggestion": "Exempt section dividers from the no-comments rule.",
+            },
+            {
+                "id": "RQ2",
+                "rule": "Prefer simple code",
+                "rule_source": "rule--simplicity",
+                "rule_file": "rules/simplicity.md",
+                "observation": "Flagged a two-line helper as over-engineered.",
+                "suggestion": "Only flag helpers used in a single call site.",
+            },
+        ],
+        "findings": [
+            _finding("r1", "Single rule source", ["rule--no-comments"]),
+            _finding("r2", "Two rule sources", ["rule--no-comments", "rule--simplicity"]),
+            _finding("r3", "Concern keeps it alive", ["rule--simplicity", "concern--bugs--opus"]),
+        ],
+    }
+
+
 def _write_records(tmp_path: Path, env: dict | None = None) -> Path:
     records = tmp_path / "records.json"
     records.write_text(json.dumps(env if env is not None else _envelope()), encoding="utf-8")
     return records
 
 
-def _action_args(records: Path, run_id: str, record_ids: str, **overrides) -> argparse.Namespace:
+def _action_args(records: Path, run_id: str, ids: str, **overrides) -> argparse.Namespace:
     ns = argparse.Namespace(
         records=str(records),
         run_id=run_id,
-        record_ids=record_ids,
+        ids=ids,
         action=None,
         instructions="",
         apply_disregard=False,
+        apply_rule_fixes=False,
         run_dir=None,
     )
     for key, value in overrides.items():
@@ -199,6 +281,9 @@ class TestValidateActionAccept:
         assert expanded["run_id"] == RUN_ID
         assert expanded["instructions"] == "fix minimally"
         assert expanded["record_count"] == 2
+        # A findings-only action resolves no rules.
+        assert expanded["rule_count"] == 0
+        assert expanded["rules"] == []
 
         by_id = {f["record_id"]: f for f in expanded["findings"]}
         # Order is preserved and every targeted id resolved.
@@ -247,6 +332,69 @@ class TestValidateActionAccept:
 
 
 # ---------------------------------------------------------------------------
+# validate_action — rule-quality (RQ#) resolution + Decision-12 invalidation
+# ---------------------------------------------------------------------------
+
+
+class TestValidateActionRuleResolution:
+    """``RQ#`` ids resolve to rule fixes, with Decision-12 invalidation attribution."""
+
+    def test_single_rule_resolves_to_rule_file_and_invalidation(self) -> None:
+        expanded, errors = fr.validate_action(
+            _envelope_with_notes(), RUN_ID, ["RQ1"], action="focused-review.fix"
+        )
+        assert errors == []
+        assert expanded is not None
+        # No findings posted -> findings[] empty; the RQ resolves into rules[].
+        assert expanded["record_count"] == 0
+        assert expanded["findings"] == []
+        assert expanded["rule_count"] == 1
+        rule = expanded["rules"][0]
+        assert rule["rule_id"] == "RQ1"
+        assert rule["rule_source"] == "rule--no-comments"
+        assert rule["rule_file"] == "rules/no-comments.md"
+        assert rule["suggestion"] == "Exempt section dividers from the no-comments rule."
+        assert rule["observation"] == "Flagged a navigational divider as a smell."
+        # RQ1 alone kills r1 (its only rule source) but NOT r2 (also needs RQ2).
+        assert rule["invalidated_record_ids"] == ["r1"]
+
+    def test_multi_rule_finding_dies_only_when_all_its_rules_applied(self) -> None:
+        # Posting BOTH RQ1 and RQ2 in one call: r1 (← RQ1) and r2 (← RQ1+RQ2) both
+        # die; the two-rule finding r2 is attributed under EVERY rule it depends on,
+        # which is exactly the shape persist_rule_fixes consumes.
+        expanded, errors = fr.validate_action(
+            _envelope_with_notes(), RUN_ID, ["RQ1", "RQ2"], action="focused-review.fix"
+        )
+        assert errors == []
+        assert expanded["rule_count"] == 2
+        by_rule = {r["rule_id"]: r for r in expanded["rules"]}
+        assert by_rule["RQ1"]["invalidated_record_ids"] == ["r1", "r2"]
+        assert by_rule["RQ2"]["invalidated_record_ids"] == ["r2"]
+
+    def test_rule_kept_alive_by_concern_never_invalidates(self) -> None:
+        # r3 carries rule--simplicity AND a concern source; the concern is an
+        # independent justification, so applying RQ2 invalidates nothing.
+        expanded, errors = fr.validate_action(
+            _envelope_with_notes(), RUN_ID, ["RQ2"], action="focused-review.fix"
+        )
+        assert errors == []
+        assert expanded["rules"][0]["rule_id"] == "RQ2"
+        assert expanded["rules"][0]["invalidated_record_ids"] == []
+
+    def test_mixed_ids_resolve_into_findings_and_rules(self) -> None:
+        # A heterogeneous selection resolves r# into findings[] and RQ# into rules[]
+        # in one expansion, each by prefix, order preserved within each list.
+        expanded, errors = fr.validate_action(
+            _envelope_with_notes(), RUN_ID, ["r1", "RQ2"], action="focused-review.fix"
+        )
+        assert errors == []
+        assert [f["record_id"] for f in expanded["findings"]] == ["r1"]
+        assert expanded["record_count"] == 1
+        assert [r["rule_id"] for r in expanded["rules"]] == ["RQ2"]
+        assert expanded["rule_count"] == 1
+
+
+# ---------------------------------------------------------------------------
 # validate_action — pure validate/expand (reject)
 # ---------------------------------------------------------------------------
 
@@ -270,19 +418,19 @@ class TestValidateActionReject:
         assert err["scope"] == "action"
         assert err["field"] == "record_id"
         assert err["record_id"] == "r999"
-        assert err["path"] == "record_ids[1]"
+        assert err["path"] == "ids[1]"
         assert "unknown record_id" in err["message"]
 
     def test_forged_run_id_and_unknown_id_both_reported(self) -> None:
-        expanded, errors = fr.validate_action(_envelope(), "FORGED", ["nope"])
+        expanded, errors = fr.validate_action(_envelope(), "FORGED", ["r999"])
         assert expanded is None
         fields = {e["field"] for e in errors}
         assert fields == {"run_id", "record_id"}
 
-    def test_empty_record_ids_rejected(self) -> None:
+    def test_empty_ids_rejected(self) -> None:
         expanded, errors = fr.validate_action(_envelope(), RUN_ID, [])
         assert expanded is None
-        assert any(e["field"] == "record_ids" for e in errors)
+        assert any(e["field"] == "ids" for e in errors)
 
     def test_blank_posted_run_id_rejected(self) -> None:
         expanded, errors = fr.validate_action(_envelope(), "   ", ["r1"])
@@ -302,11 +450,11 @@ class TestValidateActionReject:
         assert errors[0]["scope"] == "action"
         assert "must be a JSON object" in errors[0]["message"]
 
-    def test_blank_record_id_token_rejected(self) -> None:
+    def test_blank_id_token_rejected(self) -> None:
         # A non-empty list carrying a blank token is reported per-id, not resolved.
         expanded, errors = fr.validate_action(_envelope(), RUN_ID, [""])
         assert expanded is None
-        assert any(e["field"] == "record_id" for e in errors)
+        assert any(e["field"] == "id" for e in errors)
 
     def test_unknown_action_verb_rejected(self) -> None:
         # An arbitrary/forged verb is fail-closed: rejected, never echoed back.
@@ -324,7 +472,7 @@ class TestValidateActionReject:
         # The verb check aggregates with the run_id / record_id checks rather than
         # masking them, so a fully-bogus action surfaces every problem at once.
         expanded, errors = fr.validate_action(
-            _envelope(), "FORGED", ["nope"], action="bogus"
+            _envelope(), "FORGED", ["r999"], action="bogus"
         )
         assert expanded is None
         assert {"action", "run_id", "record_id"} <= {e["field"] for e in errors}
@@ -336,20 +484,47 @@ class TestValidateActionReject:
         assert errors == []
         assert expanded is not None and expanded["action"] is None
 
+    def test_unknown_rule_quality_note_id_rejected(self) -> None:
+        # A well-formed RQ id absent from the envelope is rejected — RQ ids are
+        # resolved in Python (the trust boundary), never trusted from the payload.
+        expanded, errors = fr.validate_action(_envelope_with_notes(), RUN_ID, ["RQ9"])
+        assert expanded is None
+        assert len(errors) == 1
+        err = errors[0]
+        assert err["scope"] == "action"
+        assert err["field"] == "rule_id"
+        assert err["record_id"] == "RQ9"
+        assert err["path"] == "ids[0]"
+        assert "unknown rule-quality note id" in err["message"]
+
+    def test_unrecognized_id_prefix_rejected(self) -> None:
+        # An id matching neither the finding (r#) nor the rule-quality (RQ#) prefix
+        # fails closed: lowercase rq, capital R, junk, and bare digits all reject.
+        for bogus in ("rq2", "R3", "x5", "12"):
+            expanded, errors = fr.validate_action(_envelope_with_notes(), RUN_ID, [bogus])
+            assert expanded is None, bogus
+            assert len(errors) == 1, bogus
+            err = errors[0]
+            assert err["field"] == "id", bogus
+            assert err["record_id"] == bogus, bogus
+            assert "unrecognized id" in err["message"], bogus
+
 
 # ---------------------------------------------------------------------------
-# _split_record_ids
+# _split_ids
 # ---------------------------------------------------------------------------
 
 
-class TestSplitRecordIds:
+class TestSplitIds:
     def test_splits_strips_and_dedupes_preserving_order(self) -> None:
-        assert fr._split_record_ids(" r1, r2 ,r1,, r3 ") == ["r1", "r2", "r3"]
+        # Findings (r#) and rule-quality (RQ#) ids share one comma list; the id
+        # *type* is disambiguated later by prefix in validate_action.
+        assert fr._split_ids(" r1, RQ2 ,r1,, r3 ") == ["r1", "RQ2", "r3"]
 
     def test_empty_and_none(self) -> None:
-        assert fr._split_record_ids("") == []
-        assert fr._split_record_ids(None) == []
-        assert fr._split_record_ids("  ,  ,") == []
+        assert fr._split_ids("") == []
+        assert fr._split_ids(None) == []
+        assert fr._split_ids("  ,  ,") == []
 
 
 # ---------------------------------------------------------------------------
@@ -368,6 +543,7 @@ class TestValidateActionCommand:
         out = json.loads(capsys.readouterr().out)
         assert out["valid"] is True
         assert out["record_count"] == 2
+        assert out["rule_count"] == 0
         assert out["records_path"] == str(records)
         assert {f["record_id"] for f in out["findings"]} == {"r1", "r2"}
         # No disregard side effect without --apply-disregard.
@@ -514,10 +690,91 @@ class TestValidateActionCommand:
         assert any(e["field"] == "action" for e in payload["errors"])
         assert not (tmp_path / "run-state.json").exists()
 
+    def test_apply_rule_fixes_persists_and_reports(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # The fix verb + --apply-rule-fixes persists the resolved rules' invalidated
+        # record_ids. Posting BOTH RQ ids in one call is what kills the two-rule
+        # finding r2 (Decision 12 — invalidation is computed against the full set).
+        records = _write_records(tmp_path, _envelope_with_notes())
+        fr.validate_action_command(
+            _action_args(
+                records, RUN_ID, "RQ1,RQ2",
+                action="focused-review.fix",
+                apply_rule_fixes=True,
+                run_dir=str(tmp_path),
+            )
+        )
+        out = json.loads(capsys.readouterr().out)
+        applied = {f["rule_id"]: f["invalidated_record_ids"] for f in out["rule_fixes_applied"]}
+        assert applied == {"RQ1": ["r1", "r2"], "RQ2": ["r2"]}
+        state = json.loads((tmp_path / "run-state.json").read_text(encoding="utf-8"))
+        assert state["run_id"] == RUN_ID
+        assert {f["rule_id"] for f in state["rule_fixes_applied"]} == {"RQ1", "RQ2"}
 
-# ---------------------------------------------------------------------------
-# argparse wiring — the --action choices constraint
-# ---------------------------------------------------------------------------
+    def test_apply_rule_fixes_does_not_persist_on_forged_run_id(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # Symmetric with the disregard gate: a rejected (forged) fix action must
+        # never write rule-fix run state — the side effect is gated behind a clean
+        # validation, so a forged run_id leaves no run-state.json behind.
+        records = _write_records(tmp_path, _envelope_with_notes())
+        with pytest.raises(SystemExit) as exc:
+            fr.validate_action_command(
+                _action_args(
+                    records, "FORGED", "RQ1",
+                    action="focused-review.fix",
+                    apply_rule_fixes=True,
+                    run_dir=str(tmp_path),
+                )
+            )
+        assert exc.value.code == 1
+        assert not (tmp_path / "run-state.json").exists()
+
+    def test_apply_rule_fixes_with_non_fix_action_rejected(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # --apply-rule-fixes is bound to the fix verb: pairing it with disregard is
+        # rejected and writes NO run state (the persisted side effect is gated).
+        records = _write_records(tmp_path, _envelope_with_notes())
+        with pytest.raises(SystemExit) as exc:
+            fr.validate_action_command(
+                _action_args(
+                    records, RUN_ID, "RQ1",
+                    action="focused-review.disregard",
+                    apply_rule_fixes=True,
+                    run_dir=str(tmp_path),
+                )
+            )
+        assert exc.value.code == 1
+        payload = json.loads(capsys.readouterr().err)
+        assert payload["valid"] is False
+        assert any(
+            e["field"] == "action" and "apply-rule-fixes" in e["message"]
+            for e in payload["errors"]
+        )
+        assert not (tmp_path / "run-state.json").exists()
+
+    def test_mixed_disregard_persists_only_finding_ids(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # A disregard over a mixed selection persists only the resolved FINDING ids;
+        # any RQ# in the mix is a rule fix, never written to the disregarded set.
+        records = _write_records(tmp_path, _envelope_with_notes())
+        fr.validate_action_command(
+            _action_args(
+                records, RUN_ID, "r1,RQ1",
+                action="focused-review.disregard",
+                apply_disregard=True,
+                run_dir=str(tmp_path),
+            )
+        )
+        out = json.loads(capsys.readouterr().out)
+        assert out["disregarded"] == ["r1"]
+        state = json.loads((tmp_path / "run-state.json").read_text(encoding="utf-8"))
+        assert state["disregarded"] == ["r1"]
+        # The disregard path writes no rule-fix state.
+        assert state.get("rule_fixes_applied", []) == []
 
 
 class TestValidateActionParser:
@@ -531,7 +788,7 @@ class TestValidateActionParser:
             "focused-review", "validate-action",
             "--records", str(records),
             "--run-id", RUN_ID,
-            "--record-ids", "r1",
+            "--ids", "r1",
             "--action", "focused-review.exec",
         ]
         with patch("sys.argv", argv):
@@ -553,13 +810,37 @@ class TestValidateActionParser:
                 "focused-review", "validate-action",
                 "--records", str(records),
                 "--run-id", RUN_ID,
-                "--record-ids", "r1",
+                "--ids", "r1",
                 "--action", verb,
             ]
             with patch("sys.argv", argv):
                 with patch.object(fr, "validate_action_command", spy):
                     fr.main()
             assert captured["action"] == verb
+
+    def test_parser_accepts_apply_rule_fixes(self, tmp_path: Path) -> None:
+        # The --apply-rule-fixes store_true flag parses and reaches the handler
+        # (the gate that binds it to the fix verb lives in the handler, not argparse).
+        records = _write_records(tmp_path)
+        captured: dict[str, object] = {}
+
+        def spy(args: argparse.Namespace) -> None:
+            captured["apply_rule_fixes"] = args.apply_rule_fixes
+            captured["ids"] = args.ids
+
+        argv = [
+            "focused-review", "validate-action",
+            "--records", str(records),
+            "--run-id", RUN_ID,
+            "--ids", "RQ1",
+            "--action", "focused-review.fix",
+            "--apply-rule-fixes",
+        ]
+        with patch("sys.argv", argv):
+            with patch.object(fr, "validate_action_command", spy):
+                fr.main()
+        assert captured["apply_rule_fixes"] is True
+        assert captured["ids"] == "RQ1"
 
 
 # ---------------------------------------------------------------------------

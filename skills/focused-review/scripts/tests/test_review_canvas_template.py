@@ -236,11 +236,36 @@ def test_script_uses_document_level_delegation(template_text: str):
     assert "document.addEventListener" in template_text
 
 
-def test_script_posts_namespaced_action_payload(template_text: str):
+def test_script_posts_unified_action_payload(template_text: str):
     assert "window.parent.postMessage" in template_text
-    # payload shape: { action, run_id, record_ids[], instructions }
-    for key in ("action:", "run_id:", "record_ids:", "instructions:"):
+    # Unified, prefix-disambiguated payload (verdict-model redesign):
+    #   { ids: [r#/RQ#], button: "<bare verb>", text: "<free text>", run_id }
+    for key in ("ids:", "button:", "text:", "run_id:"):
         assert key in template_text, f"postMessage payload missing {key!r}"
+    # The legacy keys are gone — this is an API migration, not an additive change,
+    # so the old shape ({ action, record_ids, instructions }) must not linger.
+    for legacy in ("action:", "record_ids:", "instructions:"):
+        assert legacy not in template_text, f"legacy payload key {legacy!r} still present"
+    # ids unions the selected findings (r#) with the scheduled rule fixes (RQ#),
+    # button is the bare verb (the namespace prefix sliced off), text is the box.
+    assert "Array.from(state.selected).concat(Array.from(state.scheduledRules))" in template_text
+    assert "button: action.slice(NS.length)" in template_text
+    assert "text: instructions()" in template_text
+
+
+def test_script_enables_bar_for_findings_or_rules(template_text: str, fixture_text: str):
+    # The action bar must enable on a findings-only, rules-only, OR mixed selection so
+    # a rule-quality-only fix can be dispatched; both ends count the union of the two.
+    for text in (template_text, fixture_text):
+        assert "state.selected.size + state.scheduledRules.size" in text
+
+
+def test_script_clears_scheduled_rules_on_dispatch(template_text: str, fixture_text: str):
+    # Dispatch resets BOTH selections (findings + scheduled rule fixes) and re-derives
+    # the live preview, so a follow-up action starts clean and the persisted dim (from
+    # the agent's re-render) becomes the only post-action source of truth.
+    for text in (template_text, fixture_text):
+        assert "state.scheduledRules.clear()" in text
 
 
 @pytest.mark.parametrize("action", NAMESPACED_ACTIONS)
