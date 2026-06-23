@@ -2440,20 +2440,20 @@ def _validate_rule_file(value: object, rules_dir: str, add) -> None:
             "rule_file must be a relative path under the rules directory, not absolute",
         )
         return
-    parts = PurePosixPath(raw).parts
-    if ".." in parts:
+    if ".." in Path(raw).parts:
         add("rule_file", "rule_file must not contain '..' path segments")
         return
     if not raw.endswith(".md"):
         add("rule_file", "rule_file must point to a .md rule file")
         return
-    norm_file = "/".join(parts)
-    norm_dir = "/".join(PurePosixPath(rules_dir.replace("\\", "/")).parts) if rules_dir else ""
-    if norm_dir and not norm_file.startswith(norm_dir + "/"):
-        add(
-            "rule_file",
-            f"rule_file must live under the rules directory '{norm_dir}/' (got {value!r})",
-        )
+    if rules_dir:
+        norm_dir = Path(os.path.normpath(rules_dir))
+        if not Path(os.path.normpath(raw)).is_relative_to(norm_dir):
+            add(
+                "rule_file",
+                f"rule_file must live under the rules directory "
+                f"'{norm_dir.as_posix()}' (got {value!r})",
+            )
 
 
 def _rule_file_source_mismatch(rule_source: object, rule_file: object) -> str | None:
