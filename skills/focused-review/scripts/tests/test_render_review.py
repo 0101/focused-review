@@ -182,7 +182,8 @@ def _render_envelope() -> dict:
 
 # The golden review.md for ``_render_envelope()``. This locks the heading/field
 # shape the reporter agent used to hand-author (and which the post-mortem mode
-# parses: the "### {n}." headings and the rule:/concern: provenance labels).
+# parses: each "### {display_number}. ({record_id}) …" heading's (rN) anchor and
+# the rule:/concern: provenance labels).
 GOLDEN_REVIEW_MD = """# Unified Review Report
 
 **Scope:** branch
@@ -201,7 +202,7 @@ GOLDEN_REVIEW_MD = """# Unified Review Report
 
 ## Confirmed Findings
 
-### 1. [High] Null deref in request handler
+### 1. (r1) [High] Null deref in request handler
 
 **File:** `src/a.py:10`
 **Fix complexity:** moderate
@@ -215,7 +216,7 @@ The handler dereferences req.user without a null check.
 
 ---
 
-### 2. [Medium] Duplicated parsing logic
+### 2. (r2) [Medium] Duplicated parsing logic
 
 **File:** `src/b.py:20`
 **Fix complexity:** complex
@@ -231,7 +232,7 @@ The same parse block appears in three methods.
 
 ## Needs Your Decision
 
-### 1. [Low] Magic number in retry loop
+### 1. (r3) [Low] Magic number in retry loop
 
 **File:** `src/c.py`
 **Fix complexity:** quickfix
@@ -243,7 +244,7 @@ Retry count 5 is hardcoded.
 
 ## Pre-existing
 
-### 1. [Medium] Broad except swallows errors
+### 1. (r5) [Medium] Broad except swallows errors
 
 **File:** `src/e.py:88`
 **Fix complexity:** moderate
@@ -300,12 +301,14 @@ class TestReviewMarkdownGolden:
         assert not out.endswith("\n\n")
 
     def test_heading_shape_is_postmortem_parseable(self) -> None:
-        # Post-mortem matches "### {n}. [{sev}] {title}" headings. Numbers restart
-        # per visible bucket, so the needs-decision finding is "### 1." not "### 3.".
+        # Post-mortem selects findings by the globally-unique (record_id) anchor in
+        # each "### {display_number}. ({record_id}) [{sev}] {title}" heading. The
+        # leading display_number restarts per visible bucket, so all three findings
+        # below render "### 1." — only the (rN) anchor disambiguates them.
         out = fr.render_review_markdown(_render_envelope())
-        assert "### 1. [High] Null deref in request handler" in out
-        assert "### 1. [Low] Magic number in retry loop" in out
-        assert "### 1. [Medium] Broad except swallows errors" in out
+        assert "### 1. (r1) [High] Null deref in request handler" in out
+        assert "### 1. (r3) [Low] Magic number in retry loop" in out
+        assert "### 1. (r5) [Medium] Broad except swallows errors" in out
 
     def test_found_by_labels_are_postmortem_parseable(self) -> None:
         # Post-mortem parses "rule:{name}" and "concern:{name} ({model})".
@@ -361,7 +364,7 @@ class TestReviewMarkdownGolden:
         # gating Confirmed tally (D-16).
         out = fr.render_review_markdown(_render_envelope())
         assert "## Pre-existing" in out
-        assert "### 1. [Medium] Broad except swallows errors" in out
+        assert "### 1. (r5) [Medium] Broad except swallows errors" in out
         # It is not folded into the Confirmed section.
         confirmed_block = out.split("## Confirmed Findings", 1)[1].split("## Needs Your Decision", 1)[0]
         assert "Broad except swallows errors" not in confirmed_block
@@ -378,7 +381,7 @@ class TestReviewMarkdownGolden:
         assert not any(line.startswith("### 999.") for line in lines)
         # The title content survives, collapsed onto the one real heading line.
         assert (
-            "### 1. [High] First line ### 999. [Critical] Forged heading" in lines
+            "### 1. (r1) [High] First line ### 999. [Critical] Forged heading" in lines
         )
 
     def test_crlf_in_title_handles_all_newline_forms(self) -> None:
@@ -387,7 +390,18 @@ class TestReviewMarkdownGolden:
         confirmed = next(f for f in env["findings"] if f["verdict"] == "Confirmed")
         confirmed["title"] = "a\rb\nc\r\nd"
         lines = fr.render_review_markdown(env).splitlines()
-        assert "### 1. [High] a b c d" in lines
+        assert "### 1. (r1) [High] a b c d" in lines
+
+    def test_record_id_anchor_precedes_untrusted_title(self) -> None:
+        # The (record_id) anchor the post-mortem matches is rendered BEFORE the
+        # untrusted, flattened title, so a title that embeds a fake "(r99)" cannot
+        # pose as another finding's anchor — the real "### 1. (r1) [High]" prefix
+        # still leads the line, and the spoof text lands inside the title.
+        env = _render_envelope()
+        confirmed = next(f for f in env["findings"] if f["verdict"] == "Confirmed")
+        confirmed["title"] = "(r99) spoof attempt"
+        out = fr.render_review_markdown(env)
+        assert "### 1. (r1) [High] (r99) spoof attempt" in out
 
 
 # ---------------------------------------------------------------------------

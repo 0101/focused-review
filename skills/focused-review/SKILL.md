@@ -34,7 +34,7 @@ Parse the user's argument (available as `$ARGUMENTS`):
 
 - `configure` or `refresh` → Read `REFRESH.md` from the same directory as this skill file and follow its instructions. Pass along the resolved **Script path**, **Rules directory**, **Concerns directory**, **Defaults directory**, and **Configured sources** values.
 - `post-comments` (followed by a PR URL) → Read `POST-COMMENTS.md` from the same directory as this skill file and follow its instructions. Pass along the resolved **Script path** and the **PR URL** (the remaining argument text after `post-comments`).
-- `post-mortem` (with optional finding numbers) → **Post-Mortem Mode**
+- `post-mortem` (with optional finding ids) → **Post-Mortem Mode**
 
 If none of the above match, proceed to Step B.
 
@@ -324,7 +324,7 @@ python {script_path} render-review --records {run_dir}/records.json --repo .
       **Date:** {ISO timestamp}
       **Pipeline:** Discovery ({rule_count} rules, {concern_count} concerns) -> Consolidation -> Assessment
       ## Summary  (a | Verdict | Count | table with ONLY these rows: Confirmed / Needs your decision / Pre-existing — there is NO Invalid row)
-      ## Confirmed Findings  (in-scope Confirmed; ### {n}. [{severity}] {title}; File `path:line`; Fix complexity; Found by {sources}; description; > Assessment:; Suggestion:)
+      ## Confirmed Findings  (in-scope Confirmed; ### {n}. ({record_id}) [{severity}] {title}; File `path:line`; Fix complexity; Found by {sources}; description; > Assessment:; Suggestion:)
       ## Needs Your Decision  (in-scope Questionable; same shape; each item names the decision and carries the agent's recommendation, e.g. "suggest skip")
       ## Pre-existing  (Confirmed findings tagged `introduced_by: pre-existing`; same shape; non-gating)
       ## Rule Quality Notes  (only if any; bullet per rule: observation — suggestion)
@@ -403,17 +403,19 @@ Read the report file.
 
 ### Step 2: Identify invalid findings
 
-Parse the arguments after `post-mortem` for finding numbers. Accept comma-separated, space-separated, or mixed (e.g., `1,3,5` or `1 3 5` or `1, 3, 5`).
+Each review.md finding heading has the shape `### {display_number}. ({record_id}) [{severity}] {title}`. The leading `{display_number}` restarts at 1 in every section (Confirmed, Needs Your Decision, Pre-existing), so it is **not** unique across the report — always identify a finding by its parenthesized `record_id` (e.g. `(r1)`), which is globally unique.
 
-If no numbers provided, present the numbered summary table from the report and ask the user which findings they consider invalid. Wait for their response before continuing.
+Parse the arguments after `post-mortem` for **finding ids** (`record_id`s). Accept comma-separated, space-separated, or mixed (e.g., `r1,r3,r5` or `r1 r3 r5` or `r1, r3, r5`).
 
-For each specified number, locate the corresponding finding in the report (match the `### {n}.` heading in the Confirmed, Needs Your Decision, or Pre-existing sections). Extract:
+If no ids are provided, present the report's findings grouped by section — each shown with its `(rN)` id, severity, file, and title — and ask the user which findings they consider invalid. Wait for their response before continuing.
+
+For each specified id, locate the matching finding by its `(rN)` anchor in the `### {display_number}. ({record_id}) …` heading (search the Confirmed, Needs Your Decision, and Pre-existing sections). Extract:
 - **Title** and **severity**
 - **File** path
 - **Provenance** line (e.g., `rule:sealed-classes, concern:bugs (opus)`)
 - **Description** and **assessment reasoning**
 
-If a number doesn't match any finding, warn the user and skip it.
+If an id matches no finding, warn the user and skip it. If the user supplies a bare number instead of an `rN` id, explain that section numbers repeat across sections and ask them to re-specify using the `(rN)` ids shown in the headings.
 
 ### Step 3: Trace provenance to sources
 

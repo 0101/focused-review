@@ -2831,8 +2831,8 @@ def validate_records_command(args: argparse.Namespace) -> None:
 # validated findings by verdict, formats the provenance labels, and templates the
 # three artifacts. review.md preserves the heading/field shape the reporter used
 # to hand-author (locked by a golden-file test, and read downstream by the
-# post-mortem mode, which matches the "### {n}." headings and the
-# rule:/concern: provenance labels). The canvas fills the version-controlled
+# post-mortem mode, which matches each finding's "(record_id)" heading anchor and
+# the rule:/concern: provenance labels). The canvas fills the version-controlled
 # template, html.escape()-ing every structured text field.
 # See docs/spec/canvas-review-report.md.
 # ---------------------------------------------------------------------------
@@ -3109,12 +3109,23 @@ def _rule_dependency_map(findings: list, notes: list) -> dict[str, list[str]]:
 def _md_finding_block(finding: dict) -> str:
     """One Confirmed/Questionable finding block in the review.md shape."""
     parts: list[str] = []
-    # Flatten the title to a single line before it lands in the
-    # "### n. [severity] title" heading. A raw CR/LF (or block markup) in the title
-    # would otherwise inject a forged heading / markdown into review.md, which the
-    # post-mortem mode then parses as a real "### n." heading.
+    # Heading shape: "### {display_number}. ({record_id}) [severity] title".
+    #
+    # display_number restarts at 1 in every visible bucket (confirmed / needs-
+    # decision / pre-existing), so the leading "### {n}." is NOT unique across the
+    # document. The globally-unique record_id (validated ^r[0-9]+$) is rendered as a
+    # parenthesised anchor so the post-mortem mode can select a finding
+    # unambiguously (SKILL.md "Post-Mortem Mode" Step 2 matches on the "(rN)"
+    # anchor, not the bare number). The leading "### {display_number}." is kept
+    # verbatim so the post-comments reader, which extracts that integer for its
+    # inline_comments[].id, is unaffected (POST-COMMENTS.md Step 4a).
+    #
+    # Both record_id and display_number precede the _flatten()-ed (CR/LF-collapsed)
+    # untrusted title, so a hostile title can neither forge a second "### " heading
+    # line nor spoof a different finding's "(rN)" anchor.
     parts.append(
         f"### {finding.get('display_number')}. "
+        f"({finding.get('record_id')}) "
         f"[{finding.get('severity', '')}] {_flatten(finding.get('title', ''))}"
     )
     meta = [
