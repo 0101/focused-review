@@ -26,7 +26,10 @@
     <!-- FR:PREEXISTING_COUNT -->   integer shown in the Pre-existing section header.
     <!-- FR:PREEXISTING_ROWS -->    one ".finding" block per pre-existing (non-gating) finding.
     <!-- FR:QUALITY_SUMMARY -->     e.g. "Rule Quality Notes (2)".
-    <!-- FR:QUALITY_NOTES -->       ".quality-item" blocks.
+    <!-- FR:QUALITY_NOTES -->       ".quality-item" blocks. Each note with an RQ# id carries a
+                                    "quality-cb" checkbox (data-rq-id="RQ#"); checking it
+                                    live-greys the findings whose entire rule-source set is
+                                    scheduled to be fixed (client-only preview, no round-trip).
 
   Invalid findings are NEVER rendered (no Invalid section, badge, or summary row); they
   stay in records.json only. A finding's verdict bucket is decided server-side from its
@@ -39,6 +42,9 @@
   Per-finding ".finding" block shape (Python emits this into the *_ROWS placeholders):
 
     <div class="finding" data-record-id="STABLE_RECORD_ID">
+      <!-- a costly fix adds class "costly"; a persisted disregard/invalidation adds
+           "dimmed"; a finding a rule fix could kill adds data-rule-deps="RQ1 RQ2"
+           (the RQ ids that must ALL be checked to live-grey it). -->
       <input type="checkbox" class="row-cb" aria-label="Select finding N: TITLE">
       <details class="finding-d" name="findings">
         <summary class="finding-summary">
@@ -231,9 +237,30 @@
     cursor: pointer;
   }
 
-  /* Dimmed (disregarded) */
+  /* Dimmed (disregarded, or invalidated by an applied rule fix) */
   .finding.dimmed { opacity: 0.35; }
   .finding.dimmed .title { text-decoration: line-through; }
+
+  /* Live rule-fix preview: checking a rule-quality note greys the rows whose every
+     rule source is scheduled to be fixed (client-only, no agent round-trip). Same
+     look as .dimmed but a distinct class, so a transient preview is never mistaken
+     for persisted disregard run-state by restoreState(). */
+  .finding.pending-invalid { opacity: 0.35; }
+  .finding.pending-invalid .title { text-decoration: line-through; }
+
+  /* Reason pill on a server-dimmed invalidated row ("invalidated — rule RQ2 fixed"). */
+  .dim-reason {
+    display: inline-block;
+    margin-left: 6px;
+    padding: 0 7px;
+    border-radius: 8px;
+    font-size: 11px;
+    font-weight: 600;
+    white-space: nowrap;
+    background: #45475a;
+    color: #bac2de;
+    vertical-align: middle;
+  }
 
   /* Large/costly fix flag (fix_complexity == "complex"), orthogonal to the verdict
      bucket: a subtle row tint + a tag pill on the title. Pure presentation — it
@@ -403,6 +430,15 @@
 
   .quality-item { margin: 8px 0; color: #a6adc8; }
   .quality-item strong { color: #f9e2af; }
+  .quality-cb {
+    accent-color: #89b4fa;
+    width: 15px;
+    height: 15px;
+    cursor: pointer;
+    margin-right: 6px;
+    vertical-align: middle;
+  }
+  .quality-id { color: #f9e2af; font-weight: 600; margin-right: 2px; }
 
   /* ── Sticky action bar ──────────────────────────────────────────────────── */
   .action-bar {
@@ -470,6 +506,7 @@
   var state = {
     selected: new Set(),                 // record_ids currently checked
     disregarded: new Set(),              // record_ids marked disregarded (dimmed)
+    scheduledRules: new Set(),           // RQ ids whose rule-fix checkbox is checked
     openId: null                         // record_id of the open accordion, if any
   };
 
@@ -520,7 +557,19 @@
     });
   }
 
-  // Checkbox changes: per-row and section select-all.
+  // Live rule-fix preview: grey every finding whose ENTIRE rule-source set is
+  // scheduled to be fixed. data-rule-deps (from _rule_dependency_map) lists the RQ
+  // ids a row depends on; the row greys only once they are all checked. Pure
+  // client-side — no agent round-trip — and a distinct class from the persisted dim.
+  function applyRulePreview() {
+    all(".finding[data-rule-deps]").forEach(function (f) {
+      var deps = (f.getAttribute("data-rule-deps") || "").split(/\s+/).filter(Boolean);
+      var dies = deps.length > 0 && deps.every(function (rq) { return state.scheduledRules.has(rq); });
+      f.classList.toggle("pending-invalid", dies);
+    });
+  }
+
+  // Checkbox changes: per-row, section select-all, and rule-quality scheduling.
   document.addEventListener("change", function (e) {
     var t = e.target;
     if (!t || !t.classList) return;
@@ -539,6 +588,10 @@
       });
       syncSections();
       updateBar();
+    } else if (t.classList.contains("quality-cb")) {
+      var rq = t.getAttribute("data-rq-id");
+      if (rq) { if (t.checked) state.scheduledRules.add(rq); else state.scheduledRules.delete(rq); }
+      applyRulePreview();
     }
   });
 
@@ -619,6 +672,16 @@
         if (d && !d.open) d.open = true;
       }
     });
+    // Re-apply the rule-fix preview after a morph: prune scheduled RQ ids to those
+    // still present, re-check their boxes, and re-grey the rows their combined fix
+    // would kill (a fresh DOM loses the transient class until we re-derive it).
+    var presentRq = new Set();
+    all(".quality-cb").forEach(function (cb) { presentRq.add(cb.getAttribute("data-rq-id")); });
+    pruneTo(state.scheduledRules, presentRq);
+    all(".quality-cb").forEach(function (cb) {
+      cb.checked = state.scheduledRules.has(cb.getAttribute("data-rq-id"));
+    });
+    applyRulePreview();
     syncSections();
     updateBar();
   }

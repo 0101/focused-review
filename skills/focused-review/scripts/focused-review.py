@@ -2785,19 +2785,28 @@ def _parse_source_label(label: str) -> tuple[str, str, str | None]:
     return ("other", text, None)
 
 
+def _raw_source_labels(provenance: object) -> list[str]:
+    """The finding's raw, stripped provenance source labels in order.
+
+    Each entry is either a bare string or an object carrying a ``source`` field
+    (validated in Phase 2). Returns the canonical labels verbatim (e.g.
+    ``rule--no-comments``, ``concern--bugs--opus``) so callers can both classify
+    them (:func:`_parse_source_label`) and match them against a rule-quality
+    note's canonical ``rule_source``.
+    """
+    labels: list[str] = []
+    if not isinstance(provenance, list):
+        return labels
+    for entry in provenance:
+        label = entry.get("source") if isinstance(entry, dict) else entry
+        if isinstance(label, str) and label.strip():
+            labels.append(label.strip())
+    return labels
+
+
 def _provenance_sources(provenance: object) -> list[tuple[str, str, str | None]]:
     """Parse a finding's provenance list into ordered ``(kind, name, model)`` tuples."""
-    sources: list[tuple[str, str, str | None]] = []
-    if not isinstance(provenance, list):
-        return sources
-    for entry in provenance:
-        if isinstance(entry, dict):
-            label = entry.get("source")
-        else:
-            label = entry
-        if isinstance(label, str) and label.strip():
-            sources.append(_parse_source_label(label))
-    return sources
+    return [_parse_source_label(label) for label in _raw_source_labels(provenance)]
 
 
 def _group_sources(
@@ -2898,6 +2907,72 @@ def _partition_findings(findings: list) -> tuple[list, list, list]:
     for bucket in (confirmed, needs_decision, pre_existing):
         bucket.sort(key=lambda f: (f.get("display_number") is None, f.get("display_number") or 0))
     return confirmed, needs_decision, pre_existing
+
+
+# ── rule-quality dependency map (deterministic preview) ──────────────────────
+
+
+def _rule_dependency_map(findings: list, notes: list) -> dict[str, list[str]]:
+    """Map each *invalidatable* finding to the rule-quality note ids it depends on.
+
+    Returns ``{record_id: [RQ#, ...]}`` for findings that a rule fix could
+    invalidate. A finding qualifies only when **all of its sources are rules
+    being fixed** (Decision 12): it has at least one rule source, **no** concern
+    source (an independent justification keeps it alive), no unrecognised source,
+    and **every** one of its rule sources is named by a rule-quality note (so the
+    listed RQ ids fully account for why the finding exists). The note ids are
+    de-duplicated and emitted in the finding's provenance order.
+
+    This is the single source of truth for the canvas live-preview (each row gets
+    a ``data-rule-deps`` list and greys only once *all* its RQ ids are checked)
+    and for resolving which ``record_id``s a scheduled rule fix invalidates: given
+    an applied RQ-id set ``A``, the dying findings are exactly
+    ``[rid for rid, deps in map.items() if set(deps) <= A]``.
+
+    A finding kept alive by a concern source, or carrying a rule source with no
+    corresponding note (which can never be "applied" — no checkbox), is absent
+    from the map, so the canvas never live-greys it.
+    """
+    # Canonical rule_source label -> the note id that fixes it. First note wins on
+    # the (schema-forbidden) chance two notes name the same source.
+    source_to_note: dict[str, str] = {}
+    for note in notes:
+        if not isinstance(note, dict):
+            continue
+        source = note.get("rule_source")
+        note_id = note.get("id")
+        if _is_nonempty_str(source) and _is_nonempty_str(note_id):
+            source_to_note.setdefault(source.strip(), note_id)
+
+    deps: dict[str, list[str]] = {}
+    for finding in findings:
+        if not isinstance(finding, dict):
+            continue
+        record_id = finding.get("record_id")
+        if not _is_nonempty_str(record_id):
+            continue
+        rule_labels: list[str] = []
+        keep_alive = False  # a concern or unrecognised source blocks invalidation
+        for label in _raw_source_labels(finding.get("provenance")):
+            kind, _, _ = _parse_source_label(label)
+            if kind == "rule":
+                rule_labels.append(label)
+            else:
+                keep_alive = True
+        if keep_alive or not rule_labels:
+            continue
+        note_ids: list[str] = []
+        covered = True
+        for label in rule_labels:
+            note_id = source_to_note.get(label)
+            if note_id is None:
+                covered = False  # an un-noted rule can never be checked/fixed
+                break
+            if note_id not in note_ids:
+                note_ids.append(note_id)
+        if covered and note_ids:
+            deps[record_id] = note_ids
+    return deps
 
 
 # ── review.md ────────────────────────────────────────────────────────────────
@@ -3257,7 +3332,12 @@ def _is_costly_fix(finding: dict) -> bool:
 
 
 def _canvas_finding_block(
-    finding: dict, detail_html: str | None = None, dimmed: bool = False
+    finding: dict,
+    detail_html: str | None = None,
+    dimmed: bool = False,
+    *,
+    dim_reason: str | None = None,
+    rule_deps: list[str] | None = None,
 ) -> str:
     """One ``.finding`` accordion block for the canvas (every text field escaped).
 
@@ -3267,10 +3347,19 @@ def _canvas_finding_block(
     structural fields only — the fail-closed "plain escaped text" behaviour.
 
     ``dimmed`` bakes the ``dimmed`` class onto the block so a finding the user
-    persisted as *disregarded* (run state, read back by render-review) stays dimmed
-    across every re-render — not just within the live JS session. The action-bar
-    script seeds its own disregarded set from these server-rendered classes, so the
-    persisted dim survives a cold canvas load too, not only an in-session morph.
+    persisted as *disregarded* — or invalidated by an applied rule fix (run state,
+    read back by render-review) — stays dimmed across every re-render, not just
+    within the live JS session. The action-bar script seeds its own disregarded
+    set from these server-rendered classes, so the persisted dim survives a cold
+    canvas load too, not only an in-session morph.
+
+    ``dim_reason`` (e.g. "invalidated — rule RQ2 fixed") renders a small pill on
+    the title explaining why the row is dimmed; it is used for rule-fix
+    invalidation, where the dim carries an audit reason rather than being a silent
+    disregard. ``rule_deps`` is the finding's rule-quality dependency list (RQ ids
+    from :func:`_rule_dependency_map`): when present it is baked into a
+    ``data-rule-deps`` attribute so the canvas can live-grey the row once *all* its
+    RQ checkboxes are checked, with no agent round-trip.
 
     A large/costly fix (``fix_complexity == "complex"``) additionally gets the
     ``costly`` row class (a subtle tint) and a ``fix-tag`` pill on the title —
@@ -3322,11 +3411,14 @@ def _canvas_finding_block(
         )
     detail_content = "\n".join(sections)
 
-    # The fix-tag is trusted constant markup appended AFTER the escaped title, so a
-    # hostile title can never break out of the span (it is still html.escape()-d).
+    # The fix-tag / dim-reason are trusted constant/derived markup appended AFTER
+    # the escaped title, so a hostile title can never break out of the span (it is
+    # still html.escape()-d). The reason text is escaped as well.
     title_html = html.escape(str(title))
     if costly:
         title_html += ' <span class="fix-tag">⚠ Large fix</span>'
+    if dim_reason:
+        title_html += f' <span class="dim-reason">{html.escape(str(dim_reason))}</span>'
 
     class_names = ["finding"]
     if dimmed:
@@ -3334,8 +3426,14 @@ def _canvas_finding_block(
     if costly:
         class_names.append("costly")
     classes = " ".join(class_names)
+    # data-rule-deps lists the RQ ids whose collective fix would invalidate this
+    # finding (omitted when the finding can never be rule-invalidated), so the
+    # live-preview JS greys the row only once every listed checkbox is checked.
+    deps_attr = ""
+    if rule_deps:
+        deps_attr = f' data-rule-deps="{html.escape(" ".join(rule_deps), quote=True)}"'
     return (
-        f'      <div class="{classes}" data-record-id="{html.escape(str(rid), quote=True)}">\n'
+        f'      <div class="{classes}" data-record-id="{html.escape(str(rid), quote=True)}"{deps_attr}>\n'
         f'        <input type="checkbox" class="row-cb" aria-label="{html.escape(aria, quote=True)}">\n'
         '        <details class="finding-d" name="findings">\n'
         '          <summary class="finding-summary">\n'
@@ -3354,11 +3452,28 @@ def _canvas_finding_block(
 
 
 def _canvas_quality_item(note: dict) -> str:
-    """One ``.quality-item`` block for the canvas."""
+    """One ``.quality-item`` block for the canvas.
+
+    When the note carries a valid ``RQ#`` id, the item gains a schedulable
+    checkbox (``quality-cb`` + ``data-rq-id``) so checking it live-previews which
+    findings the rule fix would invalidate (the suggested change is shown inline).
+    A note without a usable id renders read-only (no checkbox).
+    """
+    rule = html.escape(str(note.get("rule", "")))
+    observation = html.escape(str(note.get("observation", "")))
+    suggestion = html.escape(str(note.get("suggestion", "")))
+    body = f"<strong>{rule}</strong>: {observation} — {suggestion}"
+
+    note_id = note.get("id")
+    if not _is_nonempty_str(note_id):
+        return f'    <div class="quality-item">{body}</div>'
+
+    rq = html.escape(str(note_id), quote=True)
+    aria = html.escape(f"Schedule rule fix {note_id}: {note.get('rule', '')}", quote=True)
     return (
-        f'    <div class="quality-item"><strong>{html.escape(str(note.get("rule", "")))}</strong>: '
-        f'{html.escape(str(note.get("observation", "")))} — '
-        f'{html.escape(str(note.get("suggestion", "")))}</div>'
+        f'    <div class="quality-item" data-rq-id="{rq}">'
+        f'<input type="checkbox" class="quality-cb" data-rq-id="{rq}" aria-label="{aria}">'
+        f'<span class="quality-id">{html.escape(str(note_id))}</span> {body}</div>'
     )
 
 
@@ -3368,6 +3483,8 @@ def render_canvas_html(
     details: dict[str, str] | None = None,
     disregarded: set[str] | None = None,
     parent_origin: str = DEFAULT_PARENT_ORIGIN,
+    *,
+    invalidated: dict[str, str] | None = None,
 ) -> str:
     """Fill the canvas template with pre-rendered, escaped markup.
 
@@ -3389,11 +3506,20 @@ def render_canvas_html(
 
     ``disregarded`` is the set of ``record_id``s persisted as disregarded run state
     (read back from ``run-state.json``); their ``.finding`` block is rendered with
-    the ``dimmed`` class so the dim survives across re-renders. Passed as data (no
-    file IO here) to keep this function pure and testable, mirroring ``details``.
+    the ``dimmed`` class so the dim survives across re-renders. ``invalidated`` maps
+    a ``record_id`` to a dim *reason* (e.g. "invalidated — rule RQ2 fixed") for
+    findings a persisted rule fix has knocked out; render-review unions it with
+    ``disregarded`` and reuses the same dim mechanism (not a hard drop), so the
+    invalidation keeps an audit trail. Both are passed as data (no file IO here) to
+    keep this function pure and testable, mirroring ``details``.
+
+    The rule-quality dependency map (:func:`_rule_dependency_map`) is computed from
+    the envelope and threaded onto each row's ``data-rule-deps`` so the canvas can
+    live-grey the rows a *scheduled* rule fix would invalidate — no agent round-trip.
     """
     details = details or {}
     disregarded = disregarded or set()
+    invalidated = invalidated or {}
     run = data.get("run", {})
     findings = data.get("findings", [])
     notes = data.get("rule_quality_notes", []) or []
@@ -3403,9 +3529,20 @@ def render_canvas_html(
     # separately. The hidden bucket (Invalid + pre-existing Questionable) is dropped.
     actionable_count = len(confirmed) + len(needs_decision)
 
+    # Deterministic preview map (record_id -> [RQ ids]) so each row can advertise the
+    # rule fixes that would invalidate it; the canvas greys it once they are all checked.
+    rule_deps = _rule_dependency_map(findings, notes)
+
     def block(finding: dict) -> str:
         rid = finding.get("record_id")
-        return _canvas_finding_block(finding, details.get(rid), dimmed=rid in disregarded)
+        reason = invalidated.get(rid)
+        return _canvas_finding_block(
+            finding,
+            details.get(rid),
+            dimmed=(rid in disregarded or reason is not None),
+            dim_reason=reason,
+            rule_deps=rule_deps.get(rid),
+        )
 
     meta = (
         f"Scope: {html.escape(str(run.get('scope', '')))} · "
@@ -3540,19 +3677,25 @@ def render_review(args: argparse.Namespace) -> None:
 
     # Disregarded run state: render-review re-applies the user's persisted
     # "disregard" decisions (written by `validate-action --apply-disregard`) so the
-    # canvas dims those findings on every re-render. Fail-open (empty) when the
-    # state file is absent/unreadable or belongs to a different run_id.
+    # canvas dims those findings on every re-render. Rule-fix invalidations
+    # (`rule_fixes_applied`) are the sibling key: their `invalidated_record_ids` are
+    # unioned in and dimmed with a reason ("invalidated — rule RQ# fixed"), reusing
+    # the same dim mechanism (an audit trail, not a hard drop). Fail-open (empty)
+    # when the state file is absent/unreadable or belongs to a different run_id.
     run = data.get("run", {}) if isinstance(data, dict) else {}
     expected_run_id = run.get("run_id") if isinstance(run, dict) else None
     run_state = load_run_state(run_dir, expected_run_id=expected_run_id)
     disregarded = set(run_state.get("disregarded", []))
+    invalidated = _invalidated_reasons(run_state.get("rule_fixes_applied", []))
 
     # Render both artifacts in memory, THEN write — so any render-time failure
     # also leaves no partial output. review.md is Markdown (raw text fields, no
     # HTML escaping); the canvas is ALWAYS written (gitignored, inert when
     # Treemon is down).
     review_md = render_review_markdown(data)
-    canvas_html = render_canvas_html(data, template, details, disregarded, parent_origin)
+    canvas_html = render_canvas_html(
+        data, template, details, disregarded, parent_origin, invalidated=invalidated
+    )
     _write_text(review_out, review_md)
     _write_text(canvas_out, canvas_html)
 
@@ -3584,8 +3727,10 @@ def render_review(args: argparse.Namespace) -> None:
 DISREGARD_ACTION = "focused-review.disregard"
 VALID_ACTIONS = ("focused-review.fix", DISREGARD_ACTION, "focused-review.document")
 
-# Per-run state the canvas re-applies across renders (currently: disregarded ids).
-# Lives beside records.json in the run directory.
+# Per-run state the canvas re-applies across renders: the `disregarded` record_ids
+# (a silent dim) and `rule_fixes_applied` — the rule fixes the agent has committed,
+# whose `invalidated_record_ids` dim with a reason. Both are add-only and
+# run_id-stamped. Lives beside records.json in the run directory.
 RUN_STATE_FILENAME = "run-state.json"
 
 
@@ -3594,16 +3739,49 @@ def _run_state_path(run_dir: str | None) -> str:
     return os.path.join(run_dir or ".", RUN_STATE_FILENAME)
 
 
+def _sanitize_rule_fixes(raw: object) -> list[dict]:
+    """Normalize the persisted ``rule_fixes_applied`` list, dropping junk entries.
+
+    Each kept entry is ``{rule_id, rule_source, invalidated_record_ids[]}`` with a
+    non-empty ``rule_id`` (the identity); ``rule_source`` defaults to ``""`` and
+    only string ``record_id``s survive. A non-list, or an entry missing its
+    ``rule_id``, is skipped — the dim is additive, so malformed state must never
+    raise or block the always-written canvas.
+    """
+    fixes: list[dict] = []
+    if not isinstance(raw, list):
+        return fixes
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        rule_id = entry.get("rule_id")
+        if not _is_nonempty_str(rule_id):
+            continue
+        ids_raw = entry.get("invalidated_record_ids")
+        ids = [r for r in ids_raw if _is_nonempty_str(r)] if isinstance(ids_raw, list) else []
+        rule_source = entry.get("rule_source")
+        fixes.append(
+            {
+                "rule_id": rule_id,
+                "rule_source": rule_source if _is_nonempty_str(rule_source) else "",
+                "invalidated_record_ids": ids,
+            }
+        )
+    return fixes
+
+
 def load_run_state(run_dir: str | None, expected_run_id: str | None = None) -> dict:
     """Read ``{run_dir}/run-state.json``; fail-open to an empty state.
 
     The persisted run state holds the ``disregarded`` record_ids the canvas dims
-    on every re-render. Any read/parse problem — or a ``run_id`` that does not
+    on every re-render and the sibling ``rule_fixes_applied`` entries (each
+    ``{rule_id, rule_source, invalidated_record_ids[]}``) whose invalidated rows are
+    dimmed with a reason. Any read/parse problem — or a ``run_id`` that does not
     match *expected_run_id* (stale state from a different run) — yields an empty
-    state: disregard is an additive canvas affordance, never a hard dependency, so
-    a missing or unreadable file must never block the always-written canvas.
+    state: the dim is an additive canvas affordance, never a hard dependency, so a
+    missing or unreadable file must never block the always-written canvas.
     """
-    empty: dict = {"disregarded": []}
+    empty: dict = {"disregarded": [], "rule_fixes_applied": []}
     path = _run_state_path(run_dir)
     try:
         with open(path, encoding="utf-8") as fh:
@@ -3622,7 +3800,33 @@ def load_run_state(run_dir: str | None, expected_run_id: str | None = None) -> d
             return empty
     raw = data.get("disregarded")
     disregarded = [r for r in raw if _is_nonempty_str(r)] if isinstance(raw, list) else []
-    return {"disregarded": disregarded}
+    return {
+        "disregarded": disregarded,
+        "rule_fixes_applied": _sanitize_rule_fixes(data.get("rule_fixes_applied")),
+    }
+
+
+def _write_run_state(
+    run_dir: str | None,
+    run_id: str,
+    disregarded: list[str],
+    rule_fixes_applied: list[dict],
+) -> dict:
+    """Serialize the full run-state envelope (both sibling keys) and write it.
+
+    Both persist helpers route through here so writing one key always preserves
+    the other — applying a disregard never wipes the recorded rule fixes, and
+    vice-versa. The shape is ``{schema_version, run_id, disregarded[],
+    rule_fixes_applied[]}``.
+    """
+    state = {
+        "schema_version": RECORDS_SCHEMA_VERSION,
+        "run_id": run_id,
+        "disregarded": list(disregarded),
+        "rule_fixes_applied": list(rule_fixes_applied),
+    }
+    _write_text(_run_state_path(run_dir), json.dumps(state, indent=2) + "\n")
+    return state
 
 
 def persist_disregard(run_dir: str | None, run_id: str, record_ids: list[str]) -> dict:
@@ -3630,7 +3834,8 @@ def persist_disregard(run_dir: str | None, run_id: str, record_ids: list[str]) -
 
     Disregard is monotonic within a run (add-only): the existing set is preserved
     and new ids appended in first-seen order, so render-review re-applies the dim
-    on every subsequent re-render. Returns the persisted state dict. The caller is
+    on every subsequent re-render. The sibling ``rule_fixes_applied`` key is read
+    back and re-written untouched. Returns the persisted state dict. The caller is
     expected to have validated *record_ids* (via :func:`validate_action`) first.
     """
     existing = load_run_state(run_dir, expected_run_id=run_id)
@@ -3640,13 +3845,71 @@ def persist_disregard(run_dir: str | None, run_id: str, record_ids: list[str]) -
         if _is_nonempty_str(rid) and rid not in seen:
             seen.add(rid)
             disregarded.append(rid)
-    state = {
-        "schema_version": RECORDS_SCHEMA_VERSION,
-        "run_id": run_id,
-        "disregarded": disregarded,
-    }
-    _write_text(_run_state_path(run_dir), json.dumps(state, indent=2) + "\n")
-    return state
+    return _write_run_state(
+        run_dir, run_id, disregarded, existing.get("rule_fixes_applied", [])
+    )
+
+
+def persist_rule_fixes(run_dir: str | None, run_id: str, fixes: list[dict]) -> dict:
+    """Merge applied rule-fix *fixes* into run-state (add-only, run_id-stamped).
+
+    Mirrors :func:`persist_disregard`. Each fix is ``{rule_id, rule_source,
+    invalidated_record_ids[]}``; entries are merged by ``rule_id`` (a re-applied
+    rule unions its invalidated ids, never duplicating or dropping), new rules are
+    appended in first-seen order, and the sibling ``disregarded`` set is preserved.
+    render-review then re-applies the invalidation dim on every subsequent
+    re-render. The caller (the validate-action round-trip) is expected to have
+    resolved the ids via :func:`_rule_dependency_map` first.
+    """
+    existing = load_run_state(run_dir, expected_run_id=run_id)
+    applied = [dict(e) for e in existing.get("rule_fixes_applied", [])]
+    by_rule = {e["rule_id"]: e for e in applied if _is_nonempty_str(e.get("rule_id"))}
+    for fix in fixes:
+        if not isinstance(fix, dict):
+            continue
+        rule_id = fix.get("rule_id")
+        if not _is_nonempty_str(rule_id):
+            continue
+        new_ids = [r for r in (fix.get("invalidated_record_ids") or []) if _is_nonempty_str(r)]
+        rule_source = fix.get("rule_source") if _is_nonempty_str(fix.get("rule_source")) else ""
+        entry = by_rule.get(rule_id)
+        if entry is None:
+            entry = {"rule_id": rule_id, "rule_source": rule_source, "invalidated_record_ids": []}
+            by_rule[rule_id] = entry
+            applied.append(entry)
+        elif rule_source and not entry.get("rule_source"):
+            entry["rule_source"] = rule_source
+        seen = set(entry["invalidated_record_ids"])
+        for rid in new_ids:
+            if rid not in seen:
+                seen.add(rid)
+                entry["invalidated_record_ids"].append(rid)
+    return _write_run_state(run_dir, run_id, existing.get("disregarded", []), applied)
+
+
+def _invalidated_reasons(rule_fixes_applied: object) -> dict[str, str]:
+    """Map each invalidated ``record_id`` to a human dim reason from applied fixes.
+
+    Inverts the persisted ``rule_fixes_applied`` list into ``{record_id: reason}``
+    where the reason names the rule(s) that knocked the finding out — e.g.
+    "invalidated — rule RQ2 fixed", or "invalidated — rules RQ2, RQ3 fixed" when a
+    multi-rule finding lost all its rules. The rule ids are collected in first-seen
+    order so the reason is deterministic across renders.
+    """
+    by_record: dict[str, list[str]] = {}
+    for entry in _sanitize_rule_fixes(rule_fixes_applied):
+        rule_id = entry["rule_id"]
+        for rid in entry["invalidated_record_ids"]:
+            rule_ids = by_record.setdefault(rid, [])
+            if rule_id not in rule_ids:
+                rule_ids.append(rule_id)
+    reasons: dict[str, str] = {}
+    for rid, rule_ids in by_record.items():
+        if len(rule_ids) == 1:
+            reasons[rid] = f"invalidated — rule {rule_ids[0]} fixed"
+        else:
+            reasons[rid] = f"invalidated — rules {', '.join(rule_ids)} fixed"
+    return reasons
 
 
 def _resolve_action_finding(finding: dict) -> dict:

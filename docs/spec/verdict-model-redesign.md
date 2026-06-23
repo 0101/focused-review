@@ -80,6 +80,10 @@ Each run has a `run-state.json` beside `records.json` that already persists `dis
 
 `render-review` unions `disregarded` + every `invalidated_record_ids` to decide which rows are non-actionable. Invalidated rule-findings are **dimmed with a reason** ("invalidated — rule RQ2 fixed"), reusing the disregard dim mechanism, rather than hard-dropped — keeps an audit trail.
 
+**Implementation note (Python APIs already in place).** The preview/persist plumbing exists and is the contract the apply path wires up:
+- `_rule_dependency_map(findings, notes) -> {record_id: [RQ#, …]}` is the single source of truth for *which* findings a scheduled set of rule fixes invalidates (per D-12: rule-only sources, every rule noted). Given an applied RQ-id set `A`, the dying records are `[rid for rid, deps in map.items() if set(deps) <= A]`. The canvas also threads each row's deps onto `data-rule-deps` for the live-grey preview.
+- `persist_rule_fixes(run_dir, run_id, fixes) -> state` writes the `rule_fixes_applied` sibling key (add-only, merged by `rule_id`, `run_id`-stamped, preserves `disregarded`) — the mirror of `persist_disregard`. `render-review` reads it back via `_invalidated_reasons` and dims with the reason pill. The apply path just resolves the posted RQ ids → `fixes` and calls this.
+
 ### Message contract — one message, prefix-disambiguated ids
 
 One unified message handles whatever the user selected — findings, rule-quality notes, or a mix. **Ids carry a type prefix** so a single flat list is unambiguous: findings keep their `record_id` (`r1`, `r2`…); rule-quality notes get a distinct prefix (`RQ1`, `RQ2`…). The message carries the selected ids, the button pressed, and any typed text:

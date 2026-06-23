@@ -578,20 +578,23 @@ class TestRunState:
         assert s3["disregarded"] == ["r1", "r2", "r3"]
 
     def test_load_run_state_absent_is_empty(self, tmp_path: Path) -> None:
-        assert fr.load_run_state(str(tmp_path)) == {"disregarded": []}
+        assert fr.load_run_state(str(tmp_path)) == {"disregarded": [], "rule_fixes_applied": []}
 
     def test_load_run_state_malformed_is_empty(self, tmp_path: Path) -> None:
         (tmp_path / "run-state.json").write_text("{ broken", encoding="utf-8")
-        assert fr.load_run_state(str(tmp_path)) == {"disregarded": []}
+        assert fr.load_run_state(str(tmp_path)) == {"disregarded": [], "rule_fixes_applied": []}
 
     def test_load_run_state_non_dict_is_empty(self, tmp_path: Path) -> None:
         (tmp_path / "run-state.json").write_text("[1, 2]", encoding="utf-8")
-        assert fr.load_run_state(str(tmp_path)) == {"disregarded": []}
+        assert fr.load_run_state(str(tmp_path)) == {"disregarded": [], "rule_fixes_applied": []}
 
     def test_load_run_state_stale_run_id_ignored(self, tmp_path: Path) -> None:
         fr.persist_disregard(str(tmp_path), "OLD-RUN", ["r1"])
         # A different expected run_id => treat the state as stale (empty).
-        assert fr.load_run_state(str(tmp_path), expected_run_id="NEW-RUN") == {"disregarded": []}
+        assert fr.load_run_state(str(tmp_path), expected_run_id="NEW-RUN") == {
+            "disregarded": [],
+            "rule_fixes_applied": [],
+        }
         # Matching run_id => the state is honoured.
         assert fr.load_run_state(str(tmp_path), expected_run_id="OLD-RUN")["disregarded"] == ["r1"]
 
@@ -600,7 +603,10 @@ class TestRunState:
         (tmp_path / "run-state.json").write_text(
             json.dumps({"disregarded": ["r1"]}), encoding="utf-8"
         )
-        assert fr.load_run_state(str(tmp_path), expected_run_id="RID") == {"disregarded": []}
+        assert fr.load_run_state(str(tmp_path), expected_run_id="RID") == {
+            "disregarded": [],
+            "rule_fixes_applied": [],
+        }
         # ...but a raw read (no expected run_id) still surfaces it.
         assert fr.load_run_state(str(tmp_path))["disregarded"] == ["r1"]
 
@@ -610,6 +616,80 @@ class TestRunState:
             encoding="utf-8",
         )
         assert fr.load_run_state(str(tmp_path))["disregarded"] == ["r1", "r2"]
+
+    # -- rule_fixes_applied sibling key -------------------------------------
+
+    def test_persist_rule_fixes_round_trips(self, tmp_path: Path) -> None:
+        state = fr.persist_rule_fixes(
+            str(tmp_path),
+            RUN_ID,
+            [{"rule_id": "RQ1", "rule_source": "rule--no-comments", "invalidated_record_ids": ["r4"]}],
+        )
+        assert state["rule_fixes_applied"] == [
+            {"rule_id": "RQ1", "rule_source": "rule--no-comments", "invalidated_record_ids": ["r4"]}
+        ]
+        # Read back from disk, run_id-stamped.
+        loaded = fr.load_run_state(str(tmp_path), expected_run_id=RUN_ID)
+        assert loaded["rule_fixes_applied"] == state["rule_fixes_applied"]
+
+    def test_persist_rule_fixes_merges_by_rule_id_add_only(self, tmp_path: Path) -> None:
+        fr.persist_rule_fixes(
+            str(tmp_path), RUN_ID,
+            [{"rule_id": "RQ1", "rule_source": "rule--a", "invalidated_record_ids": ["r1"]}],
+        )
+        # Re-applying RQ1 unions ids (no dup); a new rule RQ2 is appended in order.
+        state = fr.persist_rule_fixes(
+            str(tmp_path), RUN_ID,
+            [
+                {"rule_id": "RQ1", "rule_source": "rule--a", "invalidated_record_ids": ["r1", "r2"]},
+                {"rule_id": "RQ2", "rule_source": "rule--b", "invalidated_record_ids": ["r3"]},
+            ],
+        )
+        assert state["rule_fixes_applied"] == [
+            {"rule_id": "RQ1", "rule_source": "rule--a", "invalidated_record_ids": ["r1", "r2"]},
+            {"rule_id": "RQ2", "rule_source": "rule--b", "invalidated_record_ids": ["r3"]},
+        ]
+
+    def test_persist_rule_fixes_preserves_disregarded(self, tmp_path: Path) -> None:
+        fr.persist_disregard(str(tmp_path), RUN_ID, ["r1"])
+        state = fr.persist_rule_fixes(
+            str(tmp_path), RUN_ID,
+            [{"rule_id": "RQ1", "rule_source": "rule--a", "invalidated_record_ids": ["r4"]}],
+        )
+        # The sibling disregarded set is untouched by the rule-fix write.
+        assert state["disregarded"] == ["r1"]
+        assert state["rule_fixes_applied"][0]["rule_id"] == "RQ1"
+
+    def test_persist_disregard_preserves_rule_fixes(self, tmp_path: Path) -> None:
+        fr.persist_rule_fixes(
+            str(tmp_path), RUN_ID,
+            [{"rule_id": "RQ1", "rule_source": "rule--a", "invalidated_record_ids": ["r4"]}],
+        )
+        state = fr.persist_disregard(str(tmp_path), RUN_ID, ["r1"])
+        # Writing a disregard must not wipe the recorded rule fixes.
+        assert state["disregarded"] == ["r1"]
+        assert state["rule_fixes_applied"] == [
+            {"rule_id": "RQ1", "rule_source": "rule--a", "invalidated_record_ids": ["r4"]}
+        ]
+
+    def test_load_run_state_sanitizes_rule_fixes(self, tmp_path: Path) -> None:
+        (tmp_path / "run-state.json").write_text(
+            json.dumps(
+                {
+                    "run_id": RUN_ID,
+                    "disregarded": [],
+                    "rule_fixes_applied": [
+                        "junk",
+                        {"rule_source": "rule--a", "invalidated_record_ids": ["r1"]},  # no rule_id
+                        {"rule_id": "RQ1", "invalidated_record_ids": ["r1", 5, "", "r2"]},
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        assert fr.load_run_state(str(tmp_path))["rule_fixes_applied"] == [
+            {"rule_id": "RQ1", "rule_source": "", "invalidated_record_ids": ["r1", "r2"]}
+        ]
 
 
 # ---------------------------------------------------------------------------
@@ -695,6 +775,63 @@ class TestDisregardPersistsAcrossRerender:
         # run-state.json from a different run must not dim the current run's findings.
         records = _write_records(tmp_path)
         fr.persist_disregard(str(tmp_path), "SOME-OTHER-RUN", ["r1"])
+        canvas = tmp_path / "canvas.html"
+        fr.render_review(_render_args(records, run_dir=str(tmp_path), canvas_out=str(canvas)))
+        assert _dimmed_ids(canvas.read_text(encoding="utf-8")) == set()
+
+
+# ---------------------------------------------------------------------------
+# rule-fix invalidation persists across a re-render (run-state -> render-review)
+# ---------------------------------------------------------------------------
+
+
+class TestRuleFixInvalidationPersistsAcrossRerender:
+    def test_applied_rule_fix_dims_with_reason_and_persists(self, tmp_path: Path) -> None:
+        records = _write_records(tmp_path)
+        canvas = tmp_path / "canvas.html"
+
+        # 1) Record an applied rule fix that invalidates r1 (writes run-state.json).
+        fr.persist_rule_fixes(
+            str(tmp_path), RUN_ID,
+            [{"rule_id": "RQ1", "rule_source": "rule--simplicity", "invalidated_record_ids": ["r1"]}],
+        )
+
+        # 2) Render — r1 is dimmed AND carries the audit reason pill; r2 is plain.
+        fr.render_review(_render_args(records, run_dir=str(tmp_path), canvas_out=str(canvas)))
+        html1 = canvas.read_text(encoding="utf-8")
+        assert "r1" in _dimmed_ids(html1)
+        assert "r2" in _plain_ids(html1)
+        assert '<span class="dim-reason">invalidated — rule RQ1 fixed</span>' in html1
+
+        # 3) Re-render from the same records.json — the invalidation dim PERSISTS.
+        fr.render_review(_render_args(records, run_dir=str(tmp_path), canvas_out=str(canvas)))
+        html2 = canvas.read_text(encoding="utf-8")
+        assert "r1" in _dimmed_ids(html2)
+        assert '<span class="dim-reason">invalidated — rule RQ1 fixed</span>' in html2
+
+    def test_disregard_and_rule_fix_coexist_on_render(self, tmp_path: Path) -> None:
+        # The two run-state keys are independent: a disregard and a rule-fix
+        # invalidation both dim their own rows in the same render.
+        records = _write_records(tmp_path)
+        canvas = tmp_path / "canvas.html"
+        fr.persist_disregard(str(tmp_path), RUN_ID, ["r2"])
+        fr.persist_rule_fixes(
+            str(tmp_path), RUN_ID,
+            [{"rule_id": "RQ1", "rule_source": "rule--simplicity", "invalidated_record_ids": ["r1"]}],
+        )
+        fr.render_review(_render_args(records, run_dir=str(tmp_path), canvas_out=str(canvas)))
+        html = canvas.read_text(encoding="utf-8")
+        assert {"r1", "r2"} <= _dimmed_ids(html)
+        # Only the rule-fix row gets an audit reason; the plain disregard does not.
+        r2_block = html.split('data-record-id="r2"', 1)[1].split("</details>", 1)[0]
+        assert "dim-reason" not in r2_block
+
+    def test_stale_rule_fix_state_is_ignored_on_render(self, tmp_path: Path) -> None:
+        records = _write_records(tmp_path)
+        fr.persist_rule_fixes(
+            str(tmp_path), "SOME-OTHER-RUN",
+            [{"rule_id": "RQ1", "rule_source": "rule--simplicity", "invalidated_record_ids": ["r1"]}],
+        )
         canvas = tmp_path / "canvas.html"
         fr.render_review(_render_args(records, run_dir=str(tmp_path), canvas_out=str(canvas)))
         assert _dimmed_ids(canvas.read_text(encoding="utf-8")) == set()

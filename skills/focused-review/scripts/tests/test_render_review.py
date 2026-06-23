@@ -567,6 +567,196 @@ class TestCanvasRender:
 
 
 # ---------------------------------------------------------------------------
+# Rule-quality preview: dependency map, RQ checkboxes, live-grey, invalidation
+# ---------------------------------------------------------------------------
+
+
+def _dep_finding(record_id: str, provenance: list) -> dict:
+    return {"record_id": record_id, "provenance": provenance}
+
+
+def _dep_note(note_id: str, rule_source: str) -> dict:
+    return {
+        "id": note_id,
+        "rule": rule_source.split("--", 1)[-1],
+        "rule_source": rule_source,
+    }
+
+
+class TestRuleDependencyMap:
+    """``_rule_dependency_map``: which findings a scheduled rule fix invalidates."""
+
+    def test_rule_only_finding_with_matching_note_is_mapped(self) -> None:
+        findings = [_dep_finding("r1", ["rule--no-comments"])]
+        notes = [_dep_note("RQ1", "rule--no-comments")]
+        assert fr._rule_dependency_map(findings, notes) == {"r1": ["RQ1"]}
+
+    def test_dict_form_provenance_source_is_handled(self) -> None:
+        findings = [_dep_finding("r1", [{"source": "rule--no-comments"}])]
+        notes = [_dep_note("RQ1", "rule--no-comments")]
+        assert fr._rule_dependency_map(findings, notes) == {"r1": ["RQ1"]}
+
+    def test_concern_source_keeps_finding_alive(self) -> None:
+        # A concern is an independent justification: even with a noted rule source,
+        # the finding survives the rule fix, so it must never be live-greyed.
+        findings = [_dep_finding("r1", ["rule--no-comments", "concern--bugs--opus"])]
+        notes = [_dep_note("RQ1", "rule--no-comments")]
+        assert fr._rule_dependency_map(findings, notes) == {}
+
+    def test_unrecognised_source_keeps_finding_alive(self) -> None:
+        findings = [_dep_finding("r1", ["rule--no-comments", "mystery-source"])]
+        notes = [_dep_note("RQ1", "rule--no-comments")]
+        assert fr._rule_dependency_map(findings, notes) == {}
+
+    def test_rule_without_matching_note_is_excluded(self) -> None:
+        # An un-noted rule can never be checked/fixed (no RQ checkbox), so a finding
+        # depending on it is never invalidatable.
+        findings = [_dep_finding("r1", ["rule--no-comments"])]
+        assert fr._rule_dependency_map(findings, notes=[]) == {}
+
+    def test_finding_with_no_rule_source_is_excluded(self) -> None:
+        findings = [_dep_finding("r1", ["concern--bugs--opus"])]
+        notes = [_dep_note("RQ1", "rule--no-comments")]
+        assert fr._rule_dependency_map(findings, notes) == {}
+
+    def test_multi_rule_all_noted_lists_deps_in_order_deduped(self) -> None:
+        findings = [
+            _dep_finding("r1", ["rule--b", "rule--a", "rule--b"]),
+        ]
+        notes = [_dep_note("RQ-A", "rule--a"), _dep_note("RQ-B", "rule--b")]
+        # Provenance order (b then a), the duplicate rule--b collapsed once.
+        assert fr._rule_dependency_map(findings, notes) == {"r1": ["RQ-B", "RQ-A"]}
+
+    def test_multi_rule_one_unnoted_excludes_finding(self) -> None:
+        findings = [_dep_finding("r1", ["rule--a", "rule--b"])]
+        notes = [_dep_note("RQ-A", "rule--a")]  # rule--b has no note
+        assert fr._rule_dependency_map(findings, notes) == {}
+
+    def test_findings_missing_record_id_or_not_dict_are_skipped(self) -> None:
+        findings = [
+            {"provenance": ["rule--a"]},  # no record_id
+            "not-a-dict",
+            _dep_finding("r2", ["rule--a"]),
+        ]
+        notes = [_dep_note("RQ-A", "rule--a")]
+        assert fr._rule_dependency_map(findings, notes) == {"r2": ["RQ-A"]}
+
+    def test_two_notes_naming_same_source_first_note_wins(self) -> None:
+        findings = [_dep_finding("r1", ["rule--a"])]
+        notes = [_dep_note("RQ-1", "rule--a"), _dep_note("RQ-2", "rule--a")]
+        assert fr._rule_dependency_map(findings, notes) == {"r1": ["RQ-1"]}
+
+
+class TestCanvasRuleDeps:
+    """The canvas advertises each invalidatable row's RQ deps + schedulable notes."""
+
+    def _dep_env(self) -> dict:
+        # r2 is a visible Confirmed finding whose only source is rule--simplicity;
+        # add a matching note so it becomes invalidatable (data-rule-deps).
+        env = _render_envelope()
+        env["rule_quality_notes"].append(
+            {
+                "id": "RQ2",
+                "rule": "simplicity",
+                "rule_source": "rule--simplicity",
+                "rule_file": "review/rules/simplicity.md",
+                "observation": "Flagged a cohesive orchestrator.",
+                "suggestion": "Exempt orchestrator patterns.",
+            }
+        )
+        return env
+
+    def test_invalidatable_row_carries_data_rule_deps(self) -> None:
+        out = _canvas(self._dep_env())
+        # The opening <div ...> for r2 carries the dependency attribute.
+        assert 'data-record-id="r2" data-rule-deps="RQ2"' in out
+
+    def test_finding_kept_alive_by_concern_has_no_data_rule_deps(self) -> None:
+        # r1 has a concern source, so it is never live-greyable.
+        out = _canvas(self._dep_env())
+        r1_block = out.split('data-record-id="r1"', 1)[1].split("</details>", 1)[0]
+        assert "data-rule-deps" not in r1_block
+
+    def test_quality_note_with_id_renders_schedulable_checkbox(self) -> None:
+        # The default envelope's note carries id RQ1, so it gains a quality-cb.
+        out = _canvas(_render_envelope())
+        assert '<input type="checkbox" class="quality-cb" data-rq-id="RQ1"' in out
+        assert '<span class="quality-id">RQ1</span>' in out
+        assert 'class="quality-item" data-rq-id="RQ1"' in out
+
+    def test_quality_note_without_id_renders_read_only(self) -> None:
+        env = _render_envelope()
+        env["rule_quality_notes"][0].pop("id")
+        out = _canvas(env)
+        # No checkbox/id markup when the note lacks a usable id (the .quality-cb /
+        # .quality-id CSS rules still live in <style>, so assert on the markup).
+        assert '<input type="checkbox" class="quality-cb"' not in out
+        assert '<span class="quality-id">' not in out
+        assert "data-rq-id=" not in out
+        assert '<div class="quality-item">' in out
+
+
+class TestCanvasInvalidationDim:
+    """A persisted rule fix dims its invalidated rows with an audit reason pill."""
+
+    def test_invalidated_row_is_dimmed_with_reason_pill(self) -> None:
+        template = fr.CANVAS_TEMPLATE_PATH.read_text(encoding="utf-8")
+        out = fr.render_canvas_html(
+            _render_envelope(),
+            template,
+            invalidated={"r1": "invalidated — rule RQ1 fixed"},
+        )
+        r1_block = out.split('data-record-id="r1"', 1)[1].split("</details>", 1)[0]
+        assert 'class="finding dimmed"' in out
+        assert '<span class="dim-reason">invalidated — rule RQ1 fixed</span>' in r1_block
+
+    def test_reason_text_is_html_escaped(self) -> None:
+        template = fr.CANVAS_TEMPLATE_PATH.read_text(encoding="utf-8")
+        out = fr.render_canvas_html(
+            _render_envelope(),
+            template,
+            invalidated={"r1": "<script>x</script>"},
+        )
+        assert "<script>x</script>" not in out
+        assert "&lt;script&gt;x&lt;/script&gt;" in out
+
+    def test_non_invalidated_rows_stay_plain(self) -> None:
+        template = fr.CANVAS_TEMPLATE_PATH.read_text(encoding="utf-8")
+        out = fr.render_canvas_html(
+            _render_envelope(), template, invalidated={"r1": "invalidated — rule RQ1 fixed"}
+        )
+        r2_block = out.split('data-record-id="r2"', 1)[1].split("</details>", 1)[0]
+        assert "dim-reason" not in r2_block
+
+
+class TestInvalidatedReasons:
+    """``_invalidated_reasons``: persisted rule fixes → per-record dim reasons."""
+
+    def test_single_rule_reason(self) -> None:
+        fixes = [{"rule_id": "RQ2", "rule_source": "rule--x", "invalidated_record_ids": ["r1"]}]
+        assert fr._invalidated_reasons(fixes) == {"r1": "invalidated — rule RQ2 fixed"}
+
+    def test_multi_rule_reason_lists_rules_in_first_seen_order(self) -> None:
+        fixes = [
+            {"rule_id": "RQ2", "rule_source": "rule--x", "invalidated_record_ids": ["r1"]},
+            {"rule_id": "RQ3", "rule_source": "rule--y", "invalidated_record_ids": ["r1"]},
+        ]
+        assert fr._invalidated_reasons(fixes) == {"r1": "invalidated — rules RQ2, RQ3 fixed"}
+
+    def test_non_list_input_is_empty(self) -> None:
+        assert fr._invalidated_reasons(None) == {}
+        assert fr._invalidated_reasons("nope") == {}
+
+    def test_junk_entries_are_ignored(self) -> None:
+        fixes = [
+            "not-a-dict",
+            {"rule_source": "rule--x", "invalidated_record_ids": ["r1"]},  # no rule_id
+            {"rule_id": "RQ4", "invalidated_record_ids": ["r9"]},
+        ]
+        assert fr._invalidated_reasons(fixes) == {"r9": "invalidated — rule RQ4 fixed"}
+
+
+# ---------------------------------------------------------------------------
 # Escaping / injection safety
 # ---------------------------------------------------------------------------
 

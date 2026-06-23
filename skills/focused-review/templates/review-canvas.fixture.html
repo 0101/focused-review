@@ -151,6 +151,22 @@
   .finding.dimmed { opacity: 0.35; }
   .finding.dimmed .title { text-decoration: line-through; }
 
+  .finding.pending-invalid { opacity: 0.35; }
+  .finding.pending-invalid .title { text-decoration: line-through; }
+
+  .dim-reason {
+    display: inline-block;
+    margin-left: 6px;
+    padding: 0 7px;
+    border-radius: 8px;
+    font-size: 11px;
+    font-weight: 600;
+    white-space: nowrap;
+    background: #45475a;
+    color: #bac2de;
+    vertical-align: middle;
+  }
+
   .finding.costly { background: #fab38710; }
   .fix-tag {
     display: inline-block;
@@ -310,6 +326,15 @@
 
   .quality-item { margin: 8px 0; color: #a6adc8; }
   .quality-item strong { color: #f9e2af; }
+  .quality-cb {
+    accent-color: #89b4fa;
+    width: 15px;
+    height: 15px;
+    cursor: pointer;
+    margin-right: 6px;
+    vertical-align: middle;
+  }
+  .quality-id { color: #f9e2af; font-weight: 600; margin-right: 2px; }
 
   .action-bar {
     position: fixed;
@@ -366,6 +391,7 @@
   var state = {
     selected: new Set(),
     disregarded: new Set(),
+    scheduledRules: new Set(),
     openId: null
   };
 
@@ -416,6 +442,18 @@
     });
   }
 
+  // Live rule-fix preview: grey every finding whose ENTIRE rule-source set is
+  // scheduled to be fixed. data-rule-deps (from _rule_dependency_map) lists the RQ
+  // ids a row depends on; the row greys only once they are all checked. Pure
+  // client-side — no agent round-trip — and a distinct class from the persisted dim.
+  function applyRulePreview() {
+    all(".finding[data-rule-deps]").forEach(function (f) {
+      var deps = (f.getAttribute("data-rule-deps") || "").split(/\s+/).filter(Boolean);
+      var dies = deps.length > 0 && deps.every(function (rq) { return state.scheduledRules.has(rq); });
+      f.classList.toggle("pending-invalid", dies);
+    });
+  }
+
   document.addEventListener("change", function (e) {
     var t = e.target;
     if (!t || !t.classList) return;
@@ -434,6 +472,10 @@
       });
       syncSections();
       updateBar();
+    } else if (t.classList.contains("quality-cb")) {
+      var rq = t.getAttribute("data-rq-id");
+      if (rq) { if (t.checked) state.scheduledRules.add(rq); else state.scheduledRules.delete(rq); }
+      applyRulePreview();
     }
   });
 
@@ -501,6 +543,16 @@
         if (d && !d.open) d.open = true;
       }
     });
+    // Re-apply the rule-fix preview after a morph: prune scheduled RQ ids to those
+    // still present, re-check their boxes, and re-grey the rows their combined fix
+    // would kill (a fresh DOM loses the transient class until we re-derive it).
+    var presentRq = new Set();
+    all(".quality-cb").forEach(function (cb) { presentRq.add(cb.getAttribute("data-rq-id")); });
+    pruneTo(state.scheduledRules, presentRq);
+    all(".quality-cb").forEach(function (cb) {
+      cb.checked = state.scheduledRules.has(cb.getAttribute("data-rq-id"));
+    });
+    applyRulePreview();
     syncSections();
     updateBar();
   }
@@ -708,7 +760,7 @@ replaceChild(view-dashboard)</div>
       </details>
     </div>
 
-    <div class="finding" data-record-id="A-20">
+    <div class="finding" data-record-id="A-20" data-rule-deps="RQ2">
       <input type="checkbox" class="row-cb" aria-label="Select finding 5: Section divider comment in production code at line 1481">
       <details class="finding-d" name="findings">
         <summary class="finding-summary">
@@ -769,8 +821,8 @@ replaceChild(view-dashboard)</div>
 <details class="collapsible quality-notes" open>
   <summary class="collapsible-summary">Rule Quality Notes (2)</summary>
   <div class="collapsible-body">
-    <div class="quality-item"><strong>single-responsibility</strong>: 4 findings, all Invalid. Each flagged sequential steps of a single cohesive operation, which the rule explicitly exempts. — Add examples of exempted orchestrator patterns to the rule's "Right" section.</div>
-    <div class="quality-item"><strong>no-unnecessary-comments</strong>: 10 findings; 4 Invalid, 4 Questionable, 2 Confirmed (Low). Mostly navigational comments in embedded JavaScript inside an F# string template. — Consider an exception for embedded template code.</div>
+    <div class="quality-item" data-rq-id="RQ1"><input type="checkbox" class="quality-cb" data-rq-id="RQ1" aria-label="Schedule rule fix RQ1: single-responsibility"><span class="quality-id">RQ1</span> <strong>single-responsibility</strong>: 4 findings, all Invalid. Each flagged sequential steps of a single cohesive operation, which the rule explicitly exempts. — Add examples of exempted orchestrator patterns to the rule's "Right" section.</div>
+    <div class="quality-item" data-rq-id="RQ2"><input type="checkbox" class="quality-cb" data-rq-id="RQ2" aria-label="Schedule rule fix RQ2: no-unnecessary-comments"><span class="quality-id">RQ2</span> <strong>no-unnecessary-comments</strong>: 10 findings; 4 Invalid, 4 Questionable, 2 Confirmed (Low). Mostly navigational comments in embedded JavaScript inside an F# string template. — Consider an exception for embedded template code.</div>
   </div>
 </details>
 
