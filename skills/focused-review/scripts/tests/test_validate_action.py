@@ -1179,29 +1179,31 @@ class TestRunState:
 # ---------------------------------------------------------------------------
 
 
-def _dimmed_ids(canvas_html: str) -> set[str]:
+def _finding_class_id_pairs(canvas_html: str) -> list[tuple[str, str]]:
     import re
 
-    # Match any .finding block and classify by its class tokens, so an extra
-    # presentation class (e.g. "costly" for a large-fix finding) doesn't hide a
-    # finding from the dimmed/plain partition.
+    # Match any .finding block once, returning (class-token-string, record-id)
+    # pairs. Classifying by class tokens means an extra presentation class (e.g.
+    # "costly" for a large-fix finding) doesn't hide a finding from the
+    # dimmed/plain partition. Both _dimmed_ids and _plain_ids build on this so the
+    # HTML shape is matched in exactly one place.
+    return re.findall(
+        r'<div class="(finding[^"]*)" data-record-id="([^"]+)"', canvas_html
+    )
+
+
+def _dimmed_ids(canvas_html: str) -> set[str]:
     return {
         rid
-        for classes, rid in re.findall(
-            r'<div class="(finding[^"]*)" data-record-id="([^"]+)"', canvas_html
-        )
+        for classes, rid in _finding_class_id_pairs(canvas_html)
         if "dimmed" in classes.split()
     }
 
 
 def _plain_ids(canvas_html: str) -> set[str]:
-    import re
-
     return {
         rid
-        for classes, rid in re.findall(
-            r'<div class="(finding[^"]*)" data-record-id="([^"]+)"', canvas_html
-        )
+        for classes, rid in _finding_class_id_pairs(canvas_html)
         if "dimmed" not in classes.split()
     }
 
