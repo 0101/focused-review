@@ -1766,7 +1766,7 @@ def _post_ado_thread(
 def _post_comments_github(
     data: dict,
     inline_comments: list[dict],
-    exclude_ids: set[int],
+    exclude_ids: set[str],
 ) -> None:
     """Post review comments to a GitHub PR via ``gh api``."""
     owner: str = data["owner"]
@@ -1840,7 +1840,7 @@ def _post_comments_github(
 def _post_comments_ado(
     data: dict,
     inline_comments: list[dict],
-    exclude_ids: set[int],
+    exclude_ids: set[str],
 ) -> None:
     """Post review comments to an Azure DevOps PR via REST API.
 
@@ -1939,26 +1939,46 @@ def _post_comments_ado(
         sys.exit(1)
 
 
+def _normalize_finding_id(value: object) -> str:
+    """Normalize a finding ``f#`` id for case-insensitive matching.
+
+    The canvas badge and ``review.md`` heading show the uppercase label (``F2``)
+    while the id persisted in ``comments.json`` is lowercase (``f2``), so the
+    ``--exclude`` selector lowercases both the tokens it receives and the stored
+    ``inline_comments[].id`` before comparing — a user (or the skill) may type
+    either spelling. Applying the *same* normalization on both sides is what makes
+    the exclude key unambiguous: the ``f#`` id is globally unique (unlike the old
+    per-bucket positional integer, which collided across sections and silently
+    dropped the wrong finding — finding r8). A non-string id (a legacy integer or
+    ``None``) is coerced via ``str`` so the filter degrades gracefully instead of
+    raising.
+    """
+    return "" if value is None else str(value).strip().lower()
+
+
 def post_comments(args: argparse.Namespace) -> None:
     """Post review comments to a PR via ``gh api`` (GitHub) or ADO REST API.
 
     Reads a ``comments.json`` file (written by the skill), optionally excludes
-    specific findings by id, and posts review comments to the PR.
+    specific findings by their ``f#`` id, and posts review comments to the PR.
 
     Outputs a result JSON to stdout with the posted review status.
     Exits with code 1 on fatal errors.
     """
     comments_path: str = args.comments
-    exclude_ids: set[int] = set()
+    # ``--exclude`` is a comma-separated list of finding ``f#`` ids (e.g. "f2,f5").
+    # Each token is normalized case-insensitively and matched against the unique
+    # ``f#`` id; empty segments (leading/trailing/double commas) are skipped, and a
+    # token that matches no finding is simply ignored (the excluded count reflects
+    # what the caller asked to drop, not how many matched). There is no longer an
+    # integer-only parse step — the id is an opaque, globally-unique string.
+    exclude_ids: set[str] = set()
     if args.exclude:
-        try:
-            exclude_ids = {int(x.strip()) for x in args.exclude.split(",") if x.strip()}
-        except ValueError:
-            print(
-                "Error: --exclude must be comma-separated integers (e.g. '1,2,3')",
-                file=sys.stderr,
-            )
-            sys.exit(1)
+        exclude_ids = {
+            _normalize_finding_id(tok)
+            for tok in args.exclude.split(",")
+            if tok.strip()
+        }
 
     # Load comments.json -------------------------------------------------------
     try:
@@ -1978,9 +1998,12 @@ def post_comments(args: argparse.Namespace) -> None:
 
     inline_comments: list[dict] = data.get("inline_comments", [])
 
-    # Filter out excluded findings ---------------------------------------------
+    # Filter out excluded findings (by unique f# id, case-insensitive) ---------
     if exclude_ids:
-        inline_comments = [c for c in inline_comments if c.get("id") not in exclude_ids]
+        inline_comments = [
+            c for c in inline_comments
+            if _normalize_finding_id(c.get("id")) not in exclude_ids
+        ]
 
     if platform == "github":
         _post_comments_github(data, inline_comments, exclude_ids)
@@ -4986,7 +5009,7 @@ def main() -> int:
     post_parser.add_argument(
         "--exclude",
         default=None,
-        help="Comma-separated list of finding IDs to exclude",
+        help="Comma-separated finding f# ids to exclude (e.g. 'f2,f5'); case-insensitive",
     )
     post_parser.set_defaults(func=post_comments)
 
