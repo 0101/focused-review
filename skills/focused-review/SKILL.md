@@ -324,7 +324,7 @@ python {script_path} render-review --records {run_dir}/records.json --repo .
       **Date:** {ISO timestamp}
       **Pipeline:** Discovery ({rule_count} rules, {concern_count} concerns) -> Consolidation -> Assessment
       ## Summary  (a | Verdict | Count | table with ONLY these rows: Confirmed / Needs your decision / Pre-existing — there is NO Invalid row)
-      ## Confirmed Findings  (in-scope Confirmed; ### {n}. ({record_id}) [{severity}] {title}; File `path:line`; Fix complexity; Found by {sources}; description; > Assessment:; Suggestion:)
+      ## Confirmed Findings  (in-scope Confirmed; ### F{n}. [{severity}] {title} — where F{n} is the finding's globally-unique id, numbered gap-free F1, F2, … in display order across ALL sections; File `path:line`; Fix complexity; Found by {sources}; description; > Assessment:; Suggestion:)
       ## Needs Your Decision  (in-scope Questionable; same shape; each item names the decision and carries the agent's recommendation, e.g. "suggest skip")
       ## Pre-existing  (Confirmed findings tagged `introduced_by: pre-existing`; same shape; non-gating)
       ## Rule Quality Notes  (only if any; bullet per rule: observation — suggestion)
@@ -403,19 +403,19 @@ Read the report file.
 
 ### Step 2: Identify invalid findings
 
-Each review.md finding heading has the shape `### {display_number}. ({record_id}) [{severity}] {title}`. The leading `{display_number}` restarts at 1 in every section (Confirmed, Needs Your Decision, Pre-existing), so it is **not** unique across the report — always identify a finding by its parenthesized `record_id` (e.g. `(r1)`), which is globally unique.
+Each review.md finding heading has the shape `### F{n}. [{severity}] {title}` — the leading `F{n}` token (e.g. `F1`, `F12`) **is** the finding's id, rendered uppercase. Ids are assigned gap-free `1..N` in display order, so the number is **globally unique** across the whole report (the same `F#` appears on the canvas and in every other mode); there is no separate per-section number to disambiguate.
 
-Parse the arguments after `post-mortem` for **finding ids** (`record_id`s). Accept comma-separated, space-separated, or mixed (e.g., `r1,r3,r5` or `r1 r3 r5` or `r1, r3, r5`).
+Parse the arguments after `post-mortem` for **finding ids** (`f#`). Accept comma-separated, space-separated, or mixed, and resolve them **case-insensitively** (`F2` and `f2` are the same id) — e.g. `f1,f3,f5` or `F1 F3 F5` or `f1, f3, f5`.
 
-If no ids are provided, present the report's findings grouped by section — each shown with its `(rN)` id, severity, file, and title — and ask the user which findings they consider invalid. Wait for their response before continuing.
+If no ids are provided, present the report's findings grouped by section — each shown with its `F#` id, severity, file, and title — and ask the user which findings they consider invalid. Wait for their response before continuing.
 
-For each specified id, locate the matching finding by its `(rN)` anchor in the `### {display_number}. ({record_id}) …` heading (search the Confirmed, Needs Your Decision, and Pre-existing sections). Extract:
+For each specified id, locate the matching finding by its leading `### F{n}.` heading anchor, matched **case-insensitively** (search the Confirmed, Needs Your Decision, and Pre-existing sections). Extract:
 - **Title** and **severity**
 - **File** path
 - **Provenance** line (e.g., `rule:sealed-classes, concern:bugs (opus)`)
 - **Description** and **assessment reasoning**
 
-If an id matches no finding, warn the user and skip it. If the user supplies a bare number instead of an `rN` id, explain that section numbers repeat across sections and ask them to re-specify using the `(rN)` ids shown in the headings.
+If an id matches no finding, warn the user and skip it. A bare number (e.g. `2`) is unambiguous now that numbering is global — treat it as the matching `F#` (`F2`) — but prefer the explicit `F#`/`f#` ids shown in the headings.
 
 ### Step 3: Trace provenance to sources
 
@@ -469,7 +469,7 @@ Write to the same run directory as the reviewed report — e.g. if the report is
 
 **Invalid findings traced here:** {count}
 {for each finding:}
-- Finding #{n}: [{severity}] {title} (`{file}`)
+- Finding {F#}: [{severity}] {title} (`{file}`)
 
 **Pattern:** {what these false positives have in common — 1-2 sentences}
 
