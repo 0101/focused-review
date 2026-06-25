@@ -11,8 +11,10 @@ import html
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
+import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -4041,11 +4043,65 @@ def render_canvas_html(
 
 
 def _write_text(path: str, text: str) -> None:
-    """Write *text* to *path* as UTF-8, creating parent directories as needed."""
+    """Atomically write *text* to *path* as UTF-8, creating parents as needed.
+
+    The bytes are streamed to a uniquely-named sibling temp file in the SAME
+    directory, flushed (best-effort ``fsync``), then ``os.replace``d over *path*.
+    ``os.replace`` is an atomic rename on both POSIX and Windows, so a concurrent
+    or later reader sees either the whole previous file or the whole new one —
+    never a truncated half-write. The temp file shares *path*'s directory so the
+    rename stays on one filesystem (a cross-device move is a copy, not atomic);
+    it is unlinked on any failure before the swap, so a failed write leaves no
+    stray ``.tmp`` behind.
+
+    This matters most for render-review's in-place ``records.json`` overwrite:
+    the reporter's validated input is its own semantic source of truth. A plain
+    ``open(path, "w")`` truncates first, so an interrupt mid-write (kill / disk
+    full / read-only volume) would destroy that file with no surviving original,
+    forcing a Phase-2 re-run; the atomic swap leaves the original intact until
+    the replacement bytes are fully written.
+    """
     parent = os.path.dirname(os.path.abspath(path))
     os.makedirs(parent, exist_ok=True)
-    with open(path, "w", encoding="utf-8", newline="\n") as fh:
-        fh.write(text)
+
+    # Preserve the permissions a plain ``open(path, "w")`` would have produced:
+    # keep an existing file's mode on overwrite, else honour the process umask.
+    # mkstemp hardcodes 0o600, which would otherwise strip group/other read from
+    # every rendered artifact on POSIX. (os.chmod is a near no-op on Windows.)
+    try:
+        mode = stat.S_IMODE(os.stat(path).st_mode)
+    except OSError:
+        umask = os.umask(0)
+        os.umask(umask)
+        mode = 0o666 & ~umask
+
+    # mkstemp creates the temp file in *path*'s directory (same filesystem) so
+    # os.replace below is a same-volume atomic rename, not a copy.
+    fd, tmp = tempfile.mkstemp(
+        dir=parent, prefix="." + os.path.basename(path) + ".", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(text)
+            fh.flush()
+            # Durability is best-effort: a filesystem that rejects fsync must not
+            # break the write — os.replace still gives atomicity (the property
+            # that protects the source of truth), fsync only adds crash-durability.
+            try:
+                os.fsync(fh.fileno())
+            except OSError:
+                pass
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except BaseException:
+        # The swap never happened (or the write failed): drop the temp file so a
+        # failed render leaves no orphaned sibling, and re-raise so the caller's
+        # all-or-nothing contract still aborts the whole render.
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def _emit_stdout(text: str) -> None:
@@ -4168,9 +4224,14 @@ def render_review(args: argparse.Namespace) -> None:
     canvas_html = render_canvas_html(
         data, template, details, disregarded, parent_origin, invalidated=invalidated
     )
-    # Persist the enriched records.json (the display-layer is now the single
-    # source of truth read by validate-action / post-comments). Written in the
-    # same all-or-nothing write phase as the rendered artifacts.
+    # Persist the enriched records.json (the finalized display layer is the
+    # canonical file; validate-action re-derives the same ids from it in memory,
+    # so it no longer silently depends on this write having happened). Each
+    # _write_text is INDIVIDUALLY atomic (temp file + os.replace), so an
+    # interrupt can never truncate records.json — the reporter's source of truth
+    # — to a half-written stub; at worst a re-render reproduces all three
+    # artifacts (finalize is idempotent). The three writes are still sequential,
+    # not one cross-file transaction.
     _write_text(records_path, json.dumps(data, indent=2, ensure_ascii=False) + "\n")
     _write_text(review_out, review_md)
     _write_text(canvas_out, canvas_html)
@@ -4873,6 +4934,17 @@ def validate_action_command(args: argparse.Namespace) -> None:
     if load_error is not None:
         _emit_action_error(path, posted_run_id, action, [load_error])
         sys.exit(1)
+
+    # The display layer (finding f# / note rq# ids, ordering) is Python-assigned
+    # by finalize_records and is what validate_action resolves a posted id
+    # against. render-review persists an already-finalized records.json, but
+    # finalize in memory here so this command is SELF-SUFFICIENT rather than
+    # silently depending on render-review having run first (the action contract
+    # must hold against any validated records.json). finalize is pure +
+    # idempotent (re-finalizing the enriched file is a no-op that reproduces the
+    # same ids) and never raises, mirroring validate_records_command; it is NOT
+    # persisted — the action round-trip only reads.
+    data = finalize_records(data)
 
     # Resolve the review-rules directory the same way render-review/validate-records
     # do (--rules-dir override, else the repo's configured value). validate_action

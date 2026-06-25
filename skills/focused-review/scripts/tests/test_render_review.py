@@ -1057,6 +1057,68 @@ class TestRenderReviewCLI:
         assert not canvas_out.exists()
 
 
+class TestAtomicWrite:
+    """``_write_text`` is atomic: a temp file in the destination directory is
+    swapped over the target with ``os.replace``, so an interrupt can never leave
+    a truncated half-write. This guards render-review's in-place ``records.json``
+    overwrite — the reporter's validated source of truth (Finding F4)."""
+
+    def test_overwrites_existing_atomically_and_leaves_no_temp(
+        self, tmp_path: Path
+    ) -> None:
+        target = tmp_path / "records.json"
+        target.write_text("OLD CONTENT", encoding="utf-8")
+        fr._write_text(str(target), "NEW CONTENT")
+        assert target.read_text(encoding="utf-8") == "NEW CONTENT"
+        # The temp sibling is renamed away, never left behind.
+        assert [p.name for p in tmp_path.iterdir()] == ["records.json"]
+
+    def test_creates_new_file_with_content(self, tmp_path: Path) -> None:
+        target = tmp_path / "nested" / "review.md"
+        fr._write_text(str(target), "body\n")
+        assert target.read_text(encoding="utf-8") == "body\n"
+        assert [p.name for p in target.parent.iterdir()] == ["review.md"]
+
+    def test_failed_swap_preserves_original_and_cleans_temp(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Simulate a kill/disk-full at the worst moment: just before the rename.
+        # The original must survive intact (the truncate-then-write hazard a plain
+        # open(path, "w") would have caused is gone) and no orphan temp remains.
+        target = tmp_path / "records.json"
+        target.write_text("ORIGINAL SOURCE OF TRUTH", encoding="utf-8")
+
+        def boom(src: str, dst: str) -> None:
+            raise OSError("simulated interrupt before the atomic swap")
+
+        monkeypatch.setattr(os, "replace", boom)
+        with pytest.raises(OSError):
+            fr._write_text(str(target), "REPLACEMENT")
+
+        assert target.read_text(encoding="utf-8") == "ORIGINAL SOURCE OF TRUTH"
+        assert [p.name for p in tmp_path.iterdir()] == ["records.json"]
+
+    def test_temp_is_written_in_target_directory(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # os.replace is only atomic on the same filesystem, so the temp file must
+        # be a sibling of the target (not in a global temp dir on another volume).
+        target = tmp_path / "sub" / "records.json"
+        target.parent.mkdir()
+        target.write_text("OLD", encoding="utf-8")
+        seen: dict[str, Path] = {}
+        real_replace = os.replace
+
+        def capture(src: str, dst: str) -> None:
+            seen["src_parent"] = Path(src).resolve().parent
+            real_replace(src, dst)
+
+        monkeypatch.setattr(os, "replace", capture)
+        fr._write_text(str(target), "NEW")
+        assert seen["src_parent"] == target.resolve().parent
+        assert target.read_text(encoding="utf-8") == "NEW"
+
+
 class TestRenderReviewSubprocess:
     """Real-subprocess tests: the in-process ``capsys`` tests above capture at the
     Python text layer, so they never exercise an OS-level non-UTF-8 stdout. The

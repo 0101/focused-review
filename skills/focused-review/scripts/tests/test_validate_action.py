@@ -996,6 +996,90 @@ class TestValidateActionCommand:
         assert not (tmp_path / "run-state.json").exists()
 
 
+def _semantic_only(env: dict) -> dict:
+    """Strip the Python-assigned display layer from *env*.
+
+    Mimics records.json as the reporter emits it — semantic fields only, BEFORE
+    ``render-review`` calls ``finalize_records`` and persists the enriched file.
+    Removes each finding's ``record_id`` / ``display_bucket``, each note's ``id`` /
+    ``rule`` label, and the derived ``run`` tallies (``file``/``line`` stay, so
+    ``finalize`` re-assigns the same gap-free ``f#`` order it would on a real run).
+    """
+    env = copy.deepcopy(env)
+    for finding in env.get("findings", []):
+        finding.pop("record_id", None)
+        finding.pop("display_bucket", None)
+    for note in env.get("rule_quality_notes", []):
+        note.pop("id", None)
+        note.pop("rule", None)
+    run = env.get("run", {})
+    for key in ("consolidated_count", "confirmed", "questionable", "invalid"):
+        run.pop(key, None)
+    return env
+
+
+class TestValidateActionFinalizesOnLoad:
+    """validate-action finalizes in memory, so the action contract holds against
+    ANY validated records.json — it no longer silently depends on render-review
+    having persisted the display layer first (Finding F3: implicit ordering
+    coupling removed; mirrors ``validate_records_command``)."""
+
+    def test_resolves_finding_ids_against_unrendered_records(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # records.json carries only the reporter's semantic fields (no record_id /
+        # display_bucket) — render-review has NOT run. validate-action must still
+        # assign + resolve the canonical f# ids.
+        records = _write_records(tmp_path, _semantic_only(_envelope()))
+        fr.validate_action_command(
+            _action_args(records, RUN_ID, "f1,f2", action="focused-review.fix")
+        )
+        out = json.loads(capsys.readouterr().out)
+        assert out["valid"] is True
+        # Assert the id->finding IDENTITY (via the reporter-stable assessment_id),
+        # not just gap-free labels: f1 must bind to the A-01 finding and f2 to
+        # A-02, so a finalize ordering regression that still produced f1..fN would
+        # be caught here, not silently resolve the wrong finding.
+        identity = {f["record_id"]: f["assessment_id"] for f in out["findings"]}
+        assert identity == {"f1": "A-01", "f2": "A-02"}
+
+    def test_resolves_note_ids_against_unrendered_records(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # rq# ids are Python-assigned too: a semantic-only note (no id) still
+        # resolves once validate-action finalizes the loaded data in memory.
+        records = _write_records(tmp_path, _semantic_only(_envelope_with_notes()))
+        fr.validate_action_command(
+            _action_args(records, RUN_ID, "f1,rq1", action="focused-review.fix")
+        )
+        out = json.loads(capsys.readouterr().out)
+        assert out["valid"] is True
+        # Identity, not just labels: f1 binds to its A-f1 finding and rq1 to the
+        # no-comments note (its rule_file), so a note-ordering regression is caught.
+        assert [(f["record_id"], f["assessment_id"]) for f in out["findings"]] == [
+            ("f1", "A-f1")
+        ]
+        assert [(r["rule_id"], r["rule_file"]) for r in out["rules"]] == [
+            ("rq1", "review/rules/no-comments.md")
+        ]
+
+    def test_in_memory_finalize_does_not_persist(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # The action round-trip only READS: finalize happens in memory and the
+        # on-disk file is left exactly as written (no enrichment side effect).
+        records = _write_records(tmp_path, _semantic_only(_envelope()))
+        before = records.read_text(encoding="utf-8")
+        fr.validate_action_command(
+            _action_args(records, RUN_ID, "f1", action="focused-review.fix")
+        )
+        capsys.readouterr()
+        after = records.read_text(encoding="utf-8")
+        assert after == before
+        on_disk = json.loads(after)
+        assert "record_id" not in on_disk["findings"][0]
+
+
 class TestValidateActionParser:
     def test_parser_rejects_unknown_action_choice(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
