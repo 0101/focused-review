@@ -49,6 +49,7 @@ This eliminates the whole "LLM emitted a wrong derivable field → envelope reje
 ### Action contract / run-state
 - Canvas payload `{ids, button, text, run_id}` carries `f#`/`rq#` ids. `validate-action` prefix-dispatches `f` → finding, `rq` → rule (case-insensitive), rejects unknown prefixes/ids.
 - `run-state.json` `disregarded` / `rule_fixes_applied` reference `f#`/`rq#` ids (pre-release — no migration).
+- Resolved-rule / accumulated-fix / persisted-run-state rule provenance is `rule_sources` (a **list**), aligning with the note schema (notes carry `rule_sources`, a non-empty list of `rule--<name>` labels — a singular field would always be lossy). It is vestigial audit data: only the `rule_id` (map key) and `invalidated_record_ids` drive invalidation/dimming, so the field has no behavioral impact (`_resolve_action_rule`, `_accumulated_rule_fixes`, `persist_rule_fixes`, `_sanitize_rule_fixes`, `_collect_rule_file_errors`).
 
 ### post-comments (r1, r8)
 - `POST-COMMENTS.md` Step 4a reads the **renamed** sections (`Confirmed Findings`, `Needs Your Decision`, `Pre-existing`) and maps section → verdict; the stale `Questionable Findings` literal is removed.
