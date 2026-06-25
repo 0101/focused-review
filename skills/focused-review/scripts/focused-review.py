@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import fnmatch
 import functools
 import html
@@ -75,18 +76,23 @@ VALID_FINDING_TYPES = ("rule", "concern", "mixed")
 VALID_RUN_SCOPES = ("branch", "commit", "staged", "unstaged", "full")
 
 # display_bucket makes the scope/display routing explicit and illegal states
-# unrepresentable: it is DERIVED from (verdict, introduced_by) and carried on
-# every finding so hidden / pre-existing items don't break the visible counts or
-# the per-bucket display_number numbering. See docs/spec/verdict-model-redesign.md.
+# unrepresentable: Python DERIVES it from (verdict, introduced_by) during
+# finalize and carries it on every finding so hidden / pre-existing items don't
+# break the visible counts or the gap-free f# numbering. The reporter does NOT
+# emit it. See docs/spec/unified-finding-numbering.md.
 #   confirmed     — in-scope Confirmed (the gating "main tally")
 #   needs-decision — in-scope Questionable (rendered as "Needs your decision")
 #   pre-existing  — Confirmed but not introduced by this change (own section, non-gating)
 #   hidden        — recorded but never shown (pre-existing Questionable + every Invalid)
 VALID_DISPLAY_BUCKETS = ("confirmed", "needs-decision", "pre-existing", "hidden")
-# Buckets that render in a numbered section: each carries a contiguous, 1-based
-# display_number sequence of its own. Findings in the `hidden` bucket are recorded
-# only, so their display_number is null.
+# Buckets that render in a numbered section; their findings receive the visible,
+# gap-free f1..fK ids. Findings in the `hidden` bucket are recorded only and get
+# trailing f# ids that are never shown.
 _VISIBLE_DISPLAY_BUCKETS = ("confirmed", "needs-decision", "pre-existing")
+# Canonical display order. finalize orders findings by this rank (then file/line)
+# and assigns f# in that order, so the visible buckets occupy f1..fK and every
+# `hidden` finding trails after them.
+_BUCKET_ORDER = {"confirmed": 0, "needs-decision": 1, "pre-existing": 2, "hidden": 3}
 # The introduced_by suffix that marks a finding as not introduced by the change
 # under review (orthogonal to verdict; routes Confirmed → pre-existing and
 # Questionable → hidden). The assessor emits a four-value vocabulary —
@@ -98,10 +104,12 @@ _VISIBLE_DISPLAY_BUCKETS = ("confirmed", "needs-decision", "pre-existing")
 # invariant).
 PRE_EXISTING_MARKER = "pre-existing"
 
-# Stable-id formats enforced so the unified canvas action bar can disambiguate a
-# flat id list by prefix: findings are r#, rule-quality notes are RQ#.
-_RECORD_ID_RE = re.compile(r"^r[0-9]+$")
-_RULE_QUALITY_NOTE_ID_RE = re.compile(r"^RQ[0-9]+$")
+# Python-assigned id formats so the unified canvas action bar can disambiguate a
+# flat id list by prefix: findings are f# (the numeric part is the visible display
+# number), rule-quality notes are rq#. Lowercase in data; rendered uppercase
+# (F2 / RQ1). The reporter does NOT emit these — finalize assigns them.
+_FINDING_ID_RE = re.compile(r"^f[0-9]+$")
+_RULE_QUALITY_NOTE_ID_RE = re.compile(r"^rq[0-9]+$")
 
 
 def _is_pre_existing(introduced_by: object) -> bool:
@@ -1984,12 +1992,15 @@ def post_comments(args: argparse.Namespace) -> None:
 # ---------------------------------------------------------------------------
 # records.json validation (Phase 2)
 #
-# `validate_records` is a pure function: it takes the parsed JSON and returns a
-# list of structured, per-record error dicts (empty list == valid). Each error
-# carries enough context — a JSON-ish `path`, the offending `field`, and the
-# finding's stable identifiers (`record_id` / `assessment_id`) plus its
-# positional `display_number` when known — for the orchestrator to relay an
-# actionable message back to the reporter on a retry.
+# `validate_records` is a pure function that performs SEMANTIC validation of the
+# reporter's output: it checks only the fields the reporter emits (titles,
+# verdicts, provenance, assessment ids, rule-quality observations) and is lenient
+# about the display layer (record_id / display_bucket / note id / run counts),
+# which Python assigns later in `finalize_records`. It returns a list of
+# structured, per-record error dicts (empty list == valid). Each error carries
+# enough context — a JSON-ish `path`, the offending `field`, and the finding's
+# stable identifiers (`assessment_id`, plus `record_id` once assigned) — for the
+# orchestrator to relay an actionable message back to the reporter on a retry.
 # ---------------------------------------------------------------------------
 
 # Sentinel distinguishing "key absent" from an explicit JSON ``null``.
@@ -2034,7 +2045,6 @@ def _records_error(
     *,
     record_id: str | None = None,
     assessment_id: str | None = None,
-    display_number: int | None = None,
 ) -> dict[str, object]:
     """Build one structured validation error.
 
@@ -2049,24 +2059,34 @@ def _records_error(
         "field": field,
         "record_id": record_id,
         "assessment_id": assessment_id,
-        "display_number": display_number,
         "message": message,
     }
 
 
-def _finding_identity(rec: dict) -> tuple[str | None, str | None, int | None]:
-    """Best-effort extraction of a finding's stable ids for error attribution."""
+def _finding_identity(rec: dict) -> tuple[str | None, str | None]:
+    """Best-effort extraction of a finding's stable ids for error attribution.
+
+    Returns ``(record_id, assessment_id)``. During semantic validation the
+    reporter has not yet been assigned a ``record_id``; ``assessment_id`` (the
+    A-XX id minted by the assessor) is the stable handle the reporter knows.
+    """
     rid = rec.get("record_id")
     rid = rid if _is_nonempty_str(rid) else None
     aid = rec.get("assessment_id")
     aid = aid if _is_nonempty_str(aid) else None
-    dnum = rec.get("display_number")
-    dnum = dnum if _is_int(dnum) else None
-    return rid, aid, dnum
+    return rid, aid
 
 
 def _validate_run(run: dict, errors: list[dict]) -> None:
-    """Validate the ``run`` metadata object (counts cross-checked separately)."""
+    """Semantically validate the ``run`` metadata the reporter emits.
+
+    Only the reporter-supplied fields are required here: ``run_id``, ``date``,
+    ``scope`` (an enum), and the dispatch inputs ``rule_count`` / ``concern_count``
+    (which are not derivable from findings). The tally fields
+    (``consolidated_count`` / ``confirmed`` / ``questionable`` / ``invalid``) are
+    computed by ``finalize_records`` and checked by ``validate_finalized_records``,
+    so they are neither required nor rejected here.
+    """
 
     def add(field: str | None, message: str) -> None:
         path = "run" if field is None else f"run.{field}"
@@ -2082,14 +2102,7 @@ def _validate_run(run: dict, errors: list[dict]) -> None:
     elif scope not in VALID_RUN_SCOPES:
         add("scope", f"scope must be one of {', '.join(VALID_RUN_SCOPES)} (got {scope!r})")
 
-    for field in (
-        "rule_count",
-        "concern_count",
-        "consolidated_count",
-        "confirmed",
-        "questionable",
-        "invalid",
-    ):
+    for field in ("rule_count", "concern_count"):
         value = run.get(field, _MISSING)
         if not _is_int(value) or value < 0:
             add(field, f"{field} is required and must be an integer >= 0")
@@ -2195,11 +2208,15 @@ def _validate_finding(
     rec: object,
     index: int,
     errors: list[dict],
-    seen_record_ids: set,
     seen_assessment_ids: set,
-    seen_display_numbers_by_bucket: dict[str, set],
 ) -> None:
-    """Validate a single finding object and accumulate structured errors."""
+    """Semantically validate a single finding object (reporter output).
+
+    Only the fields the reporter emits are checked here. The display layer
+    (``record_id``, ``display_bucket``) is assigned later by ``finalize_records``
+    and verified by ``validate_finalized_records`` — it is neither required nor
+    rejected here, so re-validating an already-enriched file still passes.
+    """
     base_path = f"findings[{index}]"
     if not isinstance(rec, dict):
         errors.append(
@@ -2213,7 +2230,7 @@ def _validate_finding(
         )
         return
 
-    rid, aid, dnum = _finding_identity(rec)
+    rid, aid = _finding_identity(rec)
 
     def add(field: str | None, message: str) -> None:
         path = base_path if field is None else f"{base_path}.{field}"
@@ -2226,7 +2243,6 @@ def _validate_finding(
                 message,
                 record_id=rid,
                 assessment_id=aid,
-                display_number=dnum,
             )
         )
 
@@ -2246,22 +2262,6 @@ def _validate_finding(
         elif value not in allowed:
             add(field, f"{field} must be one of {', '.join(allowed)} (got {value!r})")
 
-    # Stable identifier — required, format-checked (r#), unique. The r# format is
-    # enforced so the unified canvas action bar can disambiguate a flat id list by
-    # prefix (findings r#, rule-quality notes RQ#).
-    record_id = rec.get("record_id", _MISSING)
-    if not _is_nonempty_str(record_id):
-        add("record_id", "record_id is required and must be a non-empty string")
-    elif not _RECORD_ID_RE.match(record_id):
-        add(
-            "record_id",
-            f"record_id must match ^r[0-9]+$ (e.g. r1, r2); got {record_id!r}",
-        )
-    elif record_id in seen_record_ids:
-        add("record_id", f"duplicate record_id {record_id!r} (record_ids must be unique)")
-    else:
-        seen_record_ids.add(record_id)
-
     require_nonempty_str("title")
     require_nonempty_str("file")
     require_str("description")
@@ -2275,7 +2275,8 @@ def _validate_finding(
     require_enum("type", VALID_FINDING_TYPES)
 
     # introduced_by — optional display metadata; only type-checked when present
-    # (the spec keeps it free-form: "type-checked only, no enum").
+    # (the spec keeps it free-form: "type-checked only, no enum"). finalize uses
+    # it together with verdict to derive display_bucket.
     introduced_by = rec.get("introduced_by", _MISSING)
     if introduced_by is not _MISSING and not isinstance(introduced_by, str):
         add("introduced_by", "introduced_by must be a string when present")
@@ -2311,76 +2312,19 @@ def _validate_finding(
     if line is not None and not (_is_int(line) and line >= 0):
         add("line", "line must be an integer >= 0 or null")
 
-    # display_bucket — the canonical scope/display routing, DERIVED from
-    # (verdict, introduced_by). It is carried explicitly (not recomputed
-    # downstream) so the visible/counted set is unambiguous, but it must agree
-    # with the derivation so illegal states (e.g. an Invalid finding tagged
-    # "confirmed") are unrepresentable.
-    verdict = rec.get("verdict")
-    introduced_by_value = introduced_by if introduced_by is not _MISSING else None
-    derived_bucket = _derive_display_bucket(verdict, introduced_by_value)
-    declared_bucket = rec.get("display_bucket", _MISSING)
-    if declared_bucket is _MISSING:
-        add(
-            "display_bucket",
-            "display_bucket is required and must be one of " + ", ".join(VALID_DISPLAY_BUCKETS),
-        )
-    elif declared_bucket not in VALID_DISPLAY_BUCKETS:
-        add(
-            "display_bucket",
-            f"display_bucket must be one of {', '.join(VALID_DISPLAY_BUCKETS)} "
-            f"(got {declared_bucket!r})",
-        )
-    elif derived_bucket is not None and declared_bucket != derived_bucket:
-        # Only cross-check when the verdict is a valid enum (otherwise the bucket
-        # can't be derived and the real error is the per-finding verdict error).
-        add(
-            "display_bucket",
-            f"display_bucket {declared_bucket!r} is inconsistent with "
-            f"(verdict={verdict!r}, introduced_by={introduced_by_value!r}); "
-            f"expected {derived_bucket!r}",
-        )
-
-    # display_number — positional within a *visible* bucket. Visible buckets
-    # (confirmed / needs-decision / pre-existing) each carry their own contiguous
-    # 1-based sequence, so numbers are unique within a bucket but may repeat
-    # across buckets. `hidden` findings (pre-existing Questionable + every
-    # Invalid) are recorded only, so their display_number must be null.
-    display_number = rec.get("display_number", None)
-    bucket_visible = derived_bucket in _VISIBLE_DISPLAY_BUCKETS
-    if display_number is None:
-        if bucket_visible:
-            add(
-                "display_number",
-                "display_number is required (integer >= 1) for findings in a "
-                "visible bucket (confirmed / needs-decision / pre-existing)",
-            )
-    elif not _is_int(display_number) or display_number < 1:
-        add("display_number", "display_number must be an integer >= 1 or null")
-    elif derived_bucket == "hidden":
-        add(
-            "display_number",
-            "display_number must be null for hidden findings "
-            "(pre-existing Questionable + Invalid are recorded, not shown)",
-        )
-    elif bucket_visible:
-        seen = seen_display_numbers_by_bucket.setdefault(derived_bucket, set())
-        if display_number in seen:
-            add(
-                "display_number",
-                f"duplicate display_number {display_number} in the "
-                f"{derived_bucket!r} bucket (display numbers must be unique per bucket)",
-            )
-        else:
-            seen.add(display_number)
-
     _validate_provenance(rec.get("provenance", _MISSING), base_path, add)
 
 
 def _validate_rebuttal_override(
-    item: object, index: int, errors: list[dict], known_record_ids: set | None
+    item: object, index: int, errors: list[dict], known_assessment_ids: set | None
 ) -> None:
-    """Validate one rebuttal-override entry."""
+    """Validate one rebuttal-override entry.
+
+    The reporter references the finding by its ``assessment_id`` (the A-XX id the
+    assessor minted) — NOT the Python-assigned ``record_id``, which the reporter
+    never sees. ``known_assessment_ids`` is the set of finding assessment ids
+    (when available) for a referential-integrity check.
+    """
     base_path = f"rebuttal_overrides[{index}]"
     if not isinstance(item, dict):
         errors.append(
@@ -2394,21 +2338,21 @@ def _validate_rebuttal_override(
         )
         return
 
-    raw_rid = item.get("record_id")
-    rid_ident = raw_rid if _is_nonempty_str(raw_rid) else None
+    raw_aid = item.get("assessment_id")
+    aid_ident = raw_aid if _is_nonempty_str(raw_aid) else None
 
     def add(field: str | None, message: str) -> None:
         path = base_path if field is None else f"{base_path}.{field}"
         errors.append(
             _records_error(
-                "rebuttal_override", index, path, field, message, record_id=rid_ident
+                "rebuttal_override", index, path, field, message, assessment_id=aid_ident
             )
         )
 
-    if not _is_nonempty_str(raw_rid):
-        add("record_id", "record_id is required and must be a non-empty string")
-    elif known_record_ids is not None and raw_rid not in known_record_ids:
-        add("record_id", f"record_id {raw_rid!r} does not match any finding")
+    if not _is_nonempty_str(raw_aid):
+        add("assessment_id", "assessment_id is required and must be a non-empty string")
+    elif known_assessment_ids is not None and raw_aid not in known_assessment_ids:
+        add("assessment_id", f"assessment_id {raw_aid!r} does not match any finding")
 
     for field in ("original_severity", "severity"):
         value = item.get(field, _MISSING)
@@ -2521,26 +2465,24 @@ def _validate_rule_quality_note(
     item: object,
     index: int,
     errors: list[dict],
-    seen_note_ids: set,
     seen_rule_sources: set,
     rules_dir: str,
 ) -> None:
-    """Validate one rule-quality-note entry.
+    """Semantically validate one rule-quality-note entry (reporter output).
 
-    The note is now structured so Python can resolve the rule deterministically
-    and safely: ``id`` (``RQ#``, unique) anchors the canvas checkbox + action id;
-    ``rule_source`` is the canonical ``rule--<name>`` label that ties the note to
-    the findings it explains (matched against their provenance); ``rule_file`` is
-    the safe path Python/the agent edits to apply the fix. ``rule`` stays as the
-    human-readable display label.
+    The reporter emits the *semantic* fields only: ``rule_sources`` (a non-empty
+    list of canonical ``rule--<name>`` provenance labels tying the note to the
+    findings its fix invalidates), ``rule_file`` (the safe path the agent later
+    edits to apply the fix), and the ``observation`` / ``suggestion`` prose. The
+    display layer — the ``id`` (``rq#``) and the human-readable ``rule`` label —
+    is assigned by ``finalize_records``, so neither is required (nor rejected)
+    here.
 
-    Both ``id`` and ``rule_source`` are uniqueness-checked (via *seen_note_ids* /
-    *seen_rule_sources*, accumulated across the notes array). ``rule_source`` must
-    be unique because :func:`_rule_dependency_map` keys its source->note map on the
-    stripped ``rule_source``; two notes naming the same source would collapse to
-    the first (its ``setdefault`` tiebreak), so the later note's rule fix would
-    silently invalidate no findings. Rejecting the duplicate here keeps that map
-    one-to-one and makes the runtime drop unreachable.
+    Each source label is uniqueness-checked across the whole notes array (via
+    *seen_rule_sources*) because :func:`_rule_dependency_map` keys its source->note
+    map on the stripped label; two notes naming the same source would collapse to
+    the first, so the later note's fix would silently invalidate no findings.
+    Rejecting the duplicate here keeps that map one-to-one.
     """
     base_path = f"rule_quality_notes[{index}]"
     if not isinstance(item, dict):
@@ -2560,53 +2502,63 @@ def _validate_rule_quality_note(
             _records_error("rule_quality_note", index, f"{base_path}.{field}", field, message)
         )
 
-    # id — required, RQ# format, unique (the canvas action bar references it).
-    note_id = item.get("id", _MISSING)
-    if not _is_nonempty_str(note_id):
-        add("id", "id is required and must be a non-empty string")
-    elif not _RULE_QUALITY_NOTE_ID_RE.match(note_id):
-        add("id", f"id must match ^RQ[0-9]+$ (e.g. RQ1, RQ2); got {note_id!r}")
-    elif note_id in seen_note_ids:
-        add("id", f"duplicate id {note_id!r} (rule-quality note ids must be unique)")
-    else:
-        seen_note_ids.add(note_id)
-
-    for field in ("rule", "observation", "suggestion"):
+    for field in ("observation", "suggestion"):
         if not _is_nonempty_str(item.get(field, _MISSING)):
             add(field, f"{field} is required and must be a non-empty string")
 
-    # rule_source — required, non-empty, AND unique across notes (mirrors the id
-    # check above). _rule_dependency_map keys its source->note map on the stripped
-    # rule_source, so two notes naming the same source would collapse to the first
-    # and the later note's fix would invalidate nothing. Normalise on strip so
-    # whitespace-only variants (which also collide in that map) are rejected here.
-    rule_source = item.get("rule_source", _MISSING)
-    if not _is_nonempty_str(rule_source):
-        add("rule_source", "rule_source is required and must be a non-empty string")
+    # rule_sources — required non-empty list of canonical rule--<name> labels.
+    # Each entry must be a non-empty string and unique across ALL notes (so the
+    # source->note map _rule_dependency_map builds stays one-to-one). A label that
+    # repeats within this same note is caught by the same accumulated set.
+    valid_sources: list[str] = []
+    rule_sources = item.get("rule_sources", _MISSING)
+    if rule_sources is _MISSING or not isinstance(rule_sources, list):
+        add("rule_sources", "rule_sources is required and must be a non-empty array of strings")
+    elif len(rule_sources) == 0:
+        add("rule_sources", "rule_sources must contain at least one rule source label")
     else:
-        normalized_source = rule_source.strip()
-        if normalized_source in seen_rule_sources:
-            add(
-                "rule_source",
-                f"duplicate rule_source {rule_source!r} "
-                "(each rule may be named by at most one rule-quality note)",
-            )
-        else:
-            seen_rule_sources.add(normalized_source)
+        for j, source in enumerate(rule_sources):
+            if not _is_nonempty_str(source):
+                add("rule_sources", f"rule_sources[{j}] must be a non-empty string")
+                continue
+            normalized = source.strip()
+            if normalized in seen_rule_sources:
+                add(
+                    "rule_sources",
+                    f"duplicate rule_source {source!r} "
+                    "(each rule may be named by at most one rule-quality note)",
+                )
+            else:
+                seen_rule_sources.add(normalized)
+                valid_sources.append(normalized)
 
-    # rule_file — path safety AND consistency with the canonical rule_source. The
-    # two fields are authored independently and can drift (Finding C-12): without
-    # this cross-check a note naming rule_source "rule--no-comments" but pointing
-    # rule_file at "simplicity.md" would validate, and the fix would then edit the
-    # wrong rule file while the no-comments findings are marked invalidated.
-    for message in _collect_rule_file_errors(
-        item.get("rule_file", _MISSING), rule_source, rules_dir
-    ):
-        add("rule_file", message)
+    # rule_file — path safety, then per-source consistency (Finding C-12). The
+    # path-safety check runs once; the rule_source cross-check runs for every
+    # source label so a note naming several rules can't point rule_file at a file
+    # that matches none of them.
+    rule_file = item.get("rule_file", _MISSING)
+    path_messages: list[str] = []
+    _validate_rule_file(rule_file, rules_dir, lambda _f, message: path_messages.append(message))
+    if path_messages:
+        for message in path_messages:
+            add("rule_file", message)
+    else:
+        for source in valid_sources:
+            mismatch = _rule_file_source_mismatch(source, rule_file)
+            if mismatch is not None:
+                add("rule_file", mismatch)
 
 
 def validate_records(data: object, *, rules_dir: str | None = None) -> list[dict]:
-    """Validate a parsed ``records.json`` envelope against the schema.
+    """SEMANTICALLY validate a parsed ``records.json`` envelope (reporter output).
+
+    Checks only the fields the reporter emits — titles, files, severities,
+    verdicts, provenance, assessment ids, rule-quality observations. The display
+    layer (finding ``record_id`` / ``display_bucket``, note ``id`` / ``rule``
+    label, and the ``run`` tally counts) is assigned later by
+    :func:`finalize_records` and verified by :func:`validate_finalized_records`,
+    so it is neither required nor rejected here — re-validating an already-enriched
+    file therefore still passes.
 
     Returns a list of structured, per-record error dicts; an empty list means
     the envelope is valid. Never raises on malformed *data* — every problem is
@@ -2664,37 +2616,23 @@ def validate_records(data: object, *, rules_dir: str | None = None) -> list[dict
         _validate_run(run, errors)
 
     # findings --------------------------------------------------------------
+    # SEMANTIC validation only: the display layer (record_id / display_bucket) is
+    # assigned later by finalize_records, so it is neither required nor rejected
+    # here. We collect assessment_ids for the rebuttal-override referential check.
     findings = data.get("findings", _MISSING)
-    record_ids: set = set()
+    assessment_ids: set = set()
     findings_is_list = isinstance(findings, list)
     if findings is _MISSING:
         add_envelope("findings", "findings is required and must be an array")
     elif not findings_is_list:
         add_envelope("findings", f"findings must be an array, got {_json_type_name(findings)}")
     else:
-        assessment_ids: set = set()
-        display_numbers_by_bucket: dict[str, set] = {}
         for i, rec in enumerate(findings):
-            _validate_finding(
-                rec, i, errors, record_ids, assessment_ids, display_numbers_by_bucket
-            )
-        # Each VISIBLE bucket (confirmed / needs-decision / pre-existing) carries
-        # its own gap-free 1..N display_number run, so the rendered report has no
-        # skipped numbers within a section. The per-finding checks above enforce
-        # integer >= 1 and per-bucket uniqueness; this cross-finding check catches
-        # gaps a reporter retry can leave behind when it renumbers one finding
-        # without adjusting the rest of that bucket.
-        for bucket in _VISIBLE_DISPLAY_BUCKETS:
-            numbers = display_numbers_by_bucket.get(bucket)
-            if numbers and sorted(numbers) != list(range(1, len(numbers) + 1)):
-                add_envelope(
-                    "findings",
-                    f"display_number values for the '{bucket}' bucket must form a "
-                    f"contiguous 1..{len(numbers)} sequence with no gaps "
-                    f"(got {sorted(numbers)})",
-                )
+            _validate_finding(rec, i, errors, assessment_ids)
 
     # rebuttal_overrides ----------------------------------------------------
+    # The reporter references the finding by assessment_id (the A-XX id it knows),
+    # not the Python-assigned record_id.
     overrides = data.get("rebuttal_overrides", _MISSING)
     if overrides is _MISSING:
         add_envelope(
@@ -2707,7 +2645,7 @@ def validate_records(data: object, *, rules_dir: str | None = None) -> list[dict
             f"rebuttal_overrides must be an array, got {_json_type_name(overrides)}",
         )
     else:
-        known = record_ids if findings_is_list else None
+        known = assessment_ids if findings_is_list else None
         for i, item in enumerate(overrides):
             _validate_rebuttal_override(item, i, errors, known)
 
@@ -2724,15 +2662,260 @@ def validate_records(data: object, *, rules_dir: str | None = None) -> list[dict
             f"rule_quality_notes must be an array, got {_json_type_name(notes)}",
         )
     else:
-        seen_note_ids: set = set()
         seen_rule_sources: set = set()
         for i, item in enumerate(notes):
             _validate_rule_quality_note(
-                item, i, errors, seen_note_ids, seen_rule_sources, effective_rules_dir
+                item, i, errors, seen_rule_sources, effective_rules_dir
             )
 
-    # run/findings count cross-checks (only when both are well-formed) ------
-    if isinstance(run, dict) and findings_is_list:
+    return errors
+
+
+# ---------------------------------------------------------------------------
+# records.json finalization (the display layer)
+#
+# `validate_records` checks the reporter's *semantic* output; `finalize_records`
+# then assigns the *display layer* deterministically in Python — the single source
+# of truth for finding/note ids, ordering, buckets, and run tallies:
+#
+#   * display_bucket  — derived from (verdict, introduced_by) per finding
+#   * findings order  — sorted by (bucket rank, file, line) so visible buckets
+#                       precede hidden, file/line ascending within a bucket
+#   * record_id       — f1..fN over that sorted order; the visible findings get
+#                       the gap-free f1..fK, the hidden ones trail as f(K+1)..fN
+#   * note id / rule  — rq1..rqM in array order, with the human-readable `rule`
+#                       label derived from the rule_file stem
+#   * run tallies     — consolidated_count / confirmed / questionable / invalid
+#                       counted from the finalized findings
+#
+# It is a pure function: it deep-copies its input, never mutates the argument, and
+# is idempotent — re-finalizing already-enriched data reproduces the same result
+# (so SKILL Step 6d's re-render on an enriched file is safe). It is also robust to
+# malformed input (it runs only after `validate_records` passes, but it must never
+# raise even on partially-shaped data).
+# ---------------------------------------------------------------------------
+
+
+def _finding_sort_key(finding: object, bucket: str) -> tuple:
+    """Order key for a finding: (bucket rank, file, line-present, line).
+
+    Visible buckets (rank 0-2) precede ``hidden`` (rank 3). Within a bucket,
+    findings sort by file then line; a null line sorts *before* a numbered line in
+    the same file. Ties preserve input order because Python's sort is stable.
+    """
+    rank = _BUCKET_ORDER.get(bucket, _BUCKET_ORDER["hidden"])
+    if isinstance(finding, dict):
+        file_str = finding.get("file")
+        file_str = file_str if isinstance(file_str, str) else ""
+        line = finding.get("line")
+        has_line = _is_int(line)
+        line_val = line if has_line else 0
+    else:
+        file_str = ""
+        has_line = False
+        line_val = 0
+    # has_line False (null line) sorts first within the same file.
+    return (rank, file_str, has_line, line_val)
+
+
+def finalize_records(data: object) -> object:
+    """Return a deep-copied, display-enriched copy of a validated *records.json*.
+
+    Assigns ``display_bucket``, reorders ``findings``, stamps the gap-free ``f#``
+    ``record_id`` sequence, the ``rq#`` note ids and derived ``rule`` labels, and
+    the ``run`` tally counts. Never mutates *data*; idempotent; never raises on
+    malformed input (guards every shape and degrades gracefully).
+    """
+    result = copy.deepcopy(data)
+    if not isinstance(result, dict):
+        return result
+
+    # --- findings: derive bucket, reorder, assign f# ----------------------
+    findings = result.get("findings")
+    if isinstance(findings, list):
+        # Derive the display_bucket for every finding first; fall back to
+        # "hidden" only if the verdict is unrecognized (validation would have
+        # already rejected that — this just keeps finalize total/non-crashing).
+        for finding in findings:
+            if isinstance(finding, dict):
+                bucket = _derive_display_bucket(
+                    finding.get("verdict"), finding.get("introduced_by")
+                )
+                finding["display_bucket"] = bucket if bucket is not None else "hidden"
+
+        def bucket_of(finding: object) -> str:
+            if isinstance(finding, dict):
+                b = finding.get("display_bucket")
+                if b in VALID_DISPLAY_BUCKETS:
+                    return b
+            return "hidden"
+
+        findings.sort(key=lambda f: _finding_sort_key(f, bucket_of(f)))
+
+        # f1..fN over the sorted order: visible buckets occupy f1..fK gap-free,
+        # hidden findings trail as f(K+1)..fN (never shown).
+        for position, finding in enumerate(findings, start=1):
+            if isinstance(finding, dict):
+                finding["record_id"] = f"f{position}"
+
+        result["findings"] = findings
+
+    # --- rule_quality_notes: assign rq# + derive display label ------------
+    notes = result.get("rule_quality_notes")
+    if isinstance(notes, list):
+        for position, note in enumerate(notes, start=1):
+            if isinstance(note, dict):
+                note["id"] = f"rq{position}"
+                rule_file = note.get("rule_file")
+                if isinstance(rule_file, str) and rule_file.strip():
+                    note["rule"] = PurePosixPath(rule_file.replace("\\", "/")).stem
+                else:
+                    note["rule"] = ""
+
+    # --- run: compute the tally counts from the finalized findings --------
+    run = result.get("run")
+    if isinstance(run, dict):
+        finding_dicts = (
+            [f for f in findings if isinstance(f, dict)]
+            if isinstance(findings, list)
+            else []
+        )
+        run["consolidated_count"] = len(finding_dicts)
+        run["confirmed"] = sum(
+            1 for f in finding_dicts if f.get("display_bucket") == "confirmed"
+        )
+        run["questionable"] = sum(
+            1 for f in finding_dicts if f.get("display_bucket") == "needs-decision"
+        )
+        run["invalid"] = sum(1 for f in finding_dicts if f.get("verdict") == "Invalid")
+
+    return result
+
+
+def validate_finalized_records(data: object, *, rules_dir: str | None = None) -> list[dict]:
+    """Invariant self-check on display-enriched *records.json* (post-finalize).
+
+    Confirms the display layer :func:`finalize_records` is responsible for is
+    internally consistent: the ``f#`` ids are a gap-free 1..N sequence *in array
+    order* (so the array IS display order, visible buckets first), each
+    ``display_bucket`` agrees with its derivation and the bucket ranks never
+    decrease across the array, the ``rq#`` note ids are 1..M in order, and the
+    ``run`` tallies match the finalized findings. This runs the full semantic
+    :func:`validate_records` first (the enriched file must still be semantically
+    valid), then layers the assigned-field invariants on top.
+
+    Returns a list of structured error dicts (empty == valid). It is defensive:
+    on correctly finalized data it always returns ``[]``; it exists to catch a
+    finalize regression or hand-tampered enriched file, never to gate the reporter.
+    """
+    errors = validate_records(data, rules_dir=rules_dir)
+    if not isinstance(data, dict):
+        return errors
+
+    def add_envelope(field: str | None, message: str) -> None:
+        path = "$" if field is None else field
+        errors.append(_records_error("envelope", None, path, field, message))
+
+    # --- findings: f# gap-free in display order + bucket ordering ----------
+    findings = data.get("findings")
+    if isinstance(findings, list):
+        previous_rank = -1
+        for i, finding in enumerate(findings):
+            expected_id = f"f{i + 1}"
+            if not isinstance(finding, dict):
+                continue
+            rid, aid = _finding_identity(finding)
+
+            def add(field: str, message: str, *, _rid=rid, _aid=aid) -> None:
+                errors.append(
+                    _records_error(
+                        "finding",
+                        i,
+                        f"findings[{i}].{field}",
+                        field,
+                        message,
+                        record_id=_rid,
+                        assessment_id=_aid,
+                    )
+                )
+
+            record_id = finding.get("record_id")
+            if not _is_nonempty_str(record_id) or not _FINDING_ID_RE.match(record_id):
+                add(
+                    "record_id",
+                    f"record_id must match ^f[0-9]+$ (e.g. f1, f2); got {record_id!r}",
+                )
+            elif record_id != expected_id:
+                add(
+                    "record_id",
+                    f"record_id {record_id!r} is out of sequence; findings must carry "
+                    f"a gap-free f1..fN run in display order (expected {expected_id!r} "
+                    f"at position {i + 1})",
+                )
+
+            bucket = finding.get("display_bucket")
+            derived = _derive_display_bucket(
+                finding.get("verdict"), finding.get("introduced_by")
+            )
+            if bucket not in VALID_DISPLAY_BUCKETS:
+                add(
+                    "display_bucket",
+                    "display_bucket is required and must be one of "
+                    + ", ".join(VALID_DISPLAY_BUCKETS),
+                )
+            else:
+                if derived is not None and bucket != derived:
+                    add(
+                        "display_bucket",
+                        f"display_bucket {bucket!r} is inconsistent with "
+                        f"(verdict={finding.get('verdict')!r}, "
+                        f"introduced_by={finding.get('introduced_by')!r}); "
+                        f"expected {derived!r}",
+                    )
+                rank = _BUCKET_ORDER.get(bucket, _BUCKET_ORDER["hidden"])
+                if rank < previous_rank:
+                    add(
+                        "display_bucket",
+                        f"findings must be ordered by display bucket "
+                        f"({' < '.join(VALID_DISPLAY_BUCKETS)}); a {bucket!r} finding "
+                        f"appears after a later-bucket finding",
+                    )
+                previous_rank = max(previous_rank, rank)
+
+    # --- rule_quality_notes: rq# 1..M in order ----------------------------
+    notes = data.get("rule_quality_notes")
+    if isinstance(notes, list):
+        for i, note in enumerate(notes):
+            if not isinstance(note, dict):
+                continue
+            expected_id = f"rq{i + 1}"
+            note_id = note.get("id")
+            if not _is_nonempty_str(note_id) or not _RULE_QUALITY_NOTE_ID_RE.match(note_id):
+                errors.append(
+                    _records_error(
+                        "rule_quality_note",
+                        i,
+                        f"rule_quality_notes[{i}].id",
+                        "id",
+                        f"id must match ^rq[0-9]+$ (e.g. rq1, rq2); got {note_id!r}",
+                    )
+                )
+            elif note_id != expected_id:
+                errors.append(
+                    _records_error(
+                        "rule_quality_note",
+                        i,
+                        f"rule_quality_notes[{i}].id",
+                        "id",
+                        f"id {note_id!r} is out of sequence; rule-quality notes must "
+                        f"carry a gap-free rq1..rqM run (expected {expected_id!r} at "
+                        f"position {i + 1})",
+                    )
+                )
+
+    # --- run: tallies must match the finalized findings -------------------
+    run = data.get("run")
+    if isinstance(run, dict) and isinstance(findings, list):
         _validate_run_counts(run, findings, errors)
 
     return errors
@@ -2808,8 +2991,13 @@ def validate_records_command(args: argparse.Namespace) -> None:
         _emit_validation_errors(path, errors)
         sys.exit(1)
 
-    run = data.get("run", {}) if isinstance(data, dict) else {}
-    findings = data.get("findings", []) if isinstance(data, dict) else []
+    # The reporter emits semantic fields only; the display-layer tallies
+    # (confirmed / questionable / invalid) are Python-assigned, so finalize in
+    # memory to report accurate counts. This command does NOT persist the
+    # enriched records.json — render-review owns that.
+    finalized = finalize_records(data)
+    run = finalized.get("run", {}) if isinstance(finalized, dict) else {}
+    findings = finalized.get("findings", []) if isinstance(finalized, dict) else []
     summary = {
         "valid": True,
         "schema_version": RECORDS_SCHEMA_VERSION,
@@ -3059,18 +3247,25 @@ def _rule_dependency_map(findings: list, notes: list) -> dict[str, list[str]]:
     corresponding note (which can never be "applied" — no checkbox), is absent
     from the map, so the canvas never live-greys it.
     """
-    # Canonical rule_source label -> the note id that fixes it. validate_records
-    # now rejects two notes naming the same rule_source, so this map is one-to-one
-    # for any validated envelope; the setdefault tiebreak below is a defensive
-    # fallback that keeps the first note should unvalidated input ever reach here.
+    # Canonical rule_source label -> the note id that fixes it. A note now carries
+    # a LIST of rule_sources (each rule it covers), so every label maps to that
+    # note's id. validate_records rejects two notes naming the same source, so this
+    # map is one-to-one for any validated envelope; the setdefault tiebreak below
+    # is a defensive fallback that keeps the first note should unvalidated input
+    # ever reach here.
     source_to_note: dict[str, str] = {}
     for note in notes:
         if not isinstance(note, dict):
             continue
-        source = note.get("rule_source")
         note_id = note.get("id")
-        if _is_nonempty_str(source) and _is_nonempty_str(note_id):
-            source_to_note.setdefault(source.strip(), note_id)
+        if not _is_nonempty_str(note_id):
+            continue
+        sources = note.get("rule_sources")
+        if not isinstance(sources, list):
+            continue
+        for source in sources:
+            if _is_nonempty_str(source):
+                source_to_note.setdefault(source.strip(), note_id)
 
     deps: dict[str, list[str]] = {}
     for finding in findings:
@@ -3786,6 +3981,18 @@ def render_review(args: argparse.Namespace) -> None:
         _emit_validation_errors(records_path, errors)
         sys.exit(1)
 
+    # The reporter emits semantic fields only. Assign the display layer (finding
+    # f# ids + display_bucket, note rq# ids + rule label, run tallies) and the
+    # canonical ordering deterministically in Python. finalize is idempotent, so
+    # re-rendering an already-enriched records.json (SKILL Step 6d) is safe.
+    data = finalize_records(data)
+    # Defensive self-check: on correctly finalized data this is always empty; it
+    # guards against a finalize regression or a hand-tampered enriched file.
+    finalized_errors = validate_finalized_records(data, rules_dir=rules_dir)
+    if finalized_errors:
+        _emit_validation_errors(records_path, finalized_errors)
+        sys.exit(1)
+
     run_dir = args.run_dir or os.path.dirname(records_path) or "."
     review_out = args.review_out or os.path.join(run_dir, "review.md")
     canvas_out = args.canvas_out or os.path.join(args.repo, DEFAULT_CANVAS_RELPATH)
@@ -3835,6 +4042,10 @@ def render_review(args: argparse.Namespace) -> None:
     canvas_html = render_canvas_html(
         data, template, details, disregarded, parent_origin, invalidated=invalidated
     )
+    # Persist the enriched records.json (the display-layer is now the single
+    # source of truth read by validate-action / post-comments). Written in the
+    # same all-or-nothing write phase as the rendered artifacts.
+    _write_text(records_path, json.dumps(data, indent=2, ensure_ascii=False) + "\n")
     _write_text(review_out, review_md)
     _write_text(canvas_out, canvas_html)
 
@@ -4293,7 +4504,7 @@ def validate_action(
             )
             continue
         token = raw.strip()
-        if _RECORD_ID_RE.match(token):
+        if _FINDING_ID_RE.match(token):
             finding = by_record_id.get(token)
             if finding is None:
                 errors.append(
