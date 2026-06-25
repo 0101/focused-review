@@ -3206,20 +3206,51 @@ def _finding_bucket(finding: dict) -> str | None:
     return _derive_display_bucket(finding.get("verdict"), finding.get("introduced_by"))
 
 
+def _display_label(raw_id: object) -> str:
+    """Render an internal ``f#``/``rq#`` id as its uppercase display label.
+
+    The id assigned by :func:`finalize_records` *is* the visible label — there is
+    no second number — so rendering just uppercases it (``f2`` → ``F2``, ``rq1`` →
+    ``RQ1``). A missing/empty id renders as ``""`` rather than ``"None"`` (only
+    reachable on hand-built, un-finalized input).
+    """
+    return str(raw_id).upper() if _is_nonempty_str(raw_id) else ""
+
+
+def _finding_label(finding: object) -> str:
+    """The uppercase ``F#`` display label for a finding (from its ``record_id``)."""
+    return _display_label(finding.get("record_id") if isinstance(finding, dict) else None)
+
+
+def _finding_number(finding: object) -> int:
+    """Integer position of a finding's ``f#`` id (``f12`` → ``12``); the display sort key.
+
+    :func:`finalize_records` already stamps ``f1..fN`` in display order, so sorting a
+    bucket by this key reproduces that order deterministically. A missing or malformed
+    id sorts last rather than raising.
+    """
+    if isinstance(finding, dict):
+        rid = finding.get("record_id")
+        if isinstance(rid, str) and _FINDING_ID_RE.match(rid):
+            return int(rid[1:])
+    return 10**9
+
+
 def _partition_findings(findings: list) -> tuple[list, list, list]:
     """Split findings into the three *visible* sections by ``display_bucket``.
 
-    Returns ``(confirmed, needs_decision, pre_existing)`` in display order. Each
-    visible bucket carries its own contiguous ``display_number`` sequence, so each
-    sorts independently. The ``hidden`` bucket — every Invalid finding plus any
-    pre-existing Questionable — is recorded in ``records.json`` only and is
-    intentionally dropped here: it is never rendered in review.md or the canvas.
+    Returns ``(confirmed, needs_decision, pre_existing)``, each ordered by the
+    globally gap-free ``f#`` sequence :func:`finalize_records` assigned (visible
+    findings number ``f1..fK`` in display order, so ``f# == visible position``).
+    The ``hidden`` bucket — every Invalid finding plus any pre-existing Questionable
+    — is recorded in ``records.json`` only and is intentionally dropped here: it is
+    never rendered in review.md or the canvas.
     """
     confirmed = [f for f in findings if _finding_bucket(f) == "confirmed"]
     needs_decision = [f for f in findings if _finding_bucket(f) == "needs-decision"]
     pre_existing = [f for f in findings if _finding_bucket(f) == "pre-existing"]
     for bucket in (confirmed, needs_decision, pre_existing):
-        bucket.sort(key=lambda f: (f.get("display_number") is None, f.get("display_number") or 0))
+        bucket.sort(key=_finding_number)
     return confirmed, needs_decision, pre_existing
 
 
@@ -3304,23 +3335,19 @@ def _rule_dependency_map(findings: list, notes: list) -> dict[str, list[str]]:
 def _md_finding_block(finding: dict) -> str:
     """One Confirmed/Questionable finding block in the review.md shape."""
     parts: list[str] = []
-    # Heading shape: "### {display_number}. ({record_id}) [severity] title".
+    # Heading shape: "### F2. [severity] title".
     #
-    # display_number restarts at 1 in every visible bucket (confirmed / needs-
-    # decision / pre-existing), so the leading "### {n}." is NOT unique across the
-    # document. The globally-unique record_id (validated ^r[0-9]+$) is rendered as a
-    # parenthesised anchor so the post-mortem mode can select a finding
-    # unambiguously (SKILL.md "Post-Mortem Mode" Step 2 matches on the "(rN)"
-    # anchor, not the bare number). The leading "### {display_number}." is kept
-    # verbatim so the post-comments reader, which extracts that integer for its
-    # inline_comments[].id, is unaffected (POST-COMMENTS.md Step 4a).
+    # The finding's f# id (assigned by finalize_records, gap-free in display order)
+    # IS the heading's leading token, rendered uppercase. It is globally unique, so
+    # the post-mortem mode selects a finding unambiguously by matching the leading
+    # "### F<n>." anchor (case-insensitively) — there is no second per-bucket number
+    # and no redundant "(rN)" anchor (the old "### {n}. (rN)" shape, D-23, is gone).
     #
-    # Both record_id and display_number precede the _flatten()-ed (CR/LF-collapsed)
-    # untrusted title, so a hostile title can neither forge a second "### " heading
-    # line nor spoof a different finding's "(rN)" anchor.
+    # The uppercase id precedes the _flatten()-ed (CR/LF-collapsed) untrusted title,
+    # so a hostile title can neither forge a second "### " heading line nor spoof a
+    # different finding's id anchor.
     parts.append(
-        f"### {finding.get('display_number')}. "
-        f"({finding.get('record_id')}) "
+        f"### {_finding_label(finding)}. "
         f"[{finding.get('severity', '')}] {_flatten(finding.get('title', ''))}"
     )
     meta = [
@@ -3425,8 +3452,9 @@ def render_terminal_summary(data: dict, report_path: str) -> str:
     confirmed, needs_decision, pre_existing = _partition_findings(findings)
     # Pre-existing is non-gating (Decision 16), so the headline "actionable" count
     # and the main table are the in-scope buckets only; pre-existing is surfaced in
-    # its own block below. Each bucket is already sorted by its own display_number,
-    # so concatenating (not re-sorting) keeps Confirmed ahead of Needs-your-decision.
+    # its own block below. Each bucket is already ordered by its f# id, so
+    # concatenating (not re-sorting) keeps Confirmed (lower f#) ahead of
+    # Needs-your-decision; the table keys on the globally-unique F# id.
     actionable = confirmed + needs_decision
 
     blocks: list[str] = [f"📄 {report_path}"]
@@ -3443,7 +3471,7 @@ def render_terminal_summary(data: dict, report_path: str) -> str:
         for f in actionable:
             icon = "✅" if f.get("verdict") == "Confirmed" else "❓"
             table.append(
-                f"| {f.get('display_number')} "
+                f"| {_finding_label(f)} "
                 f"| {icon} "
                 f"| {_md_cell(f.get('severity', ''))} "
                 f"| {_md_cell(_found_by_terminal(f.get('provenance')))} "
@@ -3700,11 +3728,11 @@ def _canvas_finding_block(
     pure presentation, orthogonal to the verdict bucket.
     """
     rid = finding.get("record_id", "")
-    number = finding.get("display_number")
+    label = _finding_label(finding)
     title = finding.get("title", "")
     severity = finding.get("severity", "")
     location = _location_str(finding.get("file", ""), finding.get("line"))
-    aria = f"Select finding {number}: {title}"
+    aria = f"Select finding {label}: {title}"
     costly = _is_costly_fix(finding)
 
     sections = [
@@ -3772,7 +3800,7 @@ def _canvas_finding_block(
         '        <details class="finding-d" name="findings">\n'
         '          <summary class="finding-summary">\n'
         '            <span class="caret" aria-hidden="true"></span>\n'
-        f'            <span class="num">{html.escape(str(number))}</span>\n'
+        f'            <span class="num">{html.escape(label)}</span>\n'
         f'            <span class="sev {html.escape(_sev_class(severity), quote=True)}">{html.escape(str(severity))}</span>\n'
         f'            <span class="found-by">{_found_tags_html(finding.get("provenance"))}</span>\n'
         f'            <span class="title">{title_html}</span>\n'
@@ -3803,11 +3831,12 @@ def _canvas_quality_item(note: dict) -> str:
         return f'    <div class="quality-item">{body}</div>'
 
     rq = html.escape(str(note_id), quote=True)
-    aria = html.escape(f"Schedule rule fix {note_id}: {note.get('rule', '')}", quote=True)
+    label = _display_label(note_id)
+    aria = html.escape(f"Schedule rule fix {label}: {note.get('rule', '')}", quote=True)
     return (
         f'    <div class="quality-item" data-rq-id="{rq}">'
         f'<input type="checkbox" class="quality-cb" data-rq-id="{rq}" aria-label="{aria}">'
-        f'<span class="quality-id">{html.escape(str(note_id))}</span> {body}</div>'
+        f'<span class="quality-id">{html.escape(label)}</span> {body}</div>'
     )
 
 

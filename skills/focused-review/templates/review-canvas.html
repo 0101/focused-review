@@ -26,10 +26,10 @@
     <!-- FR:PREEXISTING_COUNT -->   integer shown in the Pre-existing section header.
     <!-- FR:PREEXISTING_ROWS -->    one ".finding" block per pre-existing (non-gating) finding.
     <!-- FR:QUALITY_SUMMARY -->     e.g. "Rule Quality Notes (2)".
-    <!-- FR:QUALITY_NOTES -->       ".quality-item" blocks. Each note with an RQ# id carries a
-                                    "quality-cb" checkbox (data-rq-id="RQ#"); checking it
-                                    live-greys the findings whose entire rule-source set is
-                                    scheduled to be fixed (client-only preview, no round-trip).
+    <!-- FR:QUALITY_NOTES -->       ".quality-item" blocks. Each note with an rq# id carries a
+                                    "quality-cb" checkbox (data-rq-id="rq#", visible label "RQ#");
+                                    checking it live-greys the findings whose entire rule-source
+                                    set is scheduled to be fixed (client-only preview, no round-trip).
 
   Invalid findings are NEVER rendered (no Invalid section, badge, or summary row); they
   stay in records.json only. A finding's verdict bucket is decided server-side from its
@@ -39,17 +39,18 @@
   so escaped finding text can never reproduce a "<!-- FR:* -->" marker. Replace each
   marker exactly once (a single-pass regex substitution is safest).
 
-  Per-finding ".finding" block shape (Python emits this into the *_ROWS placeholders):
+  Per-finding ".finding" block shape (Python emits this into the *_ROWS placeholders).
+  data-record-id carries the lowercase f# id; the ".num" badge shows it uppercased (F2):
 
-    <div class="finding" data-record-id="STABLE_RECORD_ID">
+    <div class="finding" data-record-id="f2">
       <!-- a costly fix adds class "costly"; a persisted disregard/invalidation adds
-           "dimmed"; a finding a rule fix could kill adds data-rule-deps="RQ1 RQ2"
-           (the RQ ids that must ALL be checked to live-grey it). -->
-      <input type="checkbox" class="row-cb" aria-label="Select finding N: TITLE">
+           "dimmed"; a finding a rule fix could kill adds data-rule-deps="rq1 rq2"
+           (the rq ids that must ALL be checked to live-grey it). -->
+      <input type="checkbox" class="row-cb" aria-label="Select finding F2: TITLE">
       <details class="finding-d" name="findings">
         <summary class="finding-summary">
           <span class="caret" aria-hidden="true"></span>
-          <span class="num">N</span>
+          <span class="num">F2</span>
           <span class="sev sev-high">High</span>
           <span class="found-by"><span class="found-tag found-tag-concern">bugs(opus)</span></span>
           <span class="title">TITLE</span>

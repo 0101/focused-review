@@ -35,17 +35,19 @@ SCRIPT_PATH = str(Path(__file__).resolve().parent.parent / "focused-review.py")
 
 
 def _render_envelope() -> dict:
-    """A representative, fully valid envelope used by the golden + format tests.
+    """A representative, fully valid *finalized* envelope used by the golden + format tests.
 
-    Exercises the verdict-model display buckets: two in-scope Confirmed findings
-    (one multi-source/grouped provenance, one single rule source whose ``complex``
-    fix triggers the large-fix tag), one in-scope Questionable finding routed to
-    the ``needs-decision`` bucket (null line + empty assessment/suggestion, testing
-    field omission), one Invalid finding routed to ``hidden`` (recorded only, never
-    rendered), and one pre-existing Confirmed finding routed to its own non-gating
-    ``pre-existing`` section. Each visible bucket carries its own contiguous,
-    1-based ``display_number`` run, so numbers repeat across buckets. Plus a
-    rule-quality note in the structured (id/rule_source/rule_file) shape.
+    Exercises the verdict-model display buckets in their finalized (display) order:
+    two in-scope Confirmed findings (``f1`` multi-source/grouped provenance; ``f2`` a
+    single rule source whose ``complex`` fix triggers the large-fix tag), one in-scope
+    Questionable finding routed to ``needs-decision`` (``f3``, null line + empty
+    assessment/suggestion, testing field omission), one pre-existing Confirmed finding
+    routed to its own non-gating ``pre-existing`` section (``f4``), and one Invalid
+    finding routed to ``hidden`` (``f5``, recorded only, never rendered — it trails the
+    visible run). The ``f#`` ids are globally gap-free in display order, so the numeric
+    part of each id IS its visible position (no second per-bucket number). Plus a
+    rule-quality note carrying its ``rq#`` id and the ``rule_sources`` identity list
+    Python derives the human ``rule`` label from.
     """
     return {
         "schema_version": 1,
@@ -63,9 +65,9 @@ def _render_envelope() -> dict:
         "rebuttal_overrides": [],
         "rule_quality_notes": [
             {
-                "id": "RQ1",
+                "id": "rq1",
                 "rule": "no-comments",
-                "rule_source": "rule--no-comments",
+                "rule_sources": ["rule--no-comments"],
                 "rule_file": "review/rules/no-comments.md",
                 "observation": "4 findings, all Invalid in embedded template code.",
                 "suggestion": "Add an exception for embedded templates.",
@@ -73,9 +75,8 @@ def _render_envelope() -> dict:
         ],
         "findings": [
             {
-                "record_id": "r1",
+                "record_id": "f1",
                 "assessment_id": "A-01",
-                "display_number": 1,
                 "display_bucket": "confirmed",
                 "title": "Null deref in request handler",
                 "file": "src/a.py",
@@ -97,9 +98,8 @@ def _render_envelope() -> dict:
                 "has_detail": False,
             },
             {
-                "record_id": "r2",
+                "record_id": "f2",
                 "assessment_id": "A-02",
-                "display_number": 2,
                 "display_bucket": "confirmed",
                 "title": "Duplicated parsing logic",
                 "file": "src/b.py",
@@ -117,9 +117,8 @@ def _render_envelope() -> dict:
                 "has_detail": False,
             },
             {
-                "record_id": "r3",
+                "record_id": "f3",
                 "assessment_id": "A-05",
-                "display_number": 1,
                 "display_bucket": "needs-decision",
                 "title": "Magic number in retry loop",
                 "file": "src/c.py",
@@ -137,29 +136,8 @@ def _render_envelope() -> dict:
                 "has_detail": False,
             },
             {
-                "record_id": "r4",
-                "assessment_id": "A-09",
-                "display_number": None,
-                "display_bucket": "hidden",
-                "title": "Section divider comment",
-                "file": "src/d.py",
-                "line": 5,
-                "original_severity": "Low",
-                "severity": "Medium",
-                "fix_complexity": "quickfix",
-                "verdict": "Invalid",
-                "type": "rule",
-                "introduced_by": "diff",
-                "description": "A // ---- divider.",
-                "assessment": "Navigational aid in long embedded template.",
-                "suggestion": "",
-                "provenance": ["rule--no-comments"],
-                "has_detail": False,
-            },
-            {
-                "record_id": "r5",
+                "record_id": "f4",
                 "assessment_id": "A-12",
-                "display_number": 1,
                 "display_bucket": "pre-existing",
                 "title": "Broad except swallows errors",
                 "file": "src/e.py",
@@ -176,14 +154,34 @@ def _render_envelope() -> dict:
                 "provenance": ["concern--bugs--opus"],
                 "has_detail": False,
             },
+            {
+                "record_id": "f5",
+                "assessment_id": "A-09",
+                "display_bucket": "hidden",
+                "title": "Section divider comment",
+                "file": "src/d.py",
+                "line": 5,
+                "original_severity": "Low",
+                "severity": "Medium",
+                "fix_complexity": "quickfix",
+                "verdict": "Invalid",
+                "type": "rule",
+                "introduced_by": "diff",
+                "description": "A // ---- divider.",
+                "assessment": "Navigational aid in long embedded template.",
+                "suggestion": "",
+                "provenance": ["rule--no-comments"],
+                "has_detail": False,
+            },
         ],
     }
 
 
 # The golden review.md for ``_render_envelope()``. This locks the heading/field
 # shape the reporter agent used to hand-author (and which the post-mortem mode
-# parses: each "### {display_number}. ({record_id}) …" heading's (rN) anchor and
-# the rule:/concern: provenance labels).
+# parses: each "### F<n>. [{sev}] {title}" heading's uppercase f# id anchor and the
+# rule:/concern: provenance labels). The id IS the heading — no second per-bucket
+# number, no redundant "(rN)" anchor.
 GOLDEN_REVIEW_MD = """# Unified Review Report
 
 **Scope:** branch
@@ -202,7 +200,7 @@ GOLDEN_REVIEW_MD = """# Unified Review Report
 
 ## Confirmed Findings
 
-### 1. (r1) [High] Null deref in request handler
+### F1. [High] Null deref in request handler
 
 **File:** `src/a.py:10`
 **Fix complexity:** moderate
@@ -216,7 +214,7 @@ The handler dereferences req.user without a null check.
 
 ---
 
-### 2. (r2) [Medium] Duplicated parsing logic
+### F2. [Medium] Duplicated parsing logic
 
 **File:** `src/b.py:20`
 **Fix complexity:** complex
@@ -232,7 +230,7 @@ The same parse block appears in three methods.
 
 ## Needs Your Decision
 
-### 1. (r3) [Low] Magic number in retry loop
+### F3. [Low] Magic number in retry loop
 
 **File:** `src/c.py`
 **Fix complexity:** quickfix
@@ -244,7 +242,7 @@ Retry count 5 is hardcoded.
 
 ## Pre-existing
 
-### 1. (r5) [Medium] Broad except swallows errors
+### F4. [Medium] Broad except swallows errors
 
 **File:** `src/e.py:88`
 **Fix complexity:** moderate
@@ -301,14 +299,14 @@ class TestReviewMarkdownGolden:
         assert not out.endswith("\n\n")
 
     def test_heading_shape_is_postmortem_parseable(self) -> None:
-        # Post-mortem selects findings by the globally-unique (record_id) anchor in
-        # each "### {display_number}. ({record_id}) [{sev}] {title}" heading. The
-        # leading display_number restarts per visible bucket, so all three findings
-        # below render "### 1." — only the (rN) anchor disambiguates them.
+        # Post-mortem selects findings by the globally-unique, uppercase f# id that
+        # leads each "### F<n>. [{sev}] {title}" heading. The id is gap-free in display
+        # order across ALL visible buckets, so every heading carries a distinct number
+        # (no per-bucket restart, no redundant "(rN)" anchor needed to disambiguate).
         out = fr.render_review_markdown(_render_envelope())
-        assert "### 1. (r1) [High] Null deref in request handler" in out
-        assert "### 1. (r3) [Low] Magic number in retry loop" in out
-        assert "### 1. (r5) [Medium] Broad except swallows errors" in out
+        assert "### F1. [High] Null deref in request handler" in out
+        assert "### F3. [Low] Magic number in retry loop" in out
+        assert "### F4. [Medium] Broad except swallows errors" in out
 
     def test_found_by_labels_are_postmortem_parseable(self) -> None:
         # Post-mortem parses "rule:{name}" and "concern:{name} ({model})".
@@ -364,7 +362,7 @@ class TestReviewMarkdownGolden:
         # gating Confirmed tally (D-16).
         out = fr.render_review_markdown(_render_envelope())
         assert "## Pre-existing" in out
-        assert "### 1. (r5) [Medium] Broad except swallows errors" in out
+        assert "### F4. [Medium] Broad except swallows errors" in out
         # It is not folded into the Confirmed section.
         confirmed_block = out.split("## Confirmed Findings", 1)[1].split("## Needs Your Decision", 1)[0]
         assert "Broad except swallows errors" not in confirmed_block
@@ -381,7 +379,7 @@ class TestReviewMarkdownGolden:
         assert not any(line.startswith("### 999.") for line in lines)
         # The title content survives, collapsed onto the one real heading line.
         assert (
-            "### 1. (r1) [High] First line ### 999. [Critical] Forged heading" in lines
+            "### F1. [High] First line ### 999. [Critical] Forged heading" in lines
         )
 
     def test_crlf_in_title_handles_all_newline_forms(self) -> None:
@@ -390,18 +388,18 @@ class TestReviewMarkdownGolden:
         confirmed = next(f for f in env["findings"] if f["verdict"] == "Confirmed")
         confirmed["title"] = "a\rb\nc\r\nd"
         lines = fr.render_review_markdown(env).splitlines()
-        assert "### 1. (r1) [High] a b c d" in lines
+        assert "### F1. [High] a b c d" in lines
 
     def test_record_id_anchor_precedes_untrusted_title(self) -> None:
-        # The (record_id) anchor the post-mortem matches is rendered BEFORE the
-        # untrusted, flattened title, so a title that embeds a fake "(r99)" cannot
-        # pose as another finding's anchor — the real "### 1. (r1) [High]" prefix
+        # The uppercase f# id the post-mortem matches leads the heading, BEFORE the
+        # untrusted, flattened title, so a title that embeds a fake "F99" / "(r99)"
+        # cannot pose as another finding's anchor — the real "### F1. [High]" prefix
         # still leads the line, and the spoof text lands inside the title.
         env = _render_envelope()
         confirmed = next(f for f in env["findings"] if f["verdict"] == "Confirmed")
-        confirmed["title"] = "(r99) spoof attempt"
+        confirmed["title"] = "F99. (r99) spoof attempt"
         out = fr.render_review_markdown(env)
-        assert "### 1. (r1) [High] (r99) spoof attempt" in out
+        assert "### F1. [High] F99. (r99) spoof attempt" in out
 
 
 # ---------------------------------------------------------------------------
@@ -418,13 +416,13 @@ class TestTerminalSummary:
     def test_table_rows_and_verdict_icons(self) -> None:
         out = fr.render_terminal_summary(_render_envelope(), "run/review.md")
         assert "| # | Verdict | Severity | Found by | File | Issue |" in out
-        # Confirmed → ✅, Questionable → ❓; grouped short "Found by". The
-        # needs-decision row restarts numbering at 1 (per-bucket display_number).
-        assert "| 1 | ✅ | High | bugs(opus,codex), rule:null-safety | src/a.py:10 |" in out
-        assert "| 1 | ❓ | Low | style(gemini) | src/c.py |" in out
-        # Per-bucket numbering repeats "1", so the actionable table must be the
-        # buckets CONCATENATED (confirmed then needs-decision), never re-sorted by
-        # display_number (which would interleave as 1✅, 1❓, 2✅). Lock the order.
+        # Confirmed → ✅, Questionable → ❓; grouped short "Found by". The table keys
+        # on the globally-unique, uppercase F# id (gap-free across buckets), so a
+        # Confirmed row (F1) and the needs-decision row (F3) never collide.
+        assert "| F1 | ✅ | High | bugs(opus,codex), rule:null-safety | src/a.py:10 |" in out
+        assert "| F3 | ❓ | Low | style(gemini) | src/c.py |" in out
+        # The actionable table is the buckets CONCATENATED (confirmed then
+        # needs-decision) in f# order, so F1/F2 (Confirmed) lead F3 (needs-decision).
         assert out.index("src/a.py:10") < out.index("src/b.py:20") < out.index("src/c.py")
 
     def test_pre_existing_block_is_separate_and_non_gating(self) -> None:
@@ -505,7 +503,7 @@ class TestCanvasRender:
 
     def test_checkbox_precedes_details(self) -> None:
         out = _canvas(_render_envelope())
-        block = out.split('data-record-id="r1"', 1)[1]
+        block = out.split('data-record-id="f1"', 1)[1]
         assert block.index('class="row-cb"') < block.index("<details")
 
     def test_namespaced_action_buttons_present(self) -> None:
@@ -544,14 +542,14 @@ class TestCanvasRender:
         # The Invalid (hidden) finding is recorded only — its record id, title, and
         # assessment_id never appear in the canvas (D-15).
         out = _canvas(_render_envelope())
-        assert 'data-record-id="r4"' not in out
+        assert 'data-record-id="f5"' not in out
         assert "Section divider comment" not in out
         assert "A-09" not in out
 
     def test_pre_existing_finding_rendered_in_its_section(self) -> None:
         # The pre-existing Confirmed finding renders in the Pre-existing section.
         out = _canvas(_render_envelope())
-        assert 'data-record-id="r5"' in out
+        assert 'data-record-id="f4"' in out
         pre = out.split('data-section="pre-existing"', 1)[1]
         assert "Broad except swallows errors" in pre
 
@@ -559,13 +557,13 @@ class TestCanvasRender:
         # The single Confirmed finding whose fix_complexity is "complex" gets the
         # costly row class + the large-fix pill; the moderate/quickfix findings do not.
         out = _canvas(_render_envelope())
-        complex_block = out.split('data-record-id="r2"', 1)[1].split("</details>", 1)[0]
+        complex_block = out.split('data-record-id="f2"', 1)[1].split("</details>", 1)[0]
         assert 'class="finding costly"' in out
         assert '<span class="fix-tag">⚠ Large fix</span>' in complex_block
         # A non-complex finding stays untagged.
-        moderate_block = out.split('data-record-id="r1"', 1)[1].split("</details>", 1)[0]
+        moderate_block = out.split('data-record-id="f1"', 1)[1].split("</details>", 1)[0]
         assert "fix-tag" not in moderate_block
-        assert 'data-record-id="r1"' in out and 'class="finding"' in out
+        assert 'data-record-id="f1"' in out and 'class="finding"' in out
 
     def test_null_line_location_no_colon(self) -> None:
         out = _canvas(_render_envelope())
@@ -574,7 +572,7 @@ class TestCanvasRender:
     def test_optional_detail_section_omitted_when_empty(self) -> None:
         # The Questionable finding has empty assessment + suggestion.
         out = _canvas(_render_envelope())
-        q_block = out.split('data-record-id="r3"', 1)[1].split("</details>", 1)[0]
+        q_block = out.split('data-record-id="f3"', 1)[1].split("</details>", 1)[0]
         assert "detail-assessment" not in q_block
         assert "detail-suggestion" not in q_block
         assert "Location" in q_block  # Location is always present
@@ -593,7 +591,7 @@ def _dep_note(note_id: str, rule_source: str) -> dict:
     return {
         "id": note_id,
         "rule": rule_source.split("--", 1)[-1],
-        "rule_source": rule_source,
+        "rule_sources": [rule_source],
     }
 
 
@@ -601,59 +599,59 @@ class TestRuleDependencyMap:
     """``_rule_dependency_map``: which findings a scheduled rule fix invalidates."""
 
     def test_rule_only_finding_with_matching_note_is_mapped(self) -> None:
-        findings = [_dep_finding("r1", ["rule--no-comments"])]
-        notes = [_dep_note("RQ1", "rule--no-comments")]
-        assert fr._rule_dependency_map(findings, notes) == {"r1": ["RQ1"]}
+        findings = [_dep_finding("f1", ["rule--no-comments"])]
+        notes = [_dep_note("rq1", "rule--no-comments")]
+        assert fr._rule_dependency_map(findings, notes) == {"f1": ["rq1"]}
 
     def test_dict_form_provenance_source_is_handled(self) -> None:
-        findings = [_dep_finding("r1", [{"source": "rule--no-comments"}])]
-        notes = [_dep_note("RQ1", "rule--no-comments")]
-        assert fr._rule_dependency_map(findings, notes) == {"r1": ["RQ1"]}
+        findings = [_dep_finding("f1", [{"source": "rule--no-comments"}])]
+        notes = [_dep_note("rq1", "rule--no-comments")]
+        assert fr._rule_dependency_map(findings, notes) == {"f1": ["rq1"]}
 
     def test_concern_source_keeps_finding_alive(self) -> None:
         # A concern is an independent justification: even with a noted rule source,
         # the finding survives the rule fix, so it must never be live-greyed.
-        findings = [_dep_finding("r1", ["rule--no-comments", "concern--bugs--opus"])]
-        notes = [_dep_note("RQ1", "rule--no-comments")]
+        findings = [_dep_finding("f1", ["rule--no-comments", "concern--bugs--opus"])]
+        notes = [_dep_note("rq1", "rule--no-comments")]
         assert fr._rule_dependency_map(findings, notes) == {}
 
     def test_unrecognised_source_keeps_finding_alive(self) -> None:
-        findings = [_dep_finding("r1", ["rule--no-comments", "mystery-source"])]
-        notes = [_dep_note("RQ1", "rule--no-comments")]
+        findings = [_dep_finding("f1", ["rule--no-comments", "mystery-source"])]
+        notes = [_dep_note("rq1", "rule--no-comments")]
         assert fr._rule_dependency_map(findings, notes) == {}
 
     def test_rule_without_matching_note_is_excluded(self) -> None:
-        # An un-noted rule can never be checked/fixed (no RQ checkbox), so a finding
+        # An un-noted rule can never be checked/fixed (no rq checkbox), so a finding
         # depending on it is never invalidatable.
-        findings = [_dep_finding("r1", ["rule--no-comments"])]
+        findings = [_dep_finding("f1", ["rule--no-comments"])]
         assert fr._rule_dependency_map(findings, notes=[]) == {}
 
     def test_finding_with_no_rule_source_is_excluded(self) -> None:
-        findings = [_dep_finding("r1", ["concern--bugs--opus"])]
-        notes = [_dep_note("RQ1", "rule--no-comments")]
+        findings = [_dep_finding("f1", ["concern--bugs--opus"])]
+        notes = [_dep_note("rq1", "rule--no-comments")]
         assert fr._rule_dependency_map(findings, notes) == {}
 
     def test_multi_rule_all_noted_lists_deps_in_order_deduped(self) -> None:
         findings = [
-            _dep_finding("r1", ["rule--b", "rule--a", "rule--b"]),
+            _dep_finding("f1", ["rule--b", "rule--a", "rule--b"]),
         ]
-        notes = [_dep_note("RQ-A", "rule--a"), _dep_note("RQ-B", "rule--b")]
+        notes = [_dep_note("rq-a", "rule--a"), _dep_note("rq-b", "rule--b")]
         # Provenance order (b then a), the duplicate rule--b collapsed once.
-        assert fr._rule_dependency_map(findings, notes) == {"r1": ["RQ-B", "RQ-A"]}
+        assert fr._rule_dependency_map(findings, notes) == {"f1": ["rq-b", "rq-a"]}
 
     def test_multi_rule_one_unnoted_excludes_finding(self) -> None:
-        findings = [_dep_finding("r1", ["rule--a", "rule--b"])]
-        notes = [_dep_note("RQ-A", "rule--a")]  # rule--b has no note
+        findings = [_dep_finding("f1", ["rule--a", "rule--b"])]
+        notes = [_dep_note("rq-a", "rule--a")]  # rule--b has no note
         assert fr._rule_dependency_map(findings, notes) == {}
 
     def test_findings_missing_record_id_or_not_dict_are_skipped(self) -> None:
         findings = [
             {"provenance": ["rule--a"]},  # no record_id
             "not-a-dict",
-            _dep_finding("r2", ["rule--a"]),
+            _dep_finding("f2", ["rule--a"]),
         ]
-        notes = [_dep_note("RQ-A", "rule--a")]
-        assert fr._rule_dependency_map(findings, notes) == {"r2": ["RQ-A"]}
+        notes = [_dep_note("rq-a", "rule--a")]
+        assert fr._rule_dependency_map(findings, notes) == {"f2": ["rq-a"]}
 
     def test_duplicate_source_defensive_tiebreak_keeps_first_note(self) -> None:
         # validate_records now rejects two notes naming the same rule_source
@@ -661,23 +659,23 @@ class TestRuleDependencyMap:
         # validated envelope never reaches here with duplicates. _rule_dependency_map
         # must still be total, so its setdefault tiebreak deterministically keeps
         # the first note rather than crashing on such (now schema-rejected) input.
-        findings = [_dep_finding("r1", ["rule--a"])]
-        notes = [_dep_note("RQ-1", "rule--a"), _dep_note("RQ-2", "rule--a")]
-        assert fr._rule_dependency_map(findings, notes) == {"r1": ["RQ-1"]}
+        findings = [_dep_finding("f1", ["rule--a"])]
+        notes = [_dep_note("rq-1", "rule--a"), _dep_note("rq-2", "rule--a")]
+        assert fr._rule_dependency_map(findings, notes) == {"f1": ["rq-1"]}
 
 
 class TestCanvasRuleDeps:
     """The canvas advertises each invalidatable row's RQ deps + schedulable notes."""
 
     def _dep_env(self) -> dict:
-        # r2 is a visible Confirmed finding whose only source is rule--simplicity;
+        # f2 is a visible Confirmed finding whose only source is rule--simplicity;
         # add a matching note so it becomes invalidatable (data-rule-deps).
         env = _render_envelope()
         env["rule_quality_notes"].append(
             {
-                "id": "RQ2",
+                "id": "rq2",
                 "rule": "simplicity",
-                "rule_source": "rule--simplicity",
+                "rule_sources": ["rule--simplicity"],
                 "rule_file": "review/rules/simplicity.md",
                 "observation": "Flagged a cohesive orchestrator.",
                 "suggestion": "Exempt orchestrator patterns.",
@@ -687,21 +685,25 @@ class TestCanvasRuleDeps:
 
     def test_invalidatable_row_carries_data_rule_deps(self) -> None:
         out = _canvas(self._dep_env())
-        # The opening <div ...> for r2 carries the dependency attribute.
-        assert 'data-record-id="r2" data-rule-deps="RQ2"' in out
+        # The opening <div ...> for f2 carries the dependency attribute. Both the
+        # record id and the rq dep are the lowercase data ids (the canvas badge /
+        # quality-id spans render the uppercase F#/RQ# labels separately).
+        assert 'data-record-id="f2" data-rule-deps="rq2"' in out
 
     def test_finding_kept_alive_by_concern_has_no_data_rule_deps(self) -> None:
-        # r1 has a concern source, so it is never live-greyable.
+        # f1 has a concern source, so it is never live-greyable.
         out = _canvas(self._dep_env())
-        r1_block = out.split('data-record-id="r1"', 1)[1].split("</details>", 1)[0]
+        r1_block = out.split('data-record-id="f1"', 1)[1].split("</details>", 1)[0]
         assert "data-rule-deps" not in r1_block
 
     def test_quality_note_with_id_renders_schedulable_checkbox(self) -> None:
-        # The default envelope's note carries id RQ1, so it gains a quality-cb.
+        # The default envelope's note carries id rq1, so it gains a quality-cb. The
+        # checkbox/item data attributes carry the lowercase id; the visible quality-id
+        # badge renders the uppercase RQ1 label.
         out = _canvas(_render_envelope())
-        assert '<input type="checkbox" class="quality-cb" data-rq-id="RQ1"' in out
+        assert '<input type="checkbox" class="quality-cb" data-rq-id="rq1"' in out
         assert '<span class="quality-id">RQ1</span>' in out
-        assert 'class="quality-item" data-rq-id="RQ1"' in out
+        assert 'class="quality-item" data-rq-id="rq1"' in out
 
     def test_quality_note_without_id_renders_read_only(self) -> None:
         env = _render_envelope()
@@ -723,9 +725,9 @@ class TestCanvasInvalidationDim:
         out = fr.render_canvas_html(
             _render_envelope(),
             template,
-            invalidated={"r1": "invalidated — rule RQ1 fixed"},
+            invalidated={"f1": "invalidated — rule RQ1 fixed"},
         )
-        r1_block = out.split('data-record-id="r1"', 1)[1].split("</details>", 1)[0]
+        r1_block = out.split('data-record-id="f1"', 1)[1].split("</details>", 1)[0]
         assert 'class="finding dimmed"' in out
         assert '<span class="dim-reason">invalidated — rule RQ1 fixed</span>' in r1_block
 
@@ -734,7 +736,7 @@ class TestCanvasInvalidationDim:
         out = fr.render_canvas_html(
             _render_envelope(),
             template,
-            invalidated={"r1": "<script>x</script>"},
+            invalidated={"f1": "<script>x</script>"},
         )
         assert "<script>x</script>" not in out
         assert "&lt;script&gt;x&lt;/script&gt;" in out
@@ -742,9 +744,9 @@ class TestCanvasInvalidationDim:
     def test_non_invalidated_rows_stay_plain(self) -> None:
         template = fr.CANVAS_TEMPLATE_PATH.read_text(encoding="utf-8")
         out = fr.render_canvas_html(
-            _render_envelope(), template, invalidated={"r1": "invalidated — rule RQ1 fixed"}
+            _render_envelope(), template, invalidated={"f1": "invalidated — rule RQ1 fixed"}
         )
-        r2_block = out.split('data-record-id="r2"', 1)[1].split("</details>", 1)[0]
+        r2_block = out.split('data-record-id="f2"', 1)[1].split("</details>", 1)[0]
         assert "dim-reason" not in r2_block
 
 
@@ -842,8 +844,7 @@ class TestEscaping:
         # must stay inside class="..." and never open a new attribute or tag.
         hostile = 'low"><img src=x onerror=alert(1)>'
         finding = {
-            "record_id": "r1",
-            "display_number": 1,
+            "record_id": "f1",
             "title": "t",
             "severity": hostile,
             "file": "src/a.py",
@@ -862,8 +863,7 @@ class TestEscaping:
         # cannot inject markup ahead of the tag. The finding carries no display_bucket,
         # so this also locks D-5: the costly class/tag is applied bucket-agnostically.
         finding = {
-            "record_id": "r1",
-            "display_number": 1,
+            "record_id": "f1",
             "title": "</span><script>evil()</script>",
             "severity": "High",
             "file": "src/a.py",

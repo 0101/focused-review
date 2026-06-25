@@ -380,7 +380,7 @@ def test_fixture_uses_exclusive_accordion(fixture_text: str):
 def test_fixture_checkbox_outside_summary(fixture_text: str):
     # the per-row checkbox must precede <details>, never inside <summary>,
     # so selecting a finding never toggles its accordion.
-    block = fixture_text.split('data-record-id="A-01"', 1)[1]
+    block = fixture_text.split('data-record-id="f1"', 1)[1]
     cb = block.index('class="row-cb"')
     details = block.index("<details")
     assert cb < details

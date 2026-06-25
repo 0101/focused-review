@@ -615,12 +615,12 @@
       <span class="section-title">Confirmed Findings (3)</span>
     </div>
 
-    <div class="finding" data-record-id="A-01">
-      <input type="checkbox" class="row-cb" aria-label="Select finding 1: Incremental refresh forces dashboard visible even when Issues tab is selected">
+    <div class="finding" data-record-id="f1">
+      <input type="checkbox" class="row-cb" aria-label="Select finding F1: Incremental refresh forces dashboard visible even when Issues tab is selected">
       <details class="finding-d" name="findings">
         <summary class="finding-summary">
           <span class="caret" aria-hidden="true"></span>
-          <span class="num">1</span>
+          <span class="num">F1</span>
           <span class="sev sev-high">High</span>
           <span class="found-by"><span class="found-tag found-tag-concern">bugs(opus,codex)</span></span>
           <span class="title">Incremental refresh forces dashboard visible even when Issues tab is selected</span>
@@ -653,12 +653,12 @@ newDashView.classList.add('active');             // unconditional
       </details>
     </div>
 
-    <div class="finding costly" data-record-id="A-02">
-      <input type="checkbox" class="row-cb" aria-label="Select finding 2: Blocked-only bead sets treated as no issues - deletes dashboard file">
+    <div class="finding costly" data-record-id="f2">
+      <input type="checkbox" class="row-cb" aria-label="Select finding F2: Blocked-only bead sets treated as no issues - deletes dashboard file">
       <details class="finding-d" name="findings">
         <summary class="finding-summary">
           <span class="caret" aria-hidden="true"></span>
-          <span class="num">2</span>
+          <span class="num">F2</span>
           <span class="sev sev-high">High</span>
           <span class="found-by"><span class="found-tag found-tag-concern">bugs(opus,codex)</span></span>
           <span class="title">Blocked-only bead sets treated as "no issues" — deletes dashboard file <span class="fix-tag">⚠ Large fix</span></span>
@@ -684,12 +684,12 @@ newDashView.classList.add('active');             // unconditional
       </details>
     </div>
 
-    <div class="finding" data-record-id="A-03">
-      <input type="checkbox" class="row-cb" aria-label="Select finding 3: Dead data-stat update code immediately overwritten by full DOM rebuild">
+    <div class="finding" data-record-id="f3">
+      <input type="checkbox" class="row-cb" aria-label="Select finding F3: Dead data-stat update code immediately overwritten by full DOM rebuild">
       <details class="finding-d" name="findings">
         <summary class="finding-summary">
           <span class="caret" aria-hidden="true"></span>
-          <span class="num">3</span>
+          <span class="num">F3</span>
           <span class="sev sev-medium">Medium</span>
           <span class="found-by"><span class="found-tag found-tag-concern">arch(opus)</span><span class="found-tag found-tag-rule">simplicity</span></span>
           <span class="title">Dead data-stat update code immediately overwritten by full DOM rebuild</span>
@@ -740,12 +740,12 @@ replaceChild(view-dashboard)</div>
       <span class="section-title">Needs Your Decision (2)</span>
     </div>
 
-    <div class="finding" data-record-id="A-18">
-      <input type="checkbox" class="row-cb" aria-label="Select finding 4: esc() HTML escaper insufficient for attribute context">
+    <div class="finding" data-record-id="f4">
+      <input type="checkbox" class="row-cb" aria-label="Select finding F4: esc() HTML escaper insufficient for attribute context">
       <details class="finding-d" name="findings">
         <summary class="finding-summary">
           <span class="caret" aria-hidden="true"></span>
-          <span class="num">4</span>
+          <span class="num">F4</span>
           <span class="sev sev-low">Low</span>
           <span class="found-by"><span class="found-tag found-tag-concern">security(opus)</span></span>
           <span class="title">esc() HTML escaper insufficient for attribute context — double quotes not escaped</span>
@@ -771,12 +771,12 @@ replaceChild(view-dashboard)</div>
       </details>
     </div>
 
-    <div class="finding" data-record-id="A-20" data-rule-deps="RQ2">
-      <input type="checkbox" class="row-cb" aria-label="Select finding 5: Section divider comment in production code at line 1481">
+    <div class="finding" data-record-id="f5" data-rule-deps="rq2">
+      <input type="checkbox" class="row-cb" aria-label="Select finding F5: Section divider comment in production code at line 1481">
       <details class="finding-d" name="findings">
         <summary class="finding-summary">
           <span class="caret" aria-hidden="true"></span>
-          <span class="num">5</span>
+          <span class="num">F5</span>
           <span class="sev sev-low">Low</span>
           <span class="found-by"><span class="found-tag found-tag-rule">no-unnecessary-comments</span></span>
           <span class="title">Section divider comment in production code at line 1481</span>
@@ -796,12 +796,12 @@ replaceChild(view-dashboard)</div>
       <span class="section-title">Pre-existing — non-gating (1)</span>
     </div>
 
-    <div class="finding" data-record-id="A-26">
-      <input type="checkbox" class="row-cb" aria-label="Select finding 1: SQL string built by concatenation in legacy export path">
+    <div class="finding" data-record-id="f6">
+      <input type="checkbox" class="row-cb" aria-label="Select finding F6: SQL string built by concatenation in legacy export path">
       <details class="finding-d" name="findings">
         <summary class="finding-summary">
           <span class="caret" aria-hidden="true"></span>
-          <span class="num">1</span>
+          <span class="num">F6</span>
           <span class="sev sev-medium">Medium</span>
           <span class="found-by"><span class="found-tag found-tag-concern">security(opus)</span></span>
           <span class="title">SQL string built by concatenation in legacy export path</span>
@@ -832,8 +832,8 @@ replaceChild(view-dashboard)</div>
 <details class="collapsible quality-notes" open>
   <summary class="collapsible-summary">Rule Quality Notes (2)</summary>
   <div class="collapsible-body">
-    <div class="quality-item" data-rq-id="RQ1"><input type="checkbox" class="quality-cb" data-rq-id="RQ1" aria-label="Schedule rule fix RQ1: single-responsibility"><span class="quality-id">RQ1</span> <strong>single-responsibility</strong>: 4 findings, all Invalid. Each flagged sequential steps of a single cohesive operation, which the rule explicitly exempts. — Add examples of exempted orchestrator patterns to the rule's "Right" section.</div>
-    <div class="quality-item" data-rq-id="RQ2"><input type="checkbox" class="quality-cb" data-rq-id="RQ2" aria-label="Schedule rule fix RQ2: no-unnecessary-comments"><span class="quality-id">RQ2</span> <strong>no-unnecessary-comments</strong>: 10 findings; 4 Invalid, 4 Questionable, 2 Confirmed (Low). Mostly navigational comments in embedded JavaScript inside an F# string template. — Consider an exception for embedded template code.</div>
+    <div class="quality-item" data-rq-id="rq1"><input type="checkbox" class="quality-cb" data-rq-id="rq1" aria-label="Schedule rule fix RQ1: single-responsibility"><span class="quality-id">RQ1</span> <strong>single-responsibility</strong>: 4 findings, all Invalid. Each flagged sequential steps of a single cohesive operation, which the rule explicitly exempts. — Add examples of exempted orchestrator patterns to the rule's "Right" section.</div>
+    <div class="quality-item" data-rq-id="rq2"><input type="checkbox" class="quality-cb" data-rq-id="rq2" aria-label="Schedule rule fix RQ2: no-unnecessary-comments"><span class="quality-id">RQ2</span> <strong>no-unnecessary-comments</strong>: 10 findings; 4 Invalid, 4 Questionable, 2 Confirmed (Low). Mostly navigational comments in embedded JavaScript inside an F# string template. — Consider an exception for embedded template code.</div>
   </div>
 </details>
 
