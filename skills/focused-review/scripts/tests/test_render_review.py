@@ -663,6 +663,31 @@ class TestRuleDependencyMap:
         notes = [_dep_note("rq-1", "rule--a"), _dep_note("rq-2", "rule--a")]
         assert fr._rule_dependency_map(findings, notes) == {"f1": ["rq-1"]}
 
+    def test_chunk_suffixed_provenance_resolves_to_one_note(self) -> None:
+        # Finding r10: a rule split across diff chunks tags each chunk's findings
+        # with its own --<digits> provenance label (rule--gr--1, rule--gr--2) while
+        # a single quality note covers the whole rule. The trailing chunk suffix is
+        # normalized off both sides, so every chunk's findings map to that one note.
+        findings = [_dep_finding("f1", ["rule--gr--1"]), _dep_finding("f2", ["rule--gr--2"])]
+        notes = [_dep_note("rq1", "rule--gr--1")]  # note lists one chunk label
+        assert fr._rule_dependency_map(findings, notes) == {"f1": ["rq1"], "f2": ["rq1"]}
+
+    def test_chunk_suffixed_provenance_matches_canonical_note_source(self) -> None:
+        # The note may instead name the canonical (un-chunked) rule source; chunked
+        # finding provenance still resolves to it after suffix normalization.
+        findings = [_dep_finding("f1", ["rule--gr--1"]), _dep_finding("f2", ["rule--gr--2"])]
+        notes = [_dep_note("rq1", "rule--gr")]
+        assert fr._rule_dependency_map(findings, notes) == {"f1": ["rq1"], "f2": ["rq1"]}
+
+    def test_chunk_suffix_does_not_merge_distinct_rules(self) -> None:
+        # Normalization only strips a trailing --<digits>; distinct rule names with
+        # numeric-looking but non-chunk segments stay distinct. rule--http2 is its
+        # own rule (no "--" before the digit), so an un-noted rule--http2 finding is
+        # still excluded rather than collapsing into the noted rule--http.
+        findings = [_dep_finding("f1", ["rule--http2"])]
+        notes = [_dep_note("rq1", "rule--http")]
+        assert fr._rule_dependency_map(findings, notes) == {}
+
 
 class TestCanvasRuleDeps:
     """The canvas advertises each invalidatable row's RQ deps + schedulable notes."""

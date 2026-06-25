@@ -111,6 +111,33 @@ PRE_EXISTING_MARKER = "pre-existing"
 _FINDING_ID_RE = re.compile(r"^f[0-9]+$")
 _RULE_QUALITY_NOTE_ID_RE = re.compile(r"^rq[0-9]+$")
 
+# Provenance source labels carry the dispatch chunk index — a rule that spans
+# several diff chunks reports each chunk's findings under `rule--<name>--<chunk>`
+# (e.g. `rule--general-review--1`; see SKILL.md Phase 1 findings_path) — while the
+# rule *file* the label names is not chunk-suffixed (`general-review.md`). This
+# matches a single trailing `--<digits>` so it can be normalized off when relating
+# a provenance label to its rule file (the C-12 stem cross-check) or grouping a
+# rule's chunked findings under one quality note (the rule-fix dependency map).
+_RULE_CHUNK_SUFFIX_RE = re.compile(r"--[0-9]+$")
+
+
+def _strip_chunk_suffix(label: str) -> str:
+    """Drop a single trailing ``--<digits>`` chunk suffix from a rule label/stem.
+
+    Provenance labels carry the dispatch chunk index (``rule--general-review--1``)
+    while the rule file they name does not (``general-review.md``). Stripping the
+    suffix maps every chunk of one rule onto the same canonical label/stem so the
+    C-12 stem cross-check (:func:`_rule_file_source_mismatch`) and the rule-fix
+    dependency map (:func:`_rule_dependency_map`) treat all chunks as one rule.
+
+    Works on either the full label (``rule--general-review--1`` →
+    ``rule--general-review``) or the bare stem (``general-review--1`` →
+    ``general-review``), since only the trailing ``--<digits>`` is anchored. A
+    label with no chunk suffix — or whose trailing segment is non-numeric, e.g.
+    ``concern--bugs--opus`` — is returned unchanged.
+    """
+    return _RULE_CHUNK_SUFFIX_RE.sub("", label)
+
 
 def _is_pre_existing(introduced_by: object) -> bool:
     """Whether ``introduced_by`` marks a finding as *not* introduced by the change.
@@ -2436,6 +2463,18 @@ def _rule_file_source_mismatch(rule_source: object, rule_file: object) -> str | 
     invalidated — silent, cross-wired corruption. This cross-check ties the two
     together: the ``rule_file`` stem must equal the name part of ``rule_source``.
 
+    Provenance labels are chunk-suffixed by the dispatch (``rule--general-review--1``
+    is chunk 1 of the ``general-review`` rule; see SKILL.md Phase 1) while the rule
+    file they name is not (``general-review.md``), so a trailing ``--<digits>`` chunk
+    suffix is normalized off the source name before comparing stems — every chunk of
+    a rule must accept that rule's single file. The C-12 protection is retained: the
+    path-safety check (:func:`_validate_rule_file`, run by both callers before this
+    cross-check) has already proved ``rule_file`` is a safe ``.md`` under the rules
+    directory, so the normalized stem still resolves to a real rule file there; only
+    the chunk suffix is forgiven, never a genuinely different rule name. The raw
+    (un-normalized) name is also accepted so a rule whose filename legitimately ends
+    in ``--<digits>`` still matches its own ``--<digits>.md`` file.
+
     Returns ``None`` (nothing to report) when either field is empty/non-string or
     when ``rule_source`` is not in canonical ``rule--`` form — there is then no name
     to derive, and an un-prefixed source matches no finding provenance anyway, so its
@@ -2446,14 +2485,15 @@ def _rule_file_source_mismatch(rule_source: object, rule_file: object) -> str | 
     source = rule_source.strip()
     if not source.startswith("rule--"):
         return None
-    expected_stem = source[len("rule--"):]
+    raw_name = source[len("rule--"):]
+    canonical_name = _strip_chunk_suffix(raw_name)
     actual_stem = PurePosixPath(rule_file.replace("\\", "/")).stem
-    if actual_stem == expected_stem:
+    if actual_stem == raw_name or actual_stem == canonical_name:
         return None
     return (
         f"rule_file stem {actual_stem!r} does not match rule_source {source!r} "
-        f"(rule_source names rule {expected_stem!r}, so rule_file must be that "
-        f"rule's {expected_stem}.md file under the rules directory); the file the "
+        f"(rule_source names rule {canonical_name!r}, so rule_file must be that "
+        f"rule's {canonical_name}.md file under the rules directory); the file the "
         f"agent edits must be the rule whose findings the fix invalidates"
     )
 
@@ -3311,6 +3351,13 @@ def _rule_dependency_map(findings: list, notes: list) -> dict[str, list[str]]:
     # map is one-to-one for any validated envelope; the setdefault tiebreak below
     # is a defensive fallback that keeps the first note should unvalidated input
     # ever reach here.
+    #
+    # Both the note's rule_sources and the findings' provenance labels are reduced
+    # to their canonical (chunk-suffix-stripped) form before matching: a rule split
+    # across diff chunks tags its findings `rule--<name>--1`, `rule--<name>--2`, …
+    # while a single quality note covers the whole rule, so every chunk label must
+    # resolve to the same note. _strip_chunk_suffix is a no-op for un-chunked labels,
+    # so plain `rule--<name>` matching is unchanged.
     source_to_note: dict[str, str] = {}
     for note in notes:
         if not isinstance(note, dict):
@@ -3323,7 +3370,7 @@ def _rule_dependency_map(findings: list, notes: list) -> dict[str, list[str]]:
             continue
         for source in sources:
             if _is_nonempty_str(source):
-                source_to_note.setdefault(source.strip(), note_id)
+                source_to_note.setdefault(_strip_chunk_suffix(source.strip()), note_id)
 
     deps: dict[str, list[str]] = {}
     for finding in findings:
@@ -3345,7 +3392,7 @@ def _rule_dependency_map(findings: list, notes: list) -> dict[str, list[str]]:
         note_ids: list[str] = []
         covered = True
         for label in rule_labels:
-            note_id = source_to_note.get(label)
+            note_id = source_to_note.get(_strip_chunk_suffix(label))
             if note_id is None:
                 covered = False  # an un-noted rule can never be checked/fixed
                 break

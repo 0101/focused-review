@@ -531,6 +531,23 @@ class TestValidateActionRuleFileTrustBoundary:
         assert errors == []
         assert expanded is not None and expanded["rule_count"] == 1
 
+    def test_chunk_suffixed_rule_source_accepted_at_action_time(self) -> None:
+        # Finding r10: a chunk-suffixed provenance label (rule--no-comments--1, chunk
+        # 1 of the no-comments rule) names the same base file as its un-suffixed twin.
+        # The action-time C-12 re-validation normalizes the trailing --<digits>, so a
+        # note carrying chunk labels still resolves cleanly against no-comments.md.
+        env = copy.deepcopy(_envelope_with_notes())
+        env["rule_quality_notes"][0]["rule_sources"] = [
+            "rule--no-comments--1",
+            "rule--no-comments--2",
+        ]
+        env["findings"][0]["provenance"] = ["rule--no-comments--1"]
+        expanded, errors = fr.validate_action(
+            env, RUN_ID, ["rq1"], action="focused-review.fix", rules_dir="review/"
+        )
+        assert errors == []
+        assert expanded is not None and expanded["rule_count"] == 1
+
     def test_defaults_to_review_prefix_when_rules_dir_omitted(self) -> None:
         # With no rules_dir passed, the check falls back to the secure-by-default
         # "review/" prefix (mirroring validate_records): a note outside review/ is
