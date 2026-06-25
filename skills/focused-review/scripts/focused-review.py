@@ -2509,9 +2509,11 @@ def _collect_rule_file_errors(
     respective trust boundaries: first the path-safety check (absolute / ``..``
     traversal / non-``.md`` / outside ``rules_dir``) ONCE, then — only when the path
     is safe — the consistency cross-check (Finding C-12 via
-    :func:`_rule_file_source_mismatch`) for *every* label in ``rule_sources`` so a
-    note naming several rules can't point ``rule_file`` at a file that matches none
-    of them. The cross-check is skipped on an unsafe path because the path error is
+    :func:`_rule_file_source_mismatch`) for *every* label in ``rule_sources`` so the
+    note can't point ``rule_file`` at a file that matches none of its labels. Because
+    each label must match that one file, all labels name the *same* rule — a note
+    covers one rule, and several labels are only the chunk suffixes of that rule. The
+    cross-check is skipped on an unsafe path because the path error is
     the actionable one and the stem of a traversal/absolute path is meaningless.
     Returns the messages in order; an empty list means the ``rule_file`` is
     trustworthy to edit.
@@ -2619,8 +2621,9 @@ def _validate_rule_quality_note(
 
     # rule_file — path safety, then per-source consistency (Finding C-12). The
     # path-safety check runs once; the rule_source cross-check runs for every
-    # source label so a note naming several rules can't point rule_file at a file
-    # that matches none of them.
+    # source label so the note can't point rule_file at a file matching none of its
+    # labels. Since each label must match that one file, all labels name the SAME
+    # rule (a note covers one rule; several labels are only its chunk suffixes).
     rule_file = item.get("rule_file", _MISSING)
     path_messages: list[str] = []
     _validate_rule_file(rule_file, rules_dir, lambda _f, message: path_messages.append(message))
@@ -3364,11 +3367,11 @@ def _rule_dependency_map(findings: list, notes: list) -> dict[str, list[str]]:
     from the map, so the canvas never live-greys it.
     """
     # Canonical rule_source label -> the note id that fixes it. A note now carries
-    # a LIST of rule_sources (each rule it covers), so every label maps to that
-    # note's id. validate_records rejects two notes naming the same source, so this
-    # map is one-to-one for any validated envelope; the setdefault tiebreak below
-    # is a defensive fallback that keeps the first note should unvalidated input
-    # ever reach here.
+    # a LIST of rule_sources (the chunk labels of the one rule it covers), so every
+    # label maps to that note's id. validate_records rejects two notes naming the
+    # same source, so this map is one-to-one for any validated envelope; the
+    # setdefault tiebreak below is a defensive fallback that keeps the first note
+    # should unvalidated input ever reach here.
     #
     # Both the note's rule_sources and the findings' provenance labels are reduced
     # to their canonical (chunk-suffix-stripped) form before matching: a rule split
@@ -4437,7 +4440,8 @@ def _accumulated_rule_fixes(
     # entries unioned with the rules resolved from the current batch. Insertion
     # order — persisted first, then this batch — gives the rebuilt entries a
     # deterministic first-seen order, and each rule's source labels accumulate
-    # (a note can name several rule--<name> sources) without duplication.
+    # (a note can carry several rule--<name> chunk labels of one rule) without
+    # duplication.
     existing = load_run_state(run_dir, expected_run_id=run_id).get("rule_fixes_applied", [])
     rule_sources_by_id: dict[str, list[str]] = {}
 
