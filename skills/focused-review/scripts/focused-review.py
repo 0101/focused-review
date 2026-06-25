@@ -2547,9 +2547,13 @@ def _validate_rule_quality_note(
 
     Each source label is uniqueness-checked across the whole notes array (via
     *seen_rule_sources*) because :func:`_rule_dependency_map` keys its source->note
-    map on the stripped label; two notes naming the same source would collapse to
-    the first, so the later note's fix would silently invalidate no findings.
-    Rejecting the duplicate here keeps that map one-to-one.
+    map on the CANONICAL (chunk-suffix-stripped) label; two notes naming the same
+    rule — even via *different* chunk labels (``rule--gr--1`` / ``rule--gr--2``) —
+    would collapse to the first, so the later note's fix would silently invalidate
+    no findings (Finding F1). Rejecting that cross-note duplicate here keeps the map
+    one-to-one. A single note MAY still list every chunk of one rule: those
+    within-note canonical repeats all resolve to that one note, so they are
+    de-duplicated rather than rejected.
     """
     base_path = f"rule_quality_notes[{index}]"
     if not isinstance(item, dict):
@@ -2574,10 +2578,17 @@ def _validate_rule_quality_note(
             add(field, f"{field} is required and must be a non-empty string")
 
     # rule_sources — required non-empty list of canonical rule--<name> labels.
-    # Each entry must be a non-empty string and unique across ALL notes (so the
-    # source->note map _rule_dependency_map builds stays one-to-one). A label that
-    # repeats within this same note is caught by the same accumulated set.
+    # Each entry must be a non-empty string; the CANONICAL (chunk-suffix-stripped)
+    # label must be unique across ALL notes, mirroring the consumer
+    # _rule_dependency_map (which keys on _strip_chunk_suffix(source.strip())) so
+    # that map stays one-to-one. A single note MAY repeat a canonical (it lists
+    # several chunk labels — rule--gr--1, rule--gr--2 — of one rule it covers):
+    # those within-note repeats are de-duplicated, not rejected; only a clash with a
+    # DIFFERENT note is a duplicate. valid_sources keeps the RAW stripped labels
+    # because the rule_file stem cross-check (_rule_file_source_mismatch) re-strips
+    # the suffix itself and must see each chunk label it is given.
     valid_sources: list[str] = []
+    note_rule_sources: set[str] = set()
     rule_sources = item.get("rule_sources", _MISSING)
     if rule_sources is _MISSING or not isinstance(rule_sources, list):
         add("rule_sources", "rule_sources is required and must be a non-empty array of strings")
@@ -2589,14 +2600,21 @@ def _validate_rule_quality_note(
                 add("rule_sources", f"rule_sources[{j}] must be a non-empty string")
                 continue
             normalized = source.strip()
-            if normalized in seen_rule_sources:
+            canonical = _strip_chunk_suffix(normalized)
+            if canonical in note_rule_sources:
+                # Another chunk label of a rule THIS note already covers — keep the
+                # raw label for the rule_file cross-check; it is not a cross-note
+                # clash, so the map stays one-to-one.
+                valid_sources.append(normalized)
+            elif canonical in seen_rule_sources:
                 add(
                     "rule_sources",
                     f"duplicate rule_source {source!r} "
                     "(each rule may be named by at most one rule-quality note)",
                 )
             else:
-                seen_rule_sources.add(normalized)
+                seen_rule_sources.add(canonical)
+                note_rule_sources.add(canonical)
                 valid_sources.append(normalized)
 
     # rule_file — path safety, then per-source consistency (Finding C-12). The

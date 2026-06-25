@@ -678,6 +678,32 @@ class TestValidateRecordsRejectRuleQualityNotes:
             for e in errors
         )
 
+    def test_note_rule_source_chunk_labels_clash_across_notes(self) -> None:
+        # Finding F1: _rule_dependency_map keys its source->note map on the CANONICAL
+        # (chunk-suffix-stripped) label, so two SEPARATE notes naming the same rule
+        # via DIFFERENT chunk labels (rule--general-review--1 vs --2) collapse to one
+        # key — the later note becomes a phantom whose checkbox invalidates nothing,
+        # and chunk-2 findings are mis-attributed to the first note. The uniqueness
+        # check canonicalizes the same way, so this cross-note clash is rejected
+        # (contrast test_note_rule_file_matches_every_chunk_label_of_one_rule, where
+        # a SINGLE note may list both chunks).
+        env = _semantic_envelope()
+        env["rule_quality_notes"][0]["rule_sources"] = ["rule--general-review--1"]
+        env["rule_quality_notes"][0]["rule_file"] = "review/rules/general-review.md"
+        env["rule_quality_notes"].append(
+            {
+                "rule_sources": ["rule--general-review--2"],
+                "rule_file": "review/rules/general-review.md",
+                "observation": "o",
+                "suggestion": "s",
+            }
+        )
+        errors = fr.validate_records(env)
+        assert any(
+            e["path"] == "rule_quality_notes[1].rule_sources" and "duplicate" in e["message"]
+            for e in errors
+        )
+
     def test_note_rule_file_required(self) -> None:
         env = _semantic_envelope()
         del env["rule_quality_notes"][0]["rule_file"]
