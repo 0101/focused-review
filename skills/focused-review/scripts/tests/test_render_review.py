@@ -779,15 +779,15 @@ class TestInvalidatedReasons:
     """``_invalidated_reasons``: persisted rule fixes → per-record dim reasons."""
 
     def test_single_rule_reason(self) -> None:
-        fixes = [{"rule_id": "RQ2", "rule_source": "rule--x", "invalidated_record_ids": ["r1"]}]
-        assert fr._invalidated_reasons(fixes) == {"r1": "invalidated — rule RQ2 fixed"}
+        fixes = [{"rule_id": "rq2", "rule_sources": ["rule--x"], "invalidated_record_ids": ["f1"]}]
+        assert fr._invalidated_reasons(fixes) == {"f1": "invalidated — rule RQ2 fixed"}
 
     def test_multi_rule_reason_lists_rules_in_first_seen_order(self) -> None:
         fixes = [
-            {"rule_id": "RQ2", "rule_source": "rule--x", "invalidated_record_ids": ["r1"]},
-            {"rule_id": "RQ3", "rule_source": "rule--y", "invalidated_record_ids": ["r1"]},
+            {"rule_id": "rq2", "rule_sources": ["rule--x"], "invalidated_record_ids": ["f1"]},
+            {"rule_id": "rq3", "rule_sources": ["rule--y"], "invalidated_record_ids": ["f1"]},
         ]
-        assert fr._invalidated_reasons(fixes) == {"r1": "invalidated — rules RQ2, RQ3 fixed"}
+        assert fr._invalidated_reasons(fixes) == {"f1": "invalidated — rules RQ2, RQ3 fixed"}
 
     def test_non_list_input_is_empty(self) -> None:
         assert fr._invalidated_reasons(None) == {}
@@ -796,10 +796,10 @@ class TestInvalidatedReasons:
     def test_junk_entries_are_ignored(self) -> None:
         fixes = [
             "not-a-dict",
-            {"rule_source": "rule--x", "invalidated_record_ids": ["r1"]},  # no rule_id
-            {"rule_id": "RQ4", "invalidated_record_ids": ["r9"]},
+            {"rule_sources": ["rule--x"], "invalidated_record_ids": ["f1"]},  # no rule_id
+            {"rule_id": "rq4", "invalidated_record_ids": ["f9"]},
         ]
-        assert fr._invalidated_reasons(fixes) == {"r9": "invalidated — rule RQ4 fixed"}
+        assert fr._invalidated_reasons(fixes) == {"f9": "invalidated — rule RQ4 fixed"}
 
 
 # ---------------------------------------------------------------------------
