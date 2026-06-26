@@ -243,8 +243,10 @@
   .finding.dimmed .title { text-decoration: line-through; }
 
   /* Fixed (orchestrator applied the code-fix): reads as DONE — a green check glyph +
-     strikethrough title, NOT the 0.35 dim, so "fixed" is never read as "ignored".
+     strikethrough title and a light 0.5 fade. Kept more visible than the 0.35 disregard
+     dim, so "fixed" reads as "done" (de-emphasized), not "ignored".
      Orthogonal to .dimmed; a row may carry both and the two treatments stack. */
+  .finding.fixed { opacity: 0.5; }
   .finding.fixed .title { text-decoration: line-through; }
   .finding.fixed .title::before { content: '✓'; color: #a6e3a1; font-weight: 700; margin-right: 6px; }
 
