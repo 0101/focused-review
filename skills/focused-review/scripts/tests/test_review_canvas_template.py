@@ -239,14 +239,14 @@ def test_script_uses_document_level_delegation(template_text: str):
 def test_script_posts_unified_action_payload(template_text: str):
     assert "window.parent.postMessage" in template_text
     # Unified, prefix-disambiguated payload (verdict-model redesign):
-    #   { ids: [r#/RQ#], button: "<bare verb>", text: "<free text>", run_id }
+    #   { ids: [f#/rq#], button: "<bare verb>", text: "<free text>", run_id }
     for key in ("ids:", "button:", "text:", "run_id:"):
         assert key in template_text, f"postMessage payload missing {key!r}"
     # The legacy keys are gone — this is an API migration, not an additive change,
     # so the old shape ({ action, record_ids, instructions }) must not linger.
     for legacy in ("action:", "record_ids:", "instructions:"):
         assert legacy not in template_text, f"legacy payload key {legacy!r} still present"
-    # ids unions the selected findings (r#) with the scheduled rule fixes (RQ#),
+    # ids unions the selected findings (f#) with the scheduled rule fixes (rq#),
     # button is the bare verb (the namespace prefix sliced off), text is the box.
     assert "Array.from(state.selected).concat(Array.from(state.scheduledRules))" in template_text
     assert "button: action.slice(NS.length)" in template_text

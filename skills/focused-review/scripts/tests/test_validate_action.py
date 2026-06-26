@@ -4,8 +4,9 @@ Covers the canvas action-bar round-trip:
 
 * ``validate_action`` — the pure validate/expand contract: a posted
   ``{run_id, ids[], action, instructions}`` is accepted only when the ``run_id``
-  matches the rendered run and every id resolves *by prefix* — a finding id
-  (``r#``) to file/line/title/suggestion, a rule-quality note id (``RQ#``) to its
+  matches the rendered run and every id resolves *by prefix* (case-insensitively) —
+  a finding id (``f#``) to file/line/title/suggestion, a rule-quality note id
+  (``rq#``) to its
   rule file + suggested change + the record_ids its fix invalidates. A forged
   ``run_id``, an unknown id, or an id matching neither prefix is rejected with the
   same structured-error shape as ``validate_records``.
@@ -42,7 +43,7 @@ def _envelope() -> dict:
     """A fully valid envelope: two Confirmed, one Questionable, one Invalid.
 
     Schema-valid so it round-trips through ``render-review`` for the persistence
-    test; the Invalid finding (``r4``) confirms ``validate_action`` resolves *any*
+    test; the Invalid finding (``f4``) confirms ``validate_action`` resolves *any*
     present record_id regardless of verdict (the canvas action targets stable ids).
     """
     return {
@@ -62,9 +63,8 @@ def _envelope() -> dict:
         "rule_quality_notes": [],
         "findings": [
             {
-                "record_id": "r1",
+                "record_id": "f1",
                 "assessment_id": "A-01",
-                "display_number": 1,
                 "display_bucket": "confirmed",
                 "title": "Null deref in request handler",
                 "file": "src/a.py",
@@ -82,9 +82,8 @@ def _envelope() -> dict:
                 "has_detail": False,
             },
             {
-                "record_id": "r2",
+                "record_id": "f2",
                 "assessment_id": "A-02",
-                "display_number": 2,
                 "display_bucket": "confirmed",
                 "title": "Duplicated parsing logic",
                 "file": "src/b.py",
@@ -102,9 +101,8 @@ def _envelope() -> dict:
                 "has_detail": False,
             },
             {
-                "record_id": "r3",
+                "record_id": "f3",
                 "assessment_id": "A-05",
-                "display_number": 1,
                 "display_bucket": "needs-decision",
                 "title": "Magic number in retry loop",
                 "file": "src/c.py",
@@ -122,9 +120,8 @@ def _envelope() -> dict:
                 "has_detail": False,
             },
             {
-                "record_id": "r4",
+                "record_id": "f4",
                 "assessment_id": "A-09",
-                "display_number": None,
                 "display_bucket": "hidden",
                 "title": "Section divider comment",
                 "file": "src/d.py",
@@ -149,11 +146,10 @@ RUN_ID = "20260617-120000"
 
 
 def _finding(record_id: str, title: str, provenance: list[str]) -> dict:
-    """A minimal-but-resolvable finding for the RQ / invalidation fixtures."""
+    """A minimal-but-resolvable finding for the rule-quality / invalidation fixtures."""
     return {
         "record_id": record_id,
         "assessment_id": f"A-{record_id}",
-        "display_number": None,
         "display_bucket": "confirmed",
         "title": title,
         "file": f"src/{record_id}.py",
@@ -173,18 +169,18 @@ def _finding(record_id: str, title: str, provenance: list[str]) -> dict:
 
 
 def _envelope_with_notes() -> dict:
-    """Envelope wired for rule-quality (RQ) resolution + Decision-12 invalidation.
+    """Envelope wired for rule-quality (rq) resolution + Decision-12 invalidation.
 
     The findings exercise the rule "a finding dies only when *all* of its rule
     sources are fixed, and never while a concern keeps it alive":
 
-    * ``r1`` — single rule source ``rule--no-comments`` (← RQ1). Dies on RQ1.
-    * ``r2`` — two rule sources ``rule--no-comments`` + ``rule--simplicity``
-      (← RQ1 **and** RQ2). Dies only when *both* are applied in one call.
-    * ``r3`` — ``rule--simplicity`` **plus** a ``concern--`` source: the concern
+    * ``f1`` — single rule source ``rule--no-comments`` (← rq1). Dies on rq1.
+    * ``f2`` — two rule sources ``rule--no-comments`` + ``rule--simplicity``
+      (← rq1 **and** rq2). Dies only when *both* are applied in one call.
+    * ``f3`` — ``rule--simplicity`` **plus** a ``concern--`` source: the concern
       is an independent justification, so no rule fix can invalidate it.
 
-    Two notes resolve the RQ ids: RQ1 (``rule--no-comments``) and RQ2
+    Two notes resolve the rq ids: rq1 (``rule--no-comments``) and rq2
     (``rule--simplicity``).
     """
     return {
@@ -203,38 +199,39 @@ def _envelope_with_notes() -> dict:
         "rebuttal_overrides": [],
         "rule_quality_notes": [
             {
-                "id": "RQ1",
+                "id": "rq1",
                 "rule": "Avoid explanatory comments",
-                "rule_source": "rule--no-comments",
+                "rule_sources": ["rule--no-comments"],
                 "rule_file": "review/rules/no-comments.md",
                 "observation": "Flagged a navigational divider as a smell.",
                 "suggestion": "Exempt section dividers from the no-comments rule.",
             },
             {
-                "id": "RQ2",
+                "id": "rq2",
                 "rule": "Prefer simple code",
-                "rule_source": "rule--simplicity",
+                "rule_sources": ["rule--simplicity"],
                 "rule_file": "review/rules/simplicity.md",
                 "observation": "Flagged a two-line helper as over-engineered.",
                 "suggestion": "Only flag helpers used in a single call site.",
             },
         ],
         "findings": [
-            _finding("r1", "Single rule source", ["rule--no-comments"]),
-            _finding("r2", "Two rule sources", ["rule--no-comments", "rule--simplicity"]),
-            _finding("r3", "Concern keeps it alive", ["rule--simplicity", "concern--bugs--opus"]),
+            _finding("f1", "Single rule source", ["rule--no-comments"]),
+            _finding("f2", "Two rule sources", ["rule--no-comments", "rule--simplicity"]),
+            _finding("f3", "Concern keeps it alive", ["rule--simplicity", "concern--bugs--opus"]),
         ],
     }
 
 
 def _two_rule_renderable_envelope() -> dict:
-    """A schema-valid (renderable) envelope where ``r2`` depends on TWO rules.
+    """A schema-valid (renderable) envelope where ``f2`` depends on TWO rules.
 
-    Unlike ``_envelope_with_notes`` (whose findings carry no ``display_number`` —
-    fine for the pure ``validate_action`` tests), this one is contiguous-numbered so
-    it round-trips through ``render-review``. ``r1`` dies on RQ1 alone; ``r2`` has
-    *both* rule sources (RQ1 + RQ2) and no concern source, so it dies only once BOTH
-    rules are fixed — the multi-step-apply case in Finding C-11 / Decision 12.
+    A trimmed sibling of ``_envelope_with_notes`` carrying just the two rule-only
+    findings (no concern-kept-alive ``f3``) with run tallies that match, so it
+    round-trips cleanly through ``render-review`` for the cross-render persistence
+    test. ``f1`` dies on rq1 alone; ``f2`` has *both* rule sources (rq1 + rq2) and
+    no concern source, so it dies only once BOTH rules are fixed — the
+    multi-step-apply case in Finding C-11 / Decision 12.
     """
     return {
         "schema_version": 1,
@@ -252,28 +249,25 @@ def _two_rule_renderable_envelope() -> dict:
         "rebuttal_overrides": [],
         "rule_quality_notes": [
             {
-                "id": "RQ1",
+                "id": "rq1",
                 "rule": "Avoid explanatory comments",
-                "rule_source": "rule--no-comments",
+                "rule_sources": ["rule--no-comments"],
                 "rule_file": "review/rules/no-comments.md",
                 "observation": "Flagged a navigational divider as a smell.",
                 "suggestion": "Exempt section dividers from the no-comments rule.",
             },
             {
-                "id": "RQ2",
+                "id": "rq2",
                 "rule": "Prefer simple code",
-                "rule_source": "rule--simplicity",
+                "rule_sources": ["rule--simplicity"],
                 "rule_file": "review/rules/simplicity.md",
                 "observation": "Flagged a two-line helper as over-engineered.",
                 "suggestion": "Only flag helpers used in a single call site.",
             },
         ],
         "findings": [
-            {**_finding("r1", "Single rule source", ["rule--no-comments"]), "display_number": 1},
-            {
-                **_finding("r2", "Two rule sources", ["rule--no-comments", "rule--simplicity"]),
-                "display_number": 2,
-            },
+            _finding("f1", "Single rule source", ["rule--no-comments"]),
+            _finding("f2", "Two rule sources", ["rule--no-comments", "rule--simplicity"]),
         ],
     }
 
@@ -361,7 +355,7 @@ def _render_args(records: Path, **overrides) -> argparse.Namespace:
 class TestValidateActionAccept:
     def test_valid_ids_resolve_to_file_line_title_suggestion(self) -> None:
         expanded, errors = fr.validate_action(
-            _envelope(), RUN_ID, ["r1", "r3"],
+            _envelope(), RUN_ID, ["f1", "f3"],
             action="focused-review.fix", instructions="fix minimally",
         )
         assert errors == []
@@ -377,27 +371,27 @@ class TestValidateActionAccept:
 
         by_id = {f["record_id"]: f for f in expanded["findings"]}
         # Order is preserved and every targeted id resolved.
-        assert [f["record_id"] for f in expanded["findings"]] == ["r1", "r3"]
-        # r1 resolves to its file/line/title/suggestion (the spec's contract).
-        assert by_id["r1"]["file"] == "src/a.py"
-        assert by_id["r1"]["line"] == 10
-        assert by_id["r1"]["title"] == "Null deref in request handler"
-        assert by_id["r1"]["suggestion"] == "Guard req.user before access."
-        assert by_id["r1"]["severity"] == "High"
-        assert by_id["r1"]["verdict"] == "Confirmed"
-        # r3 has a null line and empty suggestion — both pass through faithfully.
-        assert by_id["r3"]["line"] is None
-        assert by_id["r3"]["suggestion"] == ""
+        assert [f["record_id"] for f in expanded["findings"]] == ["f1", "f3"]
+        # f1 resolves to its file/line/title/suggestion (the spec's contract).
+        assert by_id["f1"]["file"] == "src/a.py"
+        assert by_id["f1"]["line"] == 10
+        assert by_id["f1"]["title"] == "Null deref in request handler"
+        assert by_id["f1"]["suggestion"] == "Guard req.user before access."
+        assert by_id["f1"]["severity"] == "High"
+        assert by_id["f1"]["verdict"] == "Confirmed"
+        # f3 has a null line and empty suggestion — both pass through faithfully.
+        assert by_id["f3"]["line"] is None
+        assert by_id["f3"]["suggestion"] == ""
 
     def test_resolves_invalid_verdict_finding(self) -> None:
         # The canvas targets stable ids; an Invalid finding still resolves if posted.
-        expanded, errors = fr.validate_action(_envelope(), RUN_ID, ["r4"])
+        expanded, errors = fr.validate_action(_envelope(), RUN_ID, ["f4"])
         assert errors == []
-        assert expanded["findings"][0]["record_id"] == "r4"
+        assert expanded["findings"][0]["record_id"] == "f4"
         assert expanded["findings"][0]["verdict"] == "Invalid"
 
     def test_default_action_and_instructions(self) -> None:
-        expanded, errors = fr.validate_action(_envelope(), RUN_ID, ["r2"])
+        expanded, errors = fr.validate_action(_envelope(), RUN_ID, ["f2"])
         assert errors == []
         assert expanded["action"] is None
         assert expanded["instructions"] == ""
@@ -405,7 +399,7 @@ class TestValidateActionAccept:
     def test_does_not_mutate_input(self) -> None:
         env = _envelope()
         snapshot = copy.deepcopy(env)
-        fr.validate_action(env, RUN_ID, ["r1", "r2"], action="focused-review.disregard")
+        fr.validate_action(env, RUN_ID, ["f1", "f2"], action="focused-review.disregard")
         assert env == snapshot
 
     def test_all_valid_action_verbs_accepted(self) -> None:
@@ -416,71 +410,96 @@ class TestValidateActionAccept:
             "focused-review.document",
         )
         for verb in fr.VALID_ACTIONS:
-            expanded, errors = fr.validate_action(_envelope(), RUN_ID, ["r1"], action=verb)
+            expanded, errors = fr.validate_action(_envelope(), RUN_ID, ["f1"], action=verb)
             assert errors == [], verb
             assert expanded is not None and expanded["action"] == verb
 
+    def test_finding_ids_resolve_case_insensitively(self) -> None:
+        # The canvas posts lowercase f# data ids, but the badge label is uppercase
+        # (F1) and an id may be hand-typed/forged: validate_action normalizes the
+        # token to lowercase before prefix-dispatch and envelope lookup, so F1/F3
+        # resolve to the f1/f3 records (and report back the canonical lowercase id).
+        expanded, errors = fr.validate_action(
+            _envelope(), RUN_ID, ["F1", "F3"], action="focused-review.fix"
+        )
+        assert errors == []
+        assert expanded is not None
+        assert [f["record_id"] for f in expanded["findings"]] == ["f1", "f3"]
+
 
 # ---------------------------------------------------------------------------
-# validate_action — rule-quality (RQ#) resolution + Decision-12 invalidation
+# validate_action — rule-quality (rq#) resolution + Decision-12 invalidation
 # ---------------------------------------------------------------------------
 
 
 class TestValidateActionRuleResolution:
-    """``RQ#`` ids resolve to rule fixes, with Decision-12 invalidation attribution."""
+    """``rq#`` ids resolve to rule fixes, with Decision-12 invalidation attribution."""
 
     def test_single_rule_resolves_to_rule_file_and_invalidation(self) -> None:
+        expanded, errors = fr.validate_action(
+            _envelope_with_notes(), RUN_ID, ["rq1"], action="focused-review.fix"
+        )
+        assert errors == []
+        assert expanded is not None
+        # No findings posted -> findings[] empty; the rq resolves into rules[].
+        assert expanded["record_count"] == 0
+        assert expanded["findings"] == []
+        assert expanded["rule_count"] == 1
+        rule = expanded["rules"][0]
+        assert rule["rule_id"] == "rq1"
+        assert rule["rule_sources"] == ["rule--no-comments"]
+        assert rule["rule_file"] == "review/rules/no-comments.md"
+        assert rule["suggestion"] == "Exempt section dividers from the no-comments rule."
+        assert rule["observation"] == "Flagged a navigational divider as a smell."
+        # rq1 alone kills f1 (its only rule source) but NOT f2 (also needs rq2).
+        assert rule["invalidated_record_ids"] == ["f1"]
+
+    def test_rule_ids_resolve_case_insensitively(self) -> None:
+        # The uppercase RQ1 badge label normalizes to the lowercase rq1 data id
+        # before lookup, so a posted/typed RQ1 resolves to the rq1 note (and the
+        # resolved rule reports the canonical lowercase rule_id).
         expanded, errors = fr.validate_action(
             _envelope_with_notes(), RUN_ID, ["RQ1"], action="focused-review.fix"
         )
         assert errors == []
         assert expanded is not None
-        # No findings posted -> findings[] empty; the RQ resolves into rules[].
-        assert expanded["record_count"] == 0
-        assert expanded["findings"] == []
         assert expanded["rule_count"] == 1
-        rule = expanded["rules"][0]
-        assert rule["rule_id"] == "RQ1"
-        assert rule["rule_source"] == "rule--no-comments"
-        assert rule["rule_file"] == "review/rules/no-comments.md"
-        assert rule["suggestion"] == "Exempt section dividers from the no-comments rule."
-        assert rule["observation"] == "Flagged a navigational divider as a smell."
-        # RQ1 alone kills r1 (its only rule source) but NOT r2 (also needs RQ2).
-        assert rule["invalidated_record_ids"] == ["r1"]
+        assert expanded["rules"][0]["rule_id"] == "rq1"
+        assert expanded["rules"][0]["invalidated_record_ids"] == ["f1"]
 
     def test_multi_rule_finding_dies_only_when_all_its_rules_applied(self) -> None:
-        # Posting BOTH RQ1 and RQ2 in one call: r1 (← RQ1) and r2 (← RQ1+RQ2) both
-        # die; the two-rule finding r2 is attributed under EVERY rule it depends on,
+        # Posting BOTH rq1 and rq2 in one call: f1 (← rq1) and f2 (← rq1+rq2) both
+        # die; the two-rule finding f2 is attributed under EVERY rule it depends on,
         # which is exactly the shape persist_rule_fixes consumes.
         expanded, errors = fr.validate_action(
-            _envelope_with_notes(), RUN_ID, ["RQ1", "RQ2"], action="focused-review.fix"
+            _envelope_with_notes(), RUN_ID, ["rq1", "rq2"], action="focused-review.fix"
         )
         assert errors == []
         assert expanded["rule_count"] == 2
         by_rule = {r["rule_id"]: r for r in expanded["rules"]}
-        assert by_rule["RQ1"]["invalidated_record_ids"] == ["r1", "r2"]
-        assert by_rule["RQ2"]["invalidated_record_ids"] == ["r2"]
+        assert by_rule["rq1"]["invalidated_record_ids"] == ["f1", "f2"]
+        assert by_rule["rq2"]["invalidated_record_ids"] == ["f2"]
 
     def test_rule_kept_alive_by_concern_never_invalidates(self) -> None:
-        # r3 carries rule--simplicity AND a concern source; the concern is an
-        # independent justification, so applying RQ2 invalidates nothing.
+        # f3 carries rule--simplicity AND a concern source; the concern is an
+        # independent justification, so applying rq2 invalidates nothing.
         expanded, errors = fr.validate_action(
-            _envelope_with_notes(), RUN_ID, ["RQ2"], action="focused-review.fix"
+            _envelope_with_notes(), RUN_ID, ["rq2"], action="focused-review.fix"
         )
         assert errors == []
-        assert expanded["rules"][0]["rule_id"] == "RQ2"
+        assert expanded["rules"][0]["rule_id"] == "rq2"
         assert expanded["rules"][0]["invalidated_record_ids"] == []
 
     def test_mixed_ids_resolve_into_findings_and_rules(self) -> None:
-        # A heterogeneous selection resolves r# into findings[] and RQ# into rules[]
+        # A heterogeneous selection resolves f# into findings[] and rq# into rules[]
         # in one expansion, each by prefix, order preserved within each list.
         expanded, errors = fr.validate_action(
-            _envelope_with_notes(), RUN_ID, ["r1", "RQ2"], action="focused-review.fix"
+            _envelope_with_notes(), RUN_ID, ["f1", "rq2"], action="focused-review.fix"
         )
         assert errors == []
-        assert [f["record_id"] for f in expanded["findings"]] == ["r1"]
+        assert [f["record_id"] for f in expanded["findings"]] == ["f1"]
         assert expanded["record_count"] == 1
-        assert [r["rule_id"] for r in expanded["rules"]] == ["RQ2"]
+        assert [r["rule_id"] for r in expanded["rules"]] == ["rq2"]
         assert expanded["rule_count"] == 1
 
 
@@ -513,7 +532,7 @@ class TestValidateActionRuleFileTrustBoundary:
         env = copy.deepcopy(_envelope_with_notes())
         env["rule_quality_notes"][0]["rule_file"] = bad_path
         expanded, errors = fr.validate_action(
-            env, RUN_ID, ["RQ1"], action="focused-review.fix", rules_dir="review/"
+            env, RUN_ID, ["rq1"], action="focused-review.fix", rules_dir="review/"
         )
         assert expanded is None
         assert any(
@@ -527,7 +546,7 @@ class TestValidateActionRuleFileTrustBoundary:
         env = copy.deepcopy(_envelope_with_notes())
         env["rule_quality_notes"][0]["rule_file"] = "review/rules/simplicity.md"
         expanded, errors = fr.validate_action(
-            env, RUN_ID, ["RQ1"], action="focused-review.fix", rules_dir="review/"
+            env, RUN_ID, ["rq1"], action="focused-review.fix", rules_dir="review/"
         )
         assert expanded is None
         assert any(
@@ -540,8 +559,25 @@ class TestValidateActionRuleFileTrustBoundary:
         # The unchanged fixture (safe path under review/, stem matches rule_source)
         # still resolves cleanly — the re-validation adds no false positives.
         expanded, errors = fr.validate_action(
-            _envelope_with_notes(), RUN_ID, ["RQ1"],
+            _envelope_with_notes(), RUN_ID, ["rq1"],
             action="focused-review.fix", rules_dir="review/",
+        )
+        assert errors == []
+        assert expanded is not None and expanded["rule_count"] == 1
+
+    def test_chunk_suffixed_rule_source_accepted_at_action_time(self) -> None:
+        # Finding r10: a chunk-suffixed provenance label (rule--no-comments--1, chunk
+        # 1 of the no-comments rule) names the same base file as its un-suffixed twin.
+        # The action-time C-12 re-validation normalizes the trailing --<digits>, so a
+        # note carrying chunk labels still resolves cleanly against no-comments.md.
+        env = copy.deepcopy(_envelope_with_notes())
+        env["rule_quality_notes"][0]["rule_sources"] = [
+            "rule--no-comments--1",
+            "rule--no-comments--2",
+        ]
+        env["findings"][0]["provenance"] = ["rule--no-comments--1"]
+        expanded, errors = fr.validate_action(
+            env, RUN_ID, ["rq1"], action="focused-review.fix", rules_dir="review/"
         )
         assert errors == []
         assert expanded is not None and expanded["rule_count"] == 1
@@ -553,13 +589,13 @@ class TestValidateActionRuleFileTrustBoundary:
         env = copy.deepcopy(_envelope_with_notes())
         env["rule_quality_notes"][0]["rule_file"] = "outside/no-comments.md"
         expanded, errors = fr.validate_action(
-            env, RUN_ID, ["RQ1"], action="focused-review.fix"
+            env, RUN_ID, ["rq1"], action="focused-review.fix"
         )
         assert expanded is None
         assert any(e["path"] == "rules[0].rule_file" for e in errors)
 
         ok, errors2 = fr.validate_action(
-            _envelope_with_notes(), RUN_ID, ["RQ1"], action="focused-review.fix"
+            _envelope_with_notes(), RUN_ID, ["rq1"], action="focused-review.fix"
         )
         assert errors2 == []
         assert ok is not None
@@ -570,13 +606,13 @@ class TestValidateActionRuleFileTrustBoundary:
         env = copy.deepcopy(_envelope_with_notes())
         env["rule_quality_notes"][1]["rule_file"] = "review/../escape.md"
         expanded, errors = fr.validate_action(
-            env, RUN_ID, ["RQ1", "RQ2"], action="focused-review.fix", rules_dir="review/"
+            env, RUN_ID, ["rq1", "rq2"], action="focused-review.fix", rules_dir="review/"
         )
         assert expanded is None
         offending = [e for e in errors if e["field"] == "rule_file"]
         assert len(offending) == 1
         assert offending[0]["path"] == "rules[1].rule_file"
-        assert offending[0]["record_id"] == "RQ2"
+        assert offending[0]["record_id"] == "rq2"
 
 
 # ---------------------------------------------------------------------------
@@ -586,7 +622,7 @@ class TestValidateActionRuleFileTrustBoundary:
 
 class TestValidateActionReject:
     def test_forged_run_id_rejected(self) -> None:
-        expanded, errors = fr.validate_action(_envelope(), "FORGED-RUN", ["r1"])
+        expanded, errors = fr.validate_action(_envelope(), "FORGED-RUN", ["f1"])
         assert expanded is None
         assert len(errors) == 1
         err = errors[0]
@@ -595,19 +631,19 @@ class TestValidateActionReject:
         assert "run_id mismatch" in err["message"]
 
     def test_unknown_record_id_rejected(self) -> None:
-        expanded, errors = fr.validate_action(_envelope(), RUN_ID, ["r1", "r999"])
+        expanded, errors = fr.validate_action(_envelope(), RUN_ID, ["f1", "f999"])
         assert expanded is None
         # Only the unknown id errors; the known one does not produce an error.
         assert len(errors) == 1
         err = errors[0]
         assert err["scope"] == "action"
         assert err["field"] == "record_id"
-        assert err["record_id"] == "r999"
+        assert err["record_id"] == "f999"
         assert err["path"] == "ids[1]"
-        assert "unknown record_id" in err["message"]
+        assert "unknown finding id" in err["message"]
 
     def test_forged_run_id_and_unknown_id_both_reported(self) -> None:
-        expanded, errors = fr.validate_action(_envelope(), "FORGED", ["r999"])
+        expanded, errors = fr.validate_action(_envelope(), "FORGED", ["f999"])
         assert expanded is None
         fields = {e["field"] for e in errors}
         assert fields == {"run_id", "record_id"}
@@ -618,19 +654,19 @@ class TestValidateActionReject:
         assert any(e["field"] == "ids" for e in errors)
 
     def test_blank_posted_run_id_rejected(self) -> None:
-        expanded, errors = fr.validate_action(_envelope(), "   ", ["r1"])
+        expanded, errors = fr.validate_action(_envelope(), "   ", ["f1"])
         assert expanded is None
         assert any(e["field"] == "run_id" for e in errors)
 
     def test_records_without_run_id_rejected(self) -> None:
         env = _envelope()
         del env["run"]["run_id"]
-        expanded, errors = fr.validate_action(env, RUN_ID, ["r1"])
+        expanded, errors = fr.validate_action(env, RUN_ID, ["f1"])
         assert expanded is None
         assert any("no run.run_id" in e["message"] for e in errors)
 
     def test_non_dict_data_rejected(self) -> None:
-        expanded, errors = fr.validate_action([1, 2, 3], RUN_ID, ["r1"])
+        expanded, errors = fr.validate_action([1, 2, 3], RUN_ID, ["f1"])
         assert expanded is None
         assert errors[0]["scope"] == "action"
         assert "must be a JSON object" in errors[0]["message"]
@@ -644,7 +680,7 @@ class TestValidateActionReject:
     def test_unknown_action_verb_rejected(self) -> None:
         # An arbitrary/forged verb is fail-closed: rejected, never echoed back.
         expanded, errors = fr.validate_action(
-            _envelope(), RUN_ID, ["r1"], action="focused-review.exec"
+            _envelope(), RUN_ID, ["f1"], action="focused-review.exec"
         )
         assert expanded is None
         action_errors = [e for e in errors if e["field"] == "action"]
@@ -657,7 +693,7 @@ class TestValidateActionReject:
         # The verb check aggregates with the run_id / record_id checks rather than
         # masking them, so a fully-bogus action surfaces every problem at once.
         expanded, errors = fr.validate_action(
-            _envelope(), "FORGED", ["r999"], action="bogus"
+            _envelope(), "FORGED", ["f999"], action="bogus"
         )
         assert expanded is None
         assert {"action", "run_id", "record_id"} <= {e["field"] for e in errors}
@@ -665,27 +701,28 @@ class TestValidateActionReject:
     def test_none_action_still_accepted_pure_resolve(self) -> None:
         # None means "resolve only" (no verb posted) and stays valid — the verb
         # allowlist only rejects a *provided* unknown verb.
-        expanded, errors = fr.validate_action(_envelope(), RUN_ID, ["r1"], action=None)
+        expanded, errors = fr.validate_action(_envelope(), RUN_ID, ["f1"], action=None)
         assert errors == []
         assert expanded is not None and expanded["action"] is None
 
     def test_unknown_rule_quality_note_id_rejected(self) -> None:
-        # A well-formed RQ id absent from the envelope is rejected — RQ ids are
+        # A well-formed rq id absent from the envelope is rejected — rq ids are
         # resolved in Python (the trust boundary), never trusted from the payload.
-        expanded, errors = fr.validate_action(_envelope_with_notes(), RUN_ID, ["RQ9"])
+        expanded, errors = fr.validate_action(_envelope_with_notes(), RUN_ID, ["rq9"])
         assert expanded is None
         assert len(errors) == 1
         err = errors[0]
         assert err["scope"] == "action"
         assert err["field"] == "rule_id"
-        assert err["record_id"] == "RQ9"
+        assert err["record_id"] == "rq9"
         assert err["path"] == "ids[0]"
         assert "unknown rule-quality note id" in err["message"]
 
     def test_unrecognized_id_prefix_rejected(self) -> None:
-        # An id matching neither the finding (r#) nor the rule-quality (RQ#) prefix
-        # fails closed: lowercase rq, capital R, junk, and bare digits all reject.
-        for bogus in ("rq2", "R3", "x5", "12"):
+        # An id matching neither the finding (f#) nor the rule-quality (rq#) prefix
+        # fails closed: a bare r#, capital R#, junk, and bare digits all reject —
+        # even after case-folding (R3 -> r3 still matches no prefix).
+        for bogus in ("r3", "R3", "x5", "12"):
             expanded, errors = fr.validate_action(_envelope_with_notes(), RUN_ID, [bogus])
             assert expanded is None, bogus
             assert len(errors) == 1, bogus
@@ -702,9 +739,15 @@ class TestValidateActionReject:
 
 class TestSplitIds:
     def test_splits_strips_and_dedupes_preserving_order(self) -> None:
-        # Findings (r#) and rule-quality (RQ#) ids share one comma list; the id
+        # Findings (f#) and rule-quality (rq#) ids share one comma list; the id
         # *type* is disambiguated later by prefix in validate_action.
-        assert fr._split_ids(" r1, RQ2 ,r1,, r3 ") == ["r1", "RQ2", "r3"]
+        assert fr._split_ids(" f1, rq2 ,f1,, f3 ") == ["f1", "rq2", "f3"]
+
+    def test_dedupes_case_insensitively_keeping_first_seen(self) -> None:
+        # F2 and f2 name the same id (the badge is uppercase, the data id lowercase),
+        # so they collapse to one entry; the first-seen spelling is kept and the
+        # type is still disambiguated by prefix later in validate_action.
+        assert fr._split_ids("f2, F2, RQ1, rq1") == ["f2", "RQ1"]
 
     def test_empty_and_none(self) -> None:
         assert fr._split_ids("") == []
@@ -723,14 +766,14 @@ class TestValidateActionCommand:
     ) -> None:
         records = _write_records(tmp_path)
         fr.validate_action_command(
-            _action_args(records, RUN_ID, "r1,r2", action="focused-review.fix")
+            _action_args(records, RUN_ID, "f1,f2", action="focused-review.fix")
         )
         out = json.loads(capsys.readouterr().out)
         assert out["valid"] is True
         assert out["record_count"] == 2
         assert out["rule_count"] == 0
         assert out["records_path"] == str(records)
-        assert {f["record_id"] for f in out["findings"]} == {"r1", "r2"}
+        assert {f["record_id"] for f in out["findings"]} == {"f1", "f2"}
         # No disregard side effect without --apply-disregard.
         assert "disregarded" not in out
         assert not (tmp_path / "run-state.json").exists()
@@ -740,7 +783,7 @@ class TestValidateActionCommand:
     ) -> None:
         records = _write_records(tmp_path)
         with pytest.raises(SystemExit) as exc:
-            fr.validate_action_command(_action_args(records, "FORGED", "r1"))
+            fr.validate_action_command(_action_args(records, "FORGED", "f1"))
         assert exc.value.code == 1
         captured = capsys.readouterr()
         assert captured.out == ""  # nothing on stdout for the failure path
@@ -754,7 +797,7 @@ class TestValidateActionCommand:
     ) -> None:
         records = _write_records(tmp_path)
         with pytest.raises(SystemExit) as exc:
-            fr.validate_action_command(_action_args(records, RUN_ID, "r1,ghost"))
+            fr.validate_action_command(_action_args(records, RUN_ID, "f1,ghost"))
         assert exc.value.code == 1
         payload = json.loads(capsys.readouterr().err)
         assert payload["valid"] is False
@@ -764,7 +807,7 @@ class TestValidateActionCommand:
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         with pytest.raises(SystemExit) as exc:
-            fr.validate_action_command(_action_args(tmp_path / "nope.json", RUN_ID, "r1"))
+            fr.validate_action_command(_action_args(tmp_path / "nope.json", RUN_ID, "f1"))
         assert exc.value.code == 1
         payload = json.loads(capsys.readouterr().err)
         assert payload["valid"] is False
@@ -777,7 +820,7 @@ class TestValidateActionCommand:
         records = tmp_path / "records.json"
         records.write_text("{ not valid json", encoding="utf-8")
         with pytest.raises(SystemExit) as exc:
-            fr.validate_action_command(_action_args(records, RUN_ID, "r1"))
+            fr.validate_action_command(_action_args(records, RUN_ID, "f1"))
         assert exc.value.code == 1
         payload = json.loads(capsys.readouterr().err)
         assert "not valid JSON" in payload["errors"][0]["message"]
@@ -788,17 +831,17 @@ class TestValidateActionCommand:
         records = _write_records(tmp_path)
         fr.validate_action_command(
             _action_args(
-                records, RUN_ID, "r1",
+                records, RUN_ID, "f1",
                 action="focused-review.disregard",
                 apply_disregard=True,
                 run_dir=str(tmp_path),
             )
         )
         out = json.loads(capsys.readouterr().out)
-        assert out["disregarded"] == ["r1"]
+        assert out["disregarded"] == ["f1"]
         state = json.loads((tmp_path / "run-state.json").read_text(encoding="utf-8"))
         assert state["run_id"] == RUN_ID
-        assert state["disregarded"] == ["r1"]
+        assert state["disregarded"] == ["f1"]
 
     def test_apply_disregard_does_not_persist_on_forged_run_id(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
@@ -807,7 +850,7 @@ class TestValidateActionCommand:
         with pytest.raises(SystemExit) as exc:
             fr.validate_action_command(
                 _action_args(
-                    records, "FORGED", "r1",
+                    records, "FORGED", "f1",
                     action="focused-review.disregard",
                     apply_disregard=True,
                     run_dir=str(tmp_path),
@@ -823,7 +866,7 @@ class TestValidateActionCommand:
         records = _write_records(tmp_path)
         with pytest.raises(SystemExit) as exc:
             fr.validate_action_command(
-                _action_args(records, RUN_ID, "r1", action="focused-review.exec")
+                _action_args(records, RUN_ID, "f1", action="focused-review.exec")
             )
         assert exc.value.code == 1
         captured = capsys.readouterr()
@@ -841,7 +884,7 @@ class TestValidateActionCommand:
         with pytest.raises(SystemExit) as exc:
             fr.validate_action_command(
                 _action_args(
-                    records, RUN_ID, "r1",
+                    records, RUN_ID, "f1",
                     action="focused-review.fix",
                     apply_disregard=True,
                     run_dir=str(tmp_path),
@@ -865,7 +908,7 @@ class TestValidateActionCommand:
         with pytest.raises(SystemExit) as exc:
             fr.validate_action_command(
                 _action_args(
-                    records, RUN_ID, "r1",
+                    records, RUN_ID, "f1",
                     apply_disregard=True,
                     run_dir=str(tmp_path),
                 )
@@ -879,12 +922,12 @@ class TestValidateActionCommand:
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         # The fix verb + --apply-rule-fixes persists the resolved rules' invalidated
-        # record_ids. Posting BOTH RQ ids in one call is what kills the two-rule
-        # finding r2 (Decision 12 — invalidation is computed against the full set).
+        # record_ids. Posting BOTH rq ids in one call is what kills the two-rule
+        # finding f2 (Decision 12 — invalidation is computed against the full set).
         records = _write_records(tmp_path, _envelope_with_notes())
         fr.validate_action_command(
             _action_args(
-                records, RUN_ID, "RQ1,RQ2",
+                records, RUN_ID, "rq1,rq2",
                 action="focused-review.fix",
                 apply_rule_fixes=True,
                 run_dir=str(tmp_path),
@@ -892,10 +935,10 @@ class TestValidateActionCommand:
         )
         out = json.loads(capsys.readouterr().out)
         applied = {f["rule_id"]: f["invalidated_record_ids"] for f in out["rule_fixes_applied"]}
-        assert applied == {"RQ1": ["r1", "r2"], "RQ2": ["r2"]}
+        assert applied == {"rq1": ["f1", "f2"], "rq2": ["f2"]}
         state = json.loads((tmp_path / "run-state.json").read_text(encoding="utf-8"))
         assert state["run_id"] == RUN_ID
-        assert {f["rule_id"] for f in state["rule_fixes_applied"]} == {"RQ1", "RQ2"}
+        assert {f["rule_id"] for f in state["rule_fixes_applied"]} == {"rq1", "rq2"}
 
     def test_apply_rule_fixes_does_not_persist_on_forged_run_id(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
@@ -907,7 +950,7 @@ class TestValidateActionCommand:
         with pytest.raises(SystemExit) as exc:
             fr.validate_action_command(
                 _action_args(
-                    records, "FORGED", "RQ1",
+                    records, "FORGED", "rq1",
                     action="focused-review.fix",
                     apply_rule_fixes=True,
                     run_dir=str(tmp_path),
@@ -925,7 +968,7 @@ class TestValidateActionCommand:
         with pytest.raises(SystemExit) as exc:
             fr.validate_action_command(
                 _action_args(
-                    records, RUN_ID, "RQ1",
+                    records, RUN_ID, "rq1",
                     action="focused-review.disregard",
                     apply_rule_fixes=True,
                     run_dir=str(tmp_path),
@@ -944,20 +987,20 @@ class TestValidateActionCommand:
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         # A disregard over a mixed selection persists only the resolved FINDING ids;
-        # any RQ# in the mix is a rule fix, never written to the disregarded set.
+        # any rq# in the mix is a rule fix, never written to the disregarded set.
         records = _write_records(tmp_path, _envelope_with_notes())
         fr.validate_action_command(
             _action_args(
-                records, RUN_ID, "r1,RQ1",
+                records, RUN_ID, "f1,rq1",
                 action="focused-review.disregard",
                 apply_disregard=True,
                 run_dir=str(tmp_path),
             )
         )
         out = json.loads(capsys.readouterr().out)
-        assert out["disregarded"] == ["r1"]
+        assert out["disregarded"] == ["f1"]
         state = json.loads((tmp_path / "run-state.json").read_text(encoding="utf-8"))
-        assert state["disregarded"] == ["r1"]
+        assert state["disregarded"] == ["f1"]
         # The disregard path writes no rule-fix state.
         assert state.get("rule_fixes_applied", []) == []
 
@@ -974,7 +1017,7 @@ class TestValidateActionCommand:
         with pytest.raises(SystemExit) as exc:
             fr.validate_action_command(
                 _action_args(
-                    records, RUN_ID, "RQ1",
+                    records, RUN_ID, "rq1",
                     action="focused-review.fix",
                     apply_rule_fixes=True, run_dir=str(tmp_path),
                 )
@@ -1131,6 +1174,88 @@ class TestApplyFixed:
         assert state["disregarded"] == ["f3"]
         assert [f["rule_id"] for f in state["rule_fixes_applied"]] == ["rq9"]
         assert state["rule_fixes_applied"][0]["invalidated_record_ids"] == ["f8"]
+def _semantic_only(env: dict) -> dict:
+    """Strip the Python-assigned display layer from *env*.
+
+    Mimics records.json as the reporter emits it — semantic fields only, BEFORE
+    ``render-review`` calls ``finalize_records`` and persists the enriched file.
+    Removes each finding's ``record_id`` / ``display_bucket``, each note's ``id`` /
+    ``rule`` label, and the derived ``run`` tallies (``file``/``line`` stay, so
+    ``finalize`` re-assigns the same gap-free ``f#`` order it would on a real run).
+    """
+    env = copy.deepcopy(env)
+    for finding in env.get("findings", []):
+        finding.pop("record_id", None)
+        finding.pop("display_bucket", None)
+    for note in env.get("rule_quality_notes", []):
+        note.pop("id", None)
+        note.pop("rule", None)
+    run = env.get("run", {})
+    for key in ("consolidated_count", "confirmed", "questionable", "invalid"):
+        run.pop(key, None)
+    return env
+
+
+class TestValidateActionFinalizesOnLoad:
+    """validate-action finalizes in memory, so the action contract holds against
+    ANY validated records.json — it no longer silently depends on render-review
+    having persisted the display layer first (Finding F3: implicit ordering
+    coupling removed; mirrors ``validate_records_command``)."""
+
+    def test_resolves_finding_ids_against_unrendered_records(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # records.json carries only the reporter's semantic fields (no record_id /
+        # display_bucket) — render-review has NOT run. validate-action must still
+        # assign + resolve the canonical f# ids.
+        records = _write_records(tmp_path, _semantic_only(_envelope()))
+        fr.validate_action_command(
+            _action_args(records, RUN_ID, "f1,f2", action="focused-review.fix")
+        )
+        out = json.loads(capsys.readouterr().out)
+        assert out["valid"] is True
+        # Assert the id->finding IDENTITY (via the reporter-stable assessment_id),
+        # not just gap-free labels: f1 must bind to the A-01 finding and f2 to
+        # A-02, so a finalize ordering regression that still produced f1..fN would
+        # be caught here, not silently resolve the wrong finding.
+        identity = {f["record_id"]: f["assessment_id"] for f in out["findings"]}
+        assert identity == {"f1": "A-01", "f2": "A-02"}
+
+    def test_resolves_note_ids_against_unrendered_records(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # rq# ids are Python-assigned too: a semantic-only note (no id) still
+        # resolves once validate-action finalizes the loaded data in memory.
+        records = _write_records(tmp_path, _semantic_only(_envelope_with_notes()))
+        fr.validate_action_command(
+            _action_args(records, RUN_ID, "f1,rq1", action="focused-review.fix")
+        )
+        out = json.loads(capsys.readouterr().out)
+        assert out["valid"] is True
+        # Identity, not just labels: f1 binds to its A-f1 finding and rq1 to the
+        # no-comments note (its rule_file), so a note-ordering regression is caught.
+        assert [(f["record_id"], f["assessment_id"]) for f in out["findings"]] == [
+            ("f1", "A-f1")
+        ]
+        assert [(r["rule_id"], r["rule_file"]) for r in out["rules"]] == [
+            ("rq1", "review/rules/no-comments.md")
+        ]
+
+    def test_in_memory_finalize_does_not_persist(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # The action round-trip only READS: finalize happens in memory and the
+        # on-disk file is left exactly as written (no enrichment side effect).
+        records = _write_records(tmp_path, _semantic_only(_envelope()))
+        before = records.read_text(encoding="utf-8")
+        fr.validate_action_command(
+            _action_args(records, RUN_ID, "f1", action="focused-review.fix")
+        )
+        capsys.readouterr()
+        after = records.read_text(encoding="utf-8")
+        assert after == before
+        on_disk = json.loads(after)
+        assert "record_id" not in on_disk["findings"][0]
 
 
 class TestValidateActionParser:
@@ -1144,7 +1269,7 @@ class TestValidateActionParser:
             "focused-review", "validate-action",
             "--records", str(records),
             "--run-id", RUN_ID,
-            "--ids", "r1",
+            "--ids", "f1",
             "--action", "focused-review.exec",
         ]
         with patch("sys.argv", argv):
@@ -1166,7 +1291,7 @@ class TestValidateActionParser:
                 "focused-review", "validate-action",
                 "--records", str(records),
                 "--run-id", RUN_ID,
-                "--ids", "r1",
+                "--ids", "f1",
                 "--action", verb,
             ]
             with patch("sys.argv", argv):
@@ -1188,7 +1313,7 @@ class TestValidateActionParser:
             "focused-review", "validate-action",
             "--records", str(records),
             "--run-id", RUN_ID,
-            "--ids", "RQ1",
+            "--ids", "rq1",
             "--action", "focused-review.fix",
             "--apply-rule-fixes",
         ]
@@ -1196,7 +1321,7 @@ class TestValidateActionParser:
             with patch.object(fr, "validate_action_command", spy):
                 fr.main()
         assert captured["apply_rule_fixes"] is True
-        assert captured["ids"] == "RQ1"
+        assert captured["ids"] == "rq1"
 
     def test_parser_accepts_apply_fixed(self, tmp_path: Path) -> None:
         # The --apply-fixed store_true flag parses and reaches the handler (the
@@ -1237,7 +1362,7 @@ class TestValidateActionParser:
             "focused-review", "validate-action",
             "--records", str(records),
             "--run-id", RUN_ID,
-            "--ids", "r1",
+            "--ids", "f1",
             "--repo", "some/repo",
             "--rules-dir", "custom-rules/",
         ]
@@ -1255,13 +1380,13 @@ class TestValidateActionParser:
 
 class TestRunState:
     def test_persist_disregard_merges_monotonic_dedup_order(self, tmp_path: Path) -> None:
-        s1 = fr.persist_disregard(str(tmp_path), RUN_ID, ["r1"])
-        assert s1["disregarded"] == ["r1"]
-        # Re-applying r1 and adding r2 merges without duplication, preserving order.
-        s2 = fr.persist_disregard(str(tmp_path), RUN_ID, ["r1", "r2"])
-        assert s2["disregarded"] == ["r1", "r2"]
-        s3 = fr.persist_disregard(str(tmp_path), RUN_ID, ["r3", "r2"])
-        assert s3["disregarded"] == ["r1", "r2", "r3"]
+        s1 = fr.persist_disregard(str(tmp_path), RUN_ID, ["f1"])
+        assert s1["disregarded"] == ["f1"]
+        # Re-applying f1 and adding f2 merges without duplication, preserving order.
+        s2 = fr.persist_disregard(str(tmp_path), RUN_ID, ["f1", "f2"])
+        assert s2["disregarded"] == ["f1", "f2"]
+        s3 = fr.persist_disregard(str(tmp_path), RUN_ID, ["f3", "f2"])
+        assert s3["disregarded"] == ["f1", "f2", "f3"]
 
     def test_load_run_state_absent_is_empty(self, tmp_path: Path) -> None:
         assert fr.load_run_state(str(tmp_path)) == {
@@ -1287,7 +1412,7 @@ class TestRunState:
         }
 
     def test_load_run_state_stale_run_id_ignored(self, tmp_path: Path) -> None:
-        fr.persist_disregard(str(tmp_path), "OLD-RUN", ["r1"])
+        fr.persist_disregard(str(tmp_path), "OLD-RUN", ["f1"])
         # A different expected run_id => treat the state as stale (empty).
         assert fr.load_run_state(str(tmp_path), expected_run_id="NEW-RUN") == {
             "disregarded": [],
@@ -1295,12 +1420,12 @@ class TestRunState:
             "fixed": [],
         }
         # Matching run_id => the state is honoured.
-        assert fr.load_run_state(str(tmp_path), expected_run_id="OLD-RUN")["disregarded"] == ["r1"]
+        assert fr.load_run_state(str(tmp_path), expected_run_id="OLD-RUN")["disregarded"] == ["f1"]
 
     def test_load_run_state_missing_run_id_ignored_when_expected(self, tmp_path: Path) -> None:
         # A state file without a run_id must not be applied to a named run.
         (tmp_path / "run-state.json").write_text(
-            json.dumps({"disregarded": ["r1"]}), encoding="utf-8"
+            json.dumps({"disregarded": ["f1"]}), encoding="utf-8"
         )
         assert fr.load_run_state(str(tmp_path), expected_run_id="RID") == {
             "disregarded": [],
@@ -1308,14 +1433,14 @@ class TestRunState:
             "fixed": [],
         }
         # ...but a raw read (no expected run_id) still surfaces it.
-        assert fr.load_run_state(str(tmp_path))["disregarded"] == ["r1"]
+        assert fr.load_run_state(str(tmp_path))["disregarded"] == ["f1"]
 
     def test_load_run_state_drops_non_string_ids(self, tmp_path: Path) -> None:
         (tmp_path / "run-state.json").write_text(
-            json.dumps({"run_id": RUN_ID, "disregarded": ["r1", 5, "", None, "r2"]}),
+            json.dumps({"run_id": RUN_ID, "disregarded": ["f1", 5, "", None, "f2"]}),
             encoding="utf-8",
         )
-        assert fr.load_run_state(str(tmp_path))["disregarded"] == ["r1", "r2"]
+        assert fr.load_run_state(str(tmp_path))["disregarded"] == ["f1", "f2"]
 
     # -- rule_fixes_applied sibling key -------------------------------------
 
@@ -1323,10 +1448,10 @@ class TestRunState:
         state = fr.persist_rule_fixes(
             str(tmp_path),
             RUN_ID,
-            [{"rule_id": "RQ1", "rule_source": "rule--no-comments", "invalidated_record_ids": ["r4"]}],
+            [{"rule_id": "rq1", "rule_sources": ["rule--no-comments"], "invalidated_record_ids": ["f4"]}],
         )
         assert state["rule_fixes_applied"] == [
-            {"rule_id": "RQ1", "rule_source": "rule--no-comments", "invalidated_record_ids": ["r4"]}
+            {"rule_id": "rq1", "rule_sources": ["rule--no-comments"], "invalidated_record_ids": ["f4"]}
         ]
         # Read back from disk, run_id-stamped.
         loaded = fr.load_run_state(str(tmp_path), expected_run_id=RUN_ID)
@@ -1335,41 +1460,41 @@ class TestRunState:
     def test_persist_rule_fixes_merges_by_rule_id_add_only(self, tmp_path: Path) -> None:
         fr.persist_rule_fixes(
             str(tmp_path), RUN_ID,
-            [{"rule_id": "RQ1", "rule_source": "rule--a", "invalidated_record_ids": ["r1"]}],
+            [{"rule_id": "rq1", "rule_sources": ["rule--a"], "invalidated_record_ids": ["f1"]}],
         )
-        # Re-applying RQ1 unions ids (no dup); a new rule RQ2 is appended in order.
+        # Re-applying rq1 unions ids (no dup); a new rule rq2 is appended in order.
         state = fr.persist_rule_fixes(
             str(tmp_path), RUN_ID,
             [
-                {"rule_id": "RQ1", "rule_source": "rule--a", "invalidated_record_ids": ["r1", "r2"]},
-                {"rule_id": "RQ2", "rule_source": "rule--b", "invalidated_record_ids": ["r3"]},
+                {"rule_id": "rq1", "rule_sources": ["rule--a"], "invalidated_record_ids": ["f1", "f2"]},
+                {"rule_id": "rq2", "rule_sources": ["rule--b"], "invalidated_record_ids": ["f3"]},
             ],
         )
         assert state["rule_fixes_applied"] == [
-            {"rule_id": "RQ1", "rule_source": "rule--a", "invalidated_record_ids": ["r1", "r2"]},
-            {"rule_id": "RQ2", "rule_source": "rule--b", "invalidated_record_ids": ["r3"]},
+            {"rule_id": "rq1", "rule_sources": ["rule--a"], "invalidated_record_ids": ["f1", "f2"]},
+            {"rule_id": "rq2", "rule_sources": ["rule--b"], "invalidated_record_ids": ["f3"]},
         ]
 
     def test_persist_rule_fixes_preserves_disregarded(self, tmp_path: Path) -> None:
-        fr.persist_disregard(str(tmp_path), RUN_ID, ["r1"])
+        fr.persist_disregard(str(tmp_path), RUN_ID, ["f1"])
         state = fr.persist_rule_fixes(
             str(tmp_path), RUN_ID,
-            [{"rule_id": "RQ1", "rule_source": "rule--a", "invalidated_record_ids": ["r4"]}],
+            [{"rule_id": "rq1", "rule_sources": ["rule--a"], "invalidated_record_ids": ["f4"]}],
         )
         # The sibling disregarded set is untouched by the rule-fix write.
-        assert state["disregarded"] == ["r1"]
-        assert state["rule_fixes_applied"][0]["rule_id"] == "RQ1"
+        assert state["disregarded"] == ["f1"]
+        assert state["rule_fixes_applied"][0]["rule_id"] == "rq1"
 
     def test_persist_disregard_preserves_rule_fixes(self, tmp_path: Path) -> None:
         fr.persist_rule_fixes(
             str(tmp_path), RUN_ID,
-            [{"rule_id": "RQ1", "rule_source": "rule--a", "invalidated_record_ids": ["r4"]}],
+            [{"rule_id": "rq1", "rule_sources": ["rule--a"], "invalidated_record_ids": ["f4"]}],
         )
-        state = fr.persist_disregard(str(tmp_path), RUN_ID, ["r1"])
+        state = fr.persist_disregard(str(tmp_path), RUN_ID, ["f1"])
         # Writing a disregard must not wipe the recorded rule fixes.
-        assert state["disregarded"] == ["r1"]
+        assert state["disregarded"] == ["f1"]
         assert state["rule_fixes_applied"] == [
-            {"rule_id": "RQ1", "rule_source": "rule--a", "invalidated_record_ids": ["r4"]}
+            {"rule_id": "rq1", "rule_sources": ["rule--a"], "invalidated_record_ids": ["f4"]}
         ]
 
     def test_load_run_state_sanitizes_rule_fixes(self, tmp_path: Path) -> None:
@@ -1380,15 +1505,15 @@ class TestRunState:
                     "disregarded": [],
                     "rule_fixes_applied": [
                         "junk",
-                        {"rule_source": "rule--a", "invalidated_record_ids": ["r1"]},  # no rule_id
-                        {"rule_id": "RQ1", "invalidated_record_ids": ["r1", 5, "", "r2"]},
+                        {"rule_sources": ["rule--a"], "invalidated_record_ids": ["f1"]},  # no rule_id
+                        {"rule_id": "rq1", "rule_sources": ["rule--a", 5, "", "rule--b"], "invalidated_record_ids": ["f1", 5, "", "f2"]},
                     ],
                 }
             ),
             encoding="utf-8",
         )
         assert fr.load_run_state(str(tmp_path))["rule_fixes_applied"] == [
-            {"rule_id": "RQ1", "rule_source": "", "invalidated_record_ids": ["r1", "r2"]}
+            {"rule_id": "rq1", "rule_sources": ["rule--a", "rule--b"], "invalidated_record_ids": ["f1", "f2"]}
         ]
 
 
@@ -1437,33 +1562,33 @@ class TestDisregardPersistsAcrossRerender:
         records = _write_records(tmp_path)
         canvas = tmp_path / "canvas.html"
 
-        # 1) Apply a disregard for r1 (writes run-state.json).
+        # 1) Apply a disregard for f1 (writes run-state.json).
         fr.validate_action_command(
             _action_args(
-                records, RUN_ID, "r1",
+                records, RUN_ID, "f1",
                 action="focused-review.disregard",
                 apply_disregard=True,
                 run_dir=str(tmp_path),
             )
         )
 
-        # 2) Render — r1 is dimmed, the others are not.
+        # 2) Render — f1 is dimmed, the others are not.
         fr.render_review(_render_args(records, run_dir=str(tmp_path), canvas_out=str(canvas)))
         html1 = canvas.read_text(encoding="utf-8")
-        assert "r1" in _dimmed_ids(html1)
-        assert "r2" not in _dimmed_ids(html1)
-        assert "r2" in _plain_ids(html1)
+        assert "f1" in _dimmed_ids(html1)
+        assert "f2" not in _dimmed_ids(html1)
+        assert "f2" in _plain_ids(html1)
 
         # 3) Re-render from the same records.json — the dim PERSISTS (read back from
         #    run-state.json), even though render-review re-builds the HTML from scratch.
         fr.render_review(_render_args(records, run_dir=str(tmp_path), canvas_out=str(canvas)))
         html2 = canvas.read_text(encoding="utf-8")
-        assert "r1" in _dimmed_ids(html2)
+        assert "f1" in _dimmed_ids(html2)
 
         # 4) Disregard another finding; both now persist across the next render.
         fr.validate_action_command(
             _action_args(
-                records, RUN_ID, "r3",
+                records, RUN_ID, "f3",
                 action="focused-review.disregard",
                 apply_disregard=True,
                 run_dir=str(tmp_path),
@@ -1471,7 +1596,7 @@ class TestDisregardPersistsAcrossRerender:
         )
         fr.render_review(_render_args(records, run_dir=str(tmp_path), canvas_out=str(canvas)))
         html3 = canvas.read_text(encoding="utf-8")
-        assert {"r1", "r3"} <= _dimmed_ids(html3)
+        assert {"f1", "f3"} <= _dimmed_ids(html3)
 
     def test_no_run_state_means_nothing_dimmed(self, tmp_path: Path) -> None:
         records = _write_records(tmp_path)
@@ -1482,7 +1607,7 @@ class TestDisregardPersistsAcrossRerender:
     def test_stale_run_state_is_ignored_on_render(self, tmp_path: Path) -> None:
         # run-state.json from a different run must not dim the current run's findings.
         records = _write_records(tmp_path)
-        fr.persist_disregard(str(tmp_path), "SOME-OTHER-RUN", ["r1"])
+        fr.persist_disregard(str(tmp_path), "SOME-OTHER-RUN", ["f1"])
         canvas = tmp_path / "canvas.html"
         fr.render_review(_render_args(records, run_dir=str(tmp_path), canvas_out=str(canvas)))
         assert _dimmed_ids(canvas.read_text(encoding="utf-8")) == set()
@@ -1498,23 +1623,23 @@ class TestRuleFixInvalidationPersistsAcrossRerender:
         records = _write_records(tmp_path)
         canvas = tmp_path / "canvas.html"
 
-        # 1) Record an applied rule fix that invalidates r1 (writes run-state.json).
+        # 1) Record an applied rule fix that invalidates f1 (writes run-state.json).
         fr.persist_rule_fixes(
             str(tmp_path), RUN_ID,
-            [{"rule_id": "RQ1", "rule_source": "rule--simplicity", "invalidated_record_ids": ["r1"]}],
+            [{"rule_id": "rq1", "rule_sources": ["rule--simplicity"], "invalidated_record_ids": ["f1"]}],
         )
 
-        # 2) Render — r1 is dimmed AND carries the audit reason pill; r2 is plain.
+        # 2) Render — f1 is dimmed AND carries the audit reason pill; f2 is plain.
         fr.render_review(_render_args(records, run_dir=str(tmp_path), canvas_out=str(canvas)))
         html1 = canvas.read_text(encoding="utf-8")
-        assert "r1" in _dimmed_ids(html1)
-        assert "r2" in _plain_ids(html1)
+        assert "f1" in _dimmed_ids(html1)
+        assert "f2" in _plain_ids(html1)
         assert '<span class="dim-reason">invalidated — rule RQ1 fixed</span>' in html1
 
         # 3) Re-render from the same records.json — the invalidation dim PERSISTS.
         fr.render_review(_render_args(records, run_dir=str(tmp_path), canvas_out=str(canvas)))
         html2 = canvas.read_text(encoding="utf-8")
-        assert "r1" in _dimmed_ids(html2)
+        assert "f1" in _dimmed_ids(html2)
         assert '<span class="dim-reason">invalidated — rule RQ1 fixed</span>' in html2
 
     def test_disregard_and_rule_fix_coexist_on_render(self, tmp_path: Path) -> None:
@@ -1522,23 +1647,23 @@ class TestRuleFixInvalidationPersistsAcrossRerender:
         # invalidation both dim their own rows in the same render.
         records = _write_records(tmp_path)
         canvas = tmp_path / "canvas.html"
-        fr.persist_disregard(str(tmp_path), RUN_ID, ["r2"])
+        fr.persist_disregard(str(tmp_path), RUN_ID, ["f2"])
         fr.persist_rule_fixes(
             str(tmp_path), RUN_ID,
-            [{"rule_id": "RQ1", "rule_source": "rule--simplicity", "invalidated_record_ids": ["r1"]}],
+            [{"rule_id": "rq1", "rule_sources": ["rule--simplicity"], "invalidated_record_ids": ["f1"]}],
         )
         fr.render_review(_render_args(records, run_dir=str(tmp_path), canvas_out=str(canvas)))
         html = canvas.read_text(encoding="utf-8")
-        assert {"r1", "r2"} <= _dimmed_ids(html)
+        assert {"f1", "f2"} <= _dimmed_ids(html)
         # Only the rule-fix row gets an audit reason; the plain disregard does not.
-        r2_block = html.split('data-record-id="r2"', 1)[1].split("</details>", 1)[0]
-        assert "dim-reason" not in r2_block
+        f2_block = html.split('data-record-id="f2"', 1)[1].split("</details>", 1)[0]
+        assert "dim-reason" not in f2_block
 
     def test_stale_rule_fix_state_is_ignored_on_render(self, tmp_path: Path) -> None:
         records = _write_records(tmp_path)
         fr.persist_rule_fixes(
             str(tmp_path), "SOME-OTHER-RUN",
-            [{"rule_id": "RQ1", "rule_source": "rule--simplicity", "invalidated_record_ids": ["r1"]}],
+            [{"rule_id": "rq1", "rule_sources": ["rule--simplicity"], "invalidated_record_ids": ["f1"]}],
         )
         canvas = tmp_path / "canvas.html"
         fr.render_review(_render_args(records, run_dir=str(tmp_path), canvas_out=str(canvas)))
@@ -1549,55 +1674,55 @@ class TestRuleFixInvalidationPersistsAcrossRerender:
     ) -> None:
         """Finding C-11: a two-rule finding fixed in SEPARATE applies still dies.
 
-        The user fixes the rules one at a time — RQ1 in one action, RQ2 in a second.
+        The user fixes the rules one at a time — rq1 in one action, rq2 in a second.
         ``rule_fixes_applied`` is an add-only accumulator and each ``validate-action``
         call only sees its own posted batch, so the batch-local computation alone
-        would leave ``r2`` (which needs BOTH rules) permanently visible — never a
-        subset {RQ1,RQ2} in either single-rule call. The apply path re-derives
-        invalidation against the ACCUMULATED union, so after both actions ``r2`` is
+        would leave ``f2`` (which needs BOTH rules) permanently visible — never a
+        subset {rq1,rq2} in either single-rule call. The apply path re-derives
+        invalidation against the ACCUMULATED union, so after both actions ``f2`` is
         persisted as invalidated and the re-render dims it with a reason naming both
         rules (Decision 12).
         """
         records = _write_records(tmp_path, _two_rule_renderable_envelope())
         canvas = tmp_path / "canvas.html"
 
-        # Action 1 — fix RQ1 alone. r1 (single rule) dies; r2 still needs RQ2.
+        # Action 1 — fix rq1 alone. f1 (single rule) dies; f2 still needs rq2.
         fr.validate_action_command(
             _action_args(
-                records, RUN_ID, "RQ1",
+                records, RUN_ID, "rq1",
                 action="focused-review.fix",
                 apply_rule_fixes=True, run_dir=str(tmp_path),
             )
         )
         inv1 = _applied_by_rule(tmp_path)
-        assert inv1["RQ1"] == ["r1"]
-        assert all("r2" not in ids for ids in inv1.values())  # r2 NOT yet invalidated
+        assert inv1["rq1"] == ["f1"]
+        assert all("f2" not in ids for ids in inv1.values())  # f2 NOT yet invalidated
 
-        # Render after action 1 — r1 is dimmed, r2 stays plain (only one rule fixed).
+        # Render after action 1 — f1 is dimmed, f2 stays plain (only one rule fixed).
         fr.render_review(
             _render_args(records, run_dir=str(tmp_path), canvas_out=str(canvas), rules_dir="review/")
         )
         html1 = canvas.read_text(encoding="utf-8")
-        assert "r1" in _dimmed_ids(html1)
-        assert "r2" in _plain_ids(html1)
+        assert "f1" in _dimmed_ids(html1)
+        assert "f2" in _plain_ids(html1)
 
-        # Action 2 — fix RQ2 alone. Now BOTH of r2's rules are applied → r2 dies.
+        # Action 2 — fix rq2 alone. Now BOTH of f2's rules are applied → f2 dies.
         fr.validate_action_command(
             _action_args(
-                records, RUN_ID, "RQ2",
+                records, RUN_ID, "rq2",
                 action="focused-review.fix",
                 apply_rule_fixes=True, run_dir=str(tmp_path),
             )
         )
         inv2 = _applied_by_rule(tmp_path)
-        # r2 is attributed to EVERY rule it depends on; r1 stays under RQ1 only.
-        assert inv2["RQ1"] == ["r1", "r2"]
-        assert inv2["RQ2"] == ["r2"]
+        # f2 is attributed to EVERY rule it depends on; f1 stays under rq1 only.
+        assert inv2["rq1"] == ["f1", "f2"]
+        assert inv2["rq2"] == ["f2"]
 
-        # Re-render — r2 is now dimmed with a reason naming BOTH fixed rules.
+        # Re-render — f2 is now dimmed with a reason naming BOTH fixed rules.
         fr.render_review(
             _render_args(records, run_dir=str(tmp_path), canvas_out=str(canvas), rules_dir="review/")
         )
         html2 = canvas.read_text(encoding="utf-8")
-        assert {"r1", "r2"} <= _dimmed_ids(html2)
+        assert {"f1", "f2"} <= _dimmed_ids(html2)
         assert '<span class="dim-reason">invalidated — rules RQ1, RQ2 fixed</span>' in html2

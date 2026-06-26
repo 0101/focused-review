@@ -514,7 +514,7 @@
     selected: new Set(),                 // record_ids currently checked
     disregarded: new Set(),              // record_ids marked disregarded (dimmed)
     fixed: new Set(),                    // record_ids the orchestrator marked fixed (done)
-    scheduledRules: new Set(),           // RQ ids whose rule-fix checkbox is checked
+    scheduledRules: new Set(),           // rq ids whose rule-fix checkbox is checked
     openId: null                         // record_id of the open accordion, if any
   };
 
@@ -546,7 +546,7 @@
   }
 
   function updateBar() {
-    // Findings (row checkboxes) and scheduled rule fixes (RQ checkboxes) both count
+    // Findings (row checkboxes) and scheduled rule fixes (rq checkboxes) both count
     // toward an actionable selection, so the bar enables for a findings-only,
     // rules-only, or mixed action — the unified payload carries whatever is selected.
     var n = state.selected.size + state.scheduledRules.size;
@@ -578,7 +578,7 @@
   }
 
   // Live rule-fix preview: grey every finding whose ENTIRE rule-source set is
-  // scheduled to be fixed. data-rule-deps (from _rule_dependency_map) lists the RQ
+  // scheduled to be fixed. data-rule-deps (from _rule_dependency_map) lists the rq
   // ids a row depends on; the row greys only once they are all checked. Pure
   // client-side — no agent round-trip — and a distinct class from the persisted dim.
   function applyRulePreview() {
@@ -586,6 +586,14 @@
       var deps = (f.getAttribute("data-rule-deps") || "").split(/\s+/).filter(Boolean);
       var dies = deps.length > 0 && deps.every(function (rq) { return state.scheduledRules.has(rq); });
       f.classList.toggle("pending-invalid", dies);
+      if (dies) {
+        // Now non-actionable: drop any prior selection and clear the checkbox so a
+        // scheduled rule fix can't leave this finding's id in the next posted payload.
+        var id = f.getAttribute("data-record-id");
+        if (id) state.selected.delete(id);
+        var cb = f.querySelector(".row-cb");
+        if (cb) cb.checked = false;
+      }
     });
   }
 
@@ -594,6 +602,15 @@
     var t = e.target;
     if (!t || !t.classList) return;
     if (t.classList.contains("row-cb")) {
+      // Actionable rows only: a dimmed (disregarded) or pending-invalid (rule-fix
+      // scheduled) row is non-actionable, so refuse a manual check rather than let
+      // its id enter state.selected / the posted payload — the same contract
+      // ACTIONABLE_ROW_CB enforces for the section select-all.
+      var f = t.closest(".finding");
+      if (t.checked && f && (f.classList.contains("dimmed") || f.classList.contains("pending-invalid"))) {
+        t.checked = false;
+        return;
+      }
       var id = recordId(t);
       if (id) { if (t.checked) state.selected.add(id); else state.selected.delete(id); }
       syncSections();
@@ -612,13 +629,16 @@
       var rq = t.getAttribute("data-rq-id");
       if (rq) { if (t.checked) state.scheduledRules.add(rq); else state.scheduledRules.delete(rq); }
       applyRulePreview();
+      // The preview may have cleared selections that just became pending-invalid,
+      // so re-sync the section select-all tri-state to match.
+      syncSections();
       updateBar();
     }
   });
 
   // Action buttons → postMessage to the Treemon parent. One unified, prefix-
-  // disambiguated payload carries the whole selection: `ids` mixes finding ids (r#)
-  // with scheduled rule-fix ids (RQ#), `button` is the bare verb pressed
+  // disambiguated payload carries the whole selection: `ids` mixes finding ids (f#)
+  // with scheduled rule-fix ids (rq#), `button` is the bare verb pressed
   // (fix/disregard/document), `text` is the free-text box, and `run_id` lets the
   // orchestrator match the action to the rendered run. Python's validate-action
   // resolves each id by prefix and is the trust boundary — the canvas only posts.
@@ -711,7 +731,7 @@
         if (d && !d.open) d.open = true;
       }
     });
-    // Re-apply the rule-fix preview after a morph: prune scheduled RQ ids to those
+    // Re-apply the rule-fix preview after a morph: prune scheduled rq ids to those
     // still present, re-check their boxes, and re-grey the rows their combined fix
     // would kill (a fresh DOM loses the transient class until we re-derive it).
     var presentRq = new Set();

@@ -678,6 +678,32 @@ class TestValidateRecordsRejectRuleQualityNotes:
             for e in errors
         )
 
+    def test_note_rule_source_chunk_labels_clash_across_notes(self) -> None:
+        # Finding F1: _rule_dependency_map keys its source->note map on the CANONICAL
+        # (chunk-suffix-stripped) label, so two SEPARATE notes naming the same rule
+        # via DIFFERENT chunk labels (rule--general-review--1 vs --2) collapse to one
+        # key — the later note becomes a phantom whose checkbox invalidates nothing,
+        # and chunk-2 findings are mis-attributed to the first note. The uniqueness
+        # check canonicalizes the same way, so this cross-note clash is rejected
+        # (contrast test_note_rule_file_matches_every_chunk_label_of_one_rule, where
+        # a SINGLE note may list both chunks).
+        env = _semantic_envelope()
+        env["rule_quality_notes"][0]["rule_sources"] = ["rule--general-review--1"]
+        env["rule_quality_notes"][0]["rule_file"] = "review/rules/general-review.md"
+        env["rule_quality_notes"].append(
+            {
+                "rule_sources": ["rule--general-review--2"],
+                "rule_file": "review/rules/general-review.md",
+                "observation": "o",
+                "suggestion": "s",
+            }
+        )
+        errors = fr.validate_records(env)
+        assert any(
+            e["path"] == "rule_quality_notes[1].rule_sources" and "duplicate" in e["message"]
+            for e in errors
+        )
+
     def test_note_rule_file_required(self) -> None:
         env = _semantic_envelope()
         del env["rule_quality_notes"][0]["rule_file"]
@@ -753,6 +779,44 @@ class TestValidateRecordsRejectRuleQualityNotes:
         env["rule_quality_notes"][0]["rule_sources"] = ["freeform-label"]
         env["rule_quality_notes"][0]["rule_file"] = "review/anything.md"
         assert fr.validate_records(env) == []
+
+    def test_note_rule_file_matches_chunk_suffixed_source(self) -> None:
+        # Finding r10: provenance labels are chunk-suffixed by the dispatch
+        # (rule--general-review--1 is chunk 1 of the general-review rule) while the
+        # rule file is not (general-review.md). A trailing --<digits> is normalized
+        # off before the stem cross-check, so a chunk label resolves to its base file.
+        env = _semantic_envelope()
+        env["rule_quality_notes"][0]["rule_sources"] = ["rule--general-review--1"]
+        env["rule_quality_notes"][0]["rule_file"] = "review/rules/general-review.md"
+        assert fr.validate_records(env) == []
+
+    def test_note_rule_file_matches_every_chunk_label_of_one_rule(self) -> None:
+        # A rule split across diff chunks tags each chunk's findings with its own
+        # --<digits> label; a SINGLE quality note covers them all and points rule_file
+        # at the one base rule file. Every chunk label must accept that file.
+        env = _semantic_envelope()
+        env["rule_quality_notes"][0]["rule_sources"] = [
+            "rule--general-review--1",
+            "rule--general-review--2",
+        ]
+        env["rule_quality_notes"][0]["rule_file"] = "review/rules/general-review.md"
+        assert fr.validate_records(env) == []
+
+    def test_note_rule_file_chunk_suffix_still_catches_real_mismatch(self) -> None:
+        # Normalizing the chunk suffix forgives ONLY the suffix, never a genuinely
+        # different rule name (C-12 retained): a chunk label whose base name differs
+        # from the rule_file stem is still rejected. The message names the canonical
+        # rule (suffix stripped) so it points at the right .md file.
+        env = _semantic_envelope()
+        env["rule_quality_notes"][0]["rule_sources"] = ["rule--general-review--1"]
+        env["rule_quality_notes"][0]["rule_file"] = "review/rules/simplicity.md"
+        errors = fr.validate_records(env)
+        assert any(
+            e["path"] == "rule_quality_notes[0].rule_file"
+            and "does not match rule_source" in e["message"]
+            and "'general-review'" in e["message"]
+            for e in errors
+        )
 
 
 # ---------------------------------------------------------------------------

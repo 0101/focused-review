@@ -11,8 +11,10 @@ import html
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
+import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -110,6 +112,33 @@ PRE_EXISTING_MARKER = "pre-existing"
 # (F2 / RQ1). The reporter does NOT emit these — finalize assigns them.
 _FINDING_ID_RE = re.compile(r"^f[0-9]+$")
 _RULE_QUALITY_NOTE_ID_RE = re.compile(r"^rq[0-9]+$")
+
+# Provenance source labels carry the dispatch chunk index — a rule that spans
+# several diff chunks reports each chunk's findings under `rule--<name>--<chunk>`
+# (e.g. `rule--general-review--1`; see SKILL.md Phase 1 findings_path) — while the
+# rule *file* the label names is not chunk-suffixed (`general-review.md`). This
+# matches a single trailing `--<digits>` so it can be normalized off when relating
+# a provenance label to its rule file (the C-12 stem cross-check) or grouping a
+# rule's chunked findings under one quality note (the rule-fix dependency map).
+_RULE_CHUNK_SUFFIX_RE = re.compile(r"--[0-9]+$")
+
+
+def _strip_chunk_suffix(label: str) -> str:
+    """Drop a single trailing ``--<digits>`` chunk suffix from a rule label/stem.
+
+    Provenance labels carry the dispatch chunk index (``rule--general-review--1``)
+    while the rule file they name does not (``general-review.md``). Stripping the
+    suffix maps every chunk of one rule onto the same canonical label/stem so the
+    C-12 stem cross-check (:func:`_rule_file_source_mismatch`) and the rule-fix
+    dependency map (:func:`_rule_dependency_map`) treat all chunks as one rule.
+
+    Works on either the full label (``rule--general-review--1`` →
+    ``rule--general-review``) or the bare stem (``general-review--1`` →
+    ``general-review``), since only the trailing ``--<digits>`` is anchored. A
+    label with no chunk suffix — or whose trailing segment is non-numeric, e.g.
+    ``concern--bugs--opus`` — is returned unchanged.
+    """
+    return _RULE_CHUNK_SUFFIX_RE.sub("", label)
 
 
 def _is_pre_existing(introduced_by: object) -> bool:
@@ -1766,7 +1795,7 @@ def _post_ado_thread(
 def _post_comments_github(
     data: dict,
     inline_comments: list[dict],
-    exclude_ids: set[int],
+    exclude_ids: set[str],
 ) -> None:
     """Post review comments to a GitHub PR via ``gh api``."""
     owner: str = data["owner"]
@@ -1840,7 +1869,7 @@ def _post_comments_github(
 def _post_comments_ado(
     data: dict,
     inline_comments: list[dict],
-    exclude_ids: set[int],
+    exclude_ids: set[str],
 ) -> None:
     """Post review comments to an Azure DevOps PR via REST API.
 
@@ -1939,26 +1968,46 @@ def _post_comments_ado(
         sys.exit(1)
 
 
+def _normalize_finding_id(value: object) -> str:
+    """Normalize a finding ``f#`` id for case-insensitive matching.
+
+    The canvas badge and ``review.md`` heading show the uppercase label (``F2``)
+    while the id persisted in ``comments.json`` is lowercase (``f2``), so the
+    ``--exclude`` selector lowercases both the tokens it receives and the stored
+    ``inline_comments[].id`` before comparing — a user (or the skill) may type
+    either spelling. Applying the *same* normalization on both sides is what makes
+    the exclude key unambiguous: the ``f#`` id is globally unique (unlike the old
+    per-bucket positional integer, which collided across sections and silently
+    dropped the wrong finding — finding r8). A non-string id (a legacy integer or
+    ``None``) is coerced via ``str`` so the filter degrades gracefully instead of
+    raising.
+    """
+    return "" if value is None else str(value).strip().lower()
+
+
 def post_comments(args: argparse.Namespace) -> None:
     """Post review comments to a PR via ``gh api`` (GitHub) or ADO REST API.
 
     Reads a ``comments.json`` file (written by the skill), optionally excludes
-    specific findings by id, and posts review comments to the PR.
+    specific findings by their ``f#`` id, and posts review comments to the PR.
 
     Outputs a result JSON to stdout with the posted review status.
     Exits with code 1 on fatal errors.
     """
     comments_path: str = args.comments
-    exclude_ids: set[int] = set()
+    # ``--exclude`` is a comma-separated list of finding ``f#`` ids (e.g. "f2,f5").
+    # Each token is normalized case-insensitively and matched against the unique
+    # ``f#`` id; empty segments (leading/trailing/double commas) are skipped, and a
+    # token that matches no finding is simply ignored (the excluded count reflects
+    # what the caller asked to drop, not how many matched). There is no longer an
+    # integer-only parse step — the id is an opaque, globally-unique string.
+    exclude_ids: set[str] = set()
     if args.exclude:
-        try:
-            exclude_ids = {int(x.strip()) for x in args.exclude.split(",") if x.strip()}
-        except ValueError:
-            print(
-                "Error: --exclude must be comma-separated integers (e.g. '1,2,3')",
-                file=sys.stderr,
-            )
-            sys.exit(1)
+        exclude_ids = {
+            _normalize_finding_id(tok)
+            for tok in args.exclude.split(",")
+            if tok.strip()
+        }
 
     # Load comments.json -------------------------------------------------------
     try:
@@ -1978,9 +2027,12 @@ def post_comments(args: argparse.Namespace) -> None:
 
     inline_comments: list[dict] = data.get("inline_comments", [])
 
-    # Filter out excluded findings ---------------------------------------------
+    # Filter out excluded findings (by unique f# id, case-insensitive) ---------
     if exclude_ids:
-        inline_comments = [c for c in inline_comments if c.get("id") not in exclude_ids]
+        inline_comments = [
+            c for c in inline_comments
+            if _normalize_finding_id(c.get("id")) not in exclude_ids
+        ]
 
     if platform == "github":
         _post_comments_github(data, inline_comments, exclude_ids)
@@ -2413,6 +2465,18 @@ def _rule_file_source_mismatch(rule_source: object, rule_file: object) -> str | 
     invalidated — silent, cross-wired corruption. This cross-check ties the two
     together: the ``rule_file`` stem must equal the name part of ``rule_source``.
 
+    Provenance labels are chunk-suffixed by the dispatch (``rule--general-review--1``
+    is chunk 1 of the ``general-review`` rule; see SKILL.md Phase 1) while the rule
+    file they name is not (``general-review.md``), so a trailing ``--<digits>`` chunk
+    suffix is normalized off the source name before comparing stems — every chunk of
+    a rule must accept that rule's single file. The C-12 protection is retained: the
+    path-safety check (:func:`_validate_rule_file`, run by both callers before this
+    cross-check) has already proved ``rule_file`` is a safe ``.md`` under the rules
+    directory, so the normalized stem still resolves to a real rule file there; only
+    the chunk suffix is forgiven, never a genuinely different rule name. The raw
+    (un-normalized) name is also accepted so a rule whose filename legitimately ends
+    in ``--<digits>`` still matches its own ``--<digits>.md`` file.
+
     Returns ``None`` (nothing to report) when either field is empty/non-string or
     when ``rule_source`` is not in canonical ``rule--`` form — there is then no name
     to derive, and an un-prefixed source matches no finding provenance anyway, so its
@@ -2423,41 +2487,48 @@ def _rule_file_source_mismatch(rule_source: object, rule_file: object) -> str | 
     source = rule_source.strip()
     if not source.startswith("rule--"):
         return None
-    expected_stem = source[len("rule--"):]
+    raw_name = source[len("rule--"):]
+    canonical_name = _strip_chunk_suffix(raw_name)
     actual_stem = PurePosixPath(rule_file.replace("\\", "/")).stem
-    if actual_stem == expected_stem:
+    if actual_stem == raw_name or actual_stem == canonical_name:
         return None
     return (
         f"rule_file stem {actual_stem!r} does not match rule_source {source!r} "
-        f"(rule_source names rule {expected_stem!r}, so rule_file must be that "
-        f"rule's {expected_stem}.md file under the rules directory); the file the "
+        f"(rule_source names rule {canonical_name!r}, so rule_file must be that "
+        f"rule's {canonical_name}.md file under the rules directory); the file the "
         f"agent edits must be the rule whose findings the fix invalidates"
     )
 
 
 def _collect_rule_file_errors(
-    rule_file: object, rule_source: object, rules_dir: str
+    rule_file: object, rule_sources: object, rules_dir: str
 ) -> list[str]:
     """Trust-boundary errors for a rule-quality note's ``rule_file`` path.
 
-    Shared by the schema validator (:func:`_validate_rule_quality_note`, the
-    render-review / validate-records path) and the action validator
-    (:func:`validate_action`, the canvas round-trip) so both apply the *same* two
-    checks at their respective trust boundaries: first the path-safety check
-    (absolute / ``..`` traversal / non-``.md`` / outside ``rules_dir``), then — only
-    when the path is safe — the ``rule_source`` consistency cross-check (Finding
-    C-12 via :func:`_rule_file_source_mismatch`). The cross-check is skipped on an
-    unsafe path because the path error is the actionable one and the stem of a
-    traversal/absolute path is meaningless. Returns the messages in order; an empty
-    list means the ``rule_file`` is trustworthy to edit.
+    Used by the action validator (:func:`validate_action`, the canvas round-trip)
+    and mirrors the render-review / validate-records path
+    (:func:`_validate_rule_quality_note`) so both apply the *same* checks at their
+    respective trust boundaries: first the path-safety check (absolute / ``..``
+    traversal / non-``.md`` / outside ``rules_dir``) ONCE, then — only when the path
+    is safe — the consistency cross-check (Finding C-12 via
+    :func:`_rule_file_source_mismatch`) for *every* label in ``rule_sources`` so the
+    note can't point ``rule_file`` at a file that matches none of its labels. Because
+    each label must match that one file, all labels name the *same* rule — a note
+    covers one rule, and several labels are only the chunk suffixes of that rule. The
+    cross-check is skipped on an unsafe path because the path error is
+    the actionable one and the stem of a traversal/absolute path is meaningless.
+    Returns the messages in order; an empty list means the ``rule_file`` is
+    trustworthy to edit.
     """
     messages: list[str] = []
     _validate_rule_file(rule_file, rules_dir, lambda _field, message: messages.append(message))
     if messages:
         return messages
-    mismatch = _rule_file_source_mismatch(rule_source, rule_file)
-    if mismatch is not None:
-        messages.append(mismatch)
+    sources = rule_sources if isinstance(rule_sources, list) else [rule_sources]
+    for source in sources:
+        mismatch = _rule_file_source_mismatch(source, rule_file)
+        if mismatch is not None:
+            messages.append(mismatch)
     return messages
 
 
@@ -2480,9 +2551,13 @@ def _validate_rule_quality_note(
 
     Each source label is uniqueness-checked across the whole notes array (via
     *seen_rule_sources*) because :func:`_rule_dependency_map` keys its source->note
-    map on the stripped label; two notes naming the same source would collapse to
-    the first, so the later note's fix would silently invalidate no findings.
-    Rejecting the duplicate here keeps that map one-to-one.
+    map on the CANONICAL (chunk-suffix-stripped) label; two notes naming the same
+    rule — even via *different* chunk labels (``rule--gr--1`` / ``rule--gr--2``) —
+    would collapse to the first, so the later note's fix would silently invalidate
+    no findings (Finding F1). Rejecting that cross-note duplicate here keeps the map
+    one-to-one. A single note MAY still list every chunk of one rule: those
+    within-note canonical repeats all resolve to that one note, so they are
+    de-duplicated rather than rejected.
     """
     base_path = f"rule_quality_notes[{index}]"
     if not isinstance(item, dict):
@@ -2507,10 +2582,17 @@ def _validate_rule_quality_note(
             add(field, f"{field} is required and must be a non-empty string")
 
     # rule_sources — required non-empty list of canonical rule--<name> labels.
-    # Each entry must be a non-empty string and unique across ALL notes (so the
-    # source->note map _rule_dependency_map builds stays one-to-one). A label that
-    # repeats within this same note is caught by the same accumulated set.
+    # Each entry must be a non-empty string; the CANONICAL (chunk-suffix-stripped)
+    # label must be unique across ALL notes, mirroring the consumer
+    # _rule_dependency_map (which keys on _strip_chunk_suffix(source.strip())) so
+    # that map stays one-to-one. A single note MAY repeat a canonical (it lists
+    # several chunk labels — rule--gr--1, rule--gr--2 — of one rule it covers):
+    # those within-note repeats are de-duplicated, not rejected; only a clash with a
+    # DIFFERENT note is a duplicate. valid_sources keeps the RAW stripped labels
+    # because the rule_file stem cross-check (_rule_file_source_mismatch) re-strips
+    # the suffix itself and must see each chunk label it is given.
     valid_sources: list[str] = []
+    note_rule_sources: set[str] = set()
     rule_sources = item.get("rule_sources", _MISSING)
     if rule_sources is _MISSING or not isinstance(rule_sources, list):
         add("rule_sources", "rule_sources is required and must be a non-empty array of strings")
@@ -2522,20 +2604,28 @@ def _validate_rule_quality_note(
                 add("rule_sources", f"rule_sources[{j}] must be a non-empty string")
                 continue
             normalized = source.strip()
-            if normalized in seen_rule_sources:
+            canonical = _strip_chunk_suffix(normalized)
+            if canonical in note_rule_sources:
+                # Another chunk label of a rule THIS note already covers — keep the
+                # raw label for the rule_file cross-check; it is not a cross-note
+                # clash, so the map stays one-to-one.
+                valid_sources.append(normalized)
+            elif canonical in seen_rule_sources:
                 add(
                     "rule_sources",
                     f"duplicate rule_source {source!r} "
                     "(each rule may be named by at most one rule-quality note)",
                 )
             else:
-                seen_rule_sources.add(normalized)
+                seen_rule_sources.add(canonical)
+                note_rule_sources.add(canonical)
                 valid_sources.append(normalized)
 
     # rule_file — path safety, then per-source consistency (Finding C-12). The
     # path-safety check runs once; the rule_source cross-check runs for every
-    # source label so a note naming several rules can't point rule_file at a file
-    # that matches none of them.
+    # source label so the note can't point rule_file at a file matching none of its
+    # labels. Since each label must match that one file, all labels name the SAME
+    # rule (a note covers one rule; several labels are only its chunk suffixes).
     rule_file = item.get("rule_file", _MISSING)
     path_messages: list[str] = []
     _validate_rule_file(rule_file, rules_dir, lambda _f, message: path_messages.append(message))
@@ -3106,7 +3196,7 @@ def _raw_source_labels(provenance: object) -> list[str]:
     (validated in Phase 2). Returns the canonical labels verbatim (e.g.
     ``rule--no-comments``, ``concern--bugs--opus``) so callers can both classify
     them (:func:`_parse_source_label`) and match them against a rule-quality
-    note's canonical ``rule_source``.
+    note's canonical ``rule_sources``.
     """
     labels: list[str] = []
     if not isinstance(provenance, list):
@@ -3260,16 +3350,16 @@ def _partition_findings(findings: list) -> tuple[list, list, list]:
 def _rule_dependency_map(findings: list, notes: list) -> dict[str, list[str]]:
     """Map each *invalidatable* finding to the rule-quality note ids it depends on.
 
-    Returns ``{record_id: [RQ#, ...]}`` for findings that a rule fix could
+    Returns ``{record_id: [rq#, ...]}`` for findings that a rule fix could
     invalidate. A finding qualifies only when **all of its sources are rules
     being fixed** (Decision 12): it has at least one rule source, **no** concern
     source (an independent justification keeps it alive), no unrecognised source,
     and **every** one of its rule sources is named by a rule-quality note (so the
-    listed RQ ids fully account for why the finding exists). The note ids are
+    listed rq ids fully account for why the finding exists). The note ids are
     de-duplicated and emitted in the finding's provenance order.
 
     This is the single source of truth for the canvas live-preview (each row gets
-    a ``data-rule-deps`` list and greys only once *all* its RQ ids are checked)
+    a ``data-rule-deps`` list and greys only once *all* its rq ids are checked)
     and for resolving which ``record_id``s a scheduled rule fix invalidates: given
     an applied RQ-id set ``A``, the dying findings are exactly
     ``[rid for rid, deps in map.items() if set(deps) <= A]``.
@@ -3279,11 +3369,18 @@ def _rule_dependency_map(findings: list, notes: list) -> dict[str, list[str]]:
     from the map, so the canvas never live-greys it.
     """
     # Canonical rule_source label -> the note id that fixes it. A note now carries
-    # a LIST of rule_sources (each rule it covers), so every label maps to that
-    # note's id. validate_records rejects two notes naming the same source, so this
-    # map is one-to-one for any validated envelope; the setdefault tiebreak below
-    # is a defensive fallback that keeps the first note should unvalidated input
-    # ever reach here.
+    # a LIST of rule_sources (the chunk labels of the one rule it covers), so every
+    # label maps to that note's id. validate_records rejects two notes naming the
+    # same source, so this map is one-to-one for any validated envelope; the
+    # setdefault tiebreak below is a defensive fallback that keeps the first note
+    # should unvalidated input ever reach here.
+    #
+    # Both the note's rule_sources and the findings' provenance labels are reduced
+    # to their canonical (chunk-suffix-stripped) form before matching: a rule split
+    # across diff chunks tags its findings `rule--<name>--1`, `rule--<name>--2`, …
+    # while a single quality note covers the whole rule, so every chunk label must
+    # resolve to the same note. _strip_chunk_suffix is a no-op for un-chunked labels,
+    # so plain `rule--<name>` matching is unchanged.
     source_to_note: dict[str, str] = {}
     for note in notes:
         if not isinstance(note, dict):
@@ -3296,7 +3393,7 @@ def _rule_dependency_map(findings: list, notes: list) -> dict[str, list[str]]:
             continue
         for source in sources:
             if _is_nonempty_str(source):
-                source_to_note.setdefault(source.strip(), note_id)
+                source_to_note.setdefault(_strip_chunk_suffix(source.strip()), note_id)
 
     deps: dict[str, list[str]] = {}
     for finding in findings:
@@ -3318,7 +3415,7 @@ def _rule_dependency_map(findings: list, notes: list) -> dict[str, list[str]]:
         note_ids: list[str] = []
         covered = True
         for label in rule_labels:
-            note_id = source_to_note.get(label)
+            note_id = source_to_note.get(_strip_chunk_suffix(label))
             if note_id is None:
                 covered = False  # an un-noted rule can never be checked/fixed
                 break
@@ -3826,10 +3923,12 @@ def _canvas_finding_block(
 def _canvas_quality_item(note: dict) -> str:
     """One ``.quality-item`` block for the canvas.
 
-    When the note carries a valid ``RQ#`` id, the item gains a schedulable
+    When the note carries a valid ``rq#`` id, the item gains a schedulable
     checkbox (``quality-cb`` + ``data-rq-id``) so checking it live-previews which
     findings the rule fix would invalidate (the suggested change is shown inline).
-    A note without a usable id renders read-only (no checkbox).
+    The visible ``quality-id`` is the uppercase label (``RQ1``) while the
+    ``data-rq-id`` attribute carries the lowercase id (``rq1``). A note without a
+    usable id renders read-only (no checkbox).
     """
     rule = html.escape(str(note.get("rule", "")))
     observation = html.escape(str(note.get("observation", "")))
@@ -3963,11 +4062,65 @@ def render_canvas_html(
 
 
 def _write_text(path: str, text: str) -> None:
-    """Write *text* to *path* as UTF-8, creating parent directories as needed."""
+    """Atomically write *text* to *path* as UTF-8, creating parents as needed.
+
+    The bytes are streamed to a uniquely-named sibling temp file in the SAME
+    directory, flushed (best-effort ``fsync``), then ``os.replace``d over *path*.
+    ``os.replace`` is an atomic rename on both POSIX and Windows, so a concurrent
+    or later reader sees either the whole previous file or the whole new one —
+    never a truncated half-write. The temp file shares *path*'s directory so the
+    rename stays on one filesystem (a cross-device move is a copy, not atomic);
+    it is unlinked on any failure before the swap, so a failed write leaves no
+    stray ``.tmp`` behind.
+
+    This matters most for render-review's in-place ``records.json`` overwrite:
+    the reporter's validated input is its own semantic source of truth. A plain
+    ``open(path, "w")`` truncates first, so an interrupt mid-write (kill / disk
+    full / read-only volume) would destroy that file with no surviving original,
+    forcing a Phase-2 re-run; the atomic swap leaves the original intact until
+    the replacement bytes are fully written.
+    """
     parent = os.path.dirname(os.path.abspath(path))
     os.makedirs(parent, exist_ok=True)
-    with open(path, "w", encoding="utf-8", newline="\n") as fh:
-        fh.write(text)
+
+    # Preserve the permissions a plain ``open(path, "w")`` would have produced:
+    # keep an existing file's mode on overwrite, else honour the process umask.
+    # mkstemp hardcodes 0o600, which would otherwise strip group/other read from
+    # every rendered artifact on POSIX. (os.chmod is a near no-op on Windows.)
+    try:
+        mode = stat.S_IMODE(os.stat(path).st_mode)
+    except OSError:
+        umask = os.umask(0)
+        os.umask(umask)
+        mode = 0o666 & ~umask
+
+    # mkstemp creates the temp file in *path*'s directory (same filesystem) so
+    # os.replace below is a same-volume atomic rename, not a copy.
+    fd, tmp = tempfile.mkstemp(
+        dir=parent, prefix="." + os.path.basename(path) + ".", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(text)
+            fh.flush()
+            # Durability is best-effort: a filesystem that rejects fsync must not
+            # break the write — os.replace still gives atomicity (the property
+            # that protects the source of truth), fsync only adds crash-durability.
+            try:
+                os.fsync(fh.fileno())
+            except OSError:
+                pass
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except BaseException:
+        # The swap never happened (or the write failed): drop the temp file so a
+        # failed render leaves no orphaned sibling, and re-raise so the caller's
+        # all-or-nothing contract still aborts the whole render.
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def _emit_stdout(text: str) -> None:
@@ -4095,9 +4248,14 @@ def render_review(args: argparse.Namespace) -> None:
         data, template, details, disregarded, parent_origin,
         invalidated=invalidated, fixed=fixed,
     )
-    # Persist the enriched records.json (the display-layer is now the single
-    # source of truth read by validate-action / post-comments). Written in the
-    # same all-or-nothing write phase as the rendered artifacts.
+    # Persist the enriched records.json (the finalized display layer is the
+    # canonical file; validate-action re-derives the same ids from it in memory,
+    # so it no longer silently depends on this write having happened). Each
+    # _write_text is INDIVIDUALLY atomic (temp file + os.replace), so an
+    # interrupt can never truncate records.json — the reporter's source of truth
+    # — to a half-written stub; at worst a re-render reproduces all three
+    # artifacts (finalize is idempotent). The three writes are still sequential,
+    # not one cross-file transaction.
     _write_text(records_path, json.dumps(data, indent=2, ensure_ascii=False) + "\n")
     _write_text(review_out, review_md)
     _write_text(canvas_out, canvas_html)
@@ -4110,14 +4268,15 @@ def render_review(args: argparse.Namespace) -> None:
 # validate-action (Phase 6): the canvas action-bar round-trip.
 #
 # The canvas posts {ids[], button, text, run_id} to the orchestrator. The `ids`
-# are a single, prefix-disambiguated list: findings keep their record_id (f#),
-# rule-quality notes use RQ#. Before the orchestrator does anything (and only
+# are a single, prefix-disambiguated list: findings use their `f#` record_id,
+# rule-quality notes use `rq#`. Before the orchestrator does anything (and only
 # after a human confirms), it calls `validate-action` to validate/expand the
 # payload against records.json: the posted run_id must match the rendered run
 # (rejecting a forged action from injected canvas JS), every id must resolve by
-# prefix (f# -> finding file/line/title/suggestion; RQ# -> rule file + suggested
-# change + the record_ids its fix invalidates), and an id matching neither prefix
-# (or absent from the envelope) is rejected. Python's role stays mechanical — it
+# prefix, case-insensitively (f# -> finding file/line/title/suggestion; rq# ->
+# rule file + suggested change + the record_ids its fix invalidates), and an id
+# matching neither prefix (or absent from the envelope) is rejected. Python's role
+# stays mechanical — it
 # validates a schema-defined contract and resolves stable ids; it never executes
 # anything.
 #
@@ -4153,11 +4312,11 @@ def _run_state_path(run_dir: str | None) -> str:
 def _sanitize_rule_fixes(raw: object) -> list[dict]:
     """Normalize the persisted ``rule_fixes_applied`` list, dropping junk entries.
 
-    Each kept entry is ``{rule_id, rule_source, invalidated_record_ids[]}`` with a
-    non-empty ``rule_id`` (the identity); ``rule_source`` defaults to ``""`` and
-    only string ``record_id``s survive. A non-list, or an entry missing its
-    ``rule_id``, is skipped — the dim is additive, so malformed state must never
-    raise or block the always-written canvas.
+    Each kept entry is ``{rule_id, rule_sources[], invalidated_record_ids[]}`` with
+    a non-empty ``rule_id`` (the identity); ``rule_sources`` defaults to ``[]`` and
+    keeps only non-empty string labels, and only string ``record_id``s survive. A
+    non-list, or an entry missing its ``rule_id``, is skipped — the dim is additive,
+    so malformed state must never raise or block the always-written canvas.
     """
     fixes: list[dict] = []
     if not isinstance(raw, list):
@@ -4170,11 +4329,14 @@ def _sanitize_rule_fixes(raw: object) -> list[dict]:
             continue
         ids_raw = entry.get("invalidated_record_ids")
         ids = [r for r in ids_raw if _is_nonempty_str(r)] if isinstance(ids_raw, list) else []
-        rule_source = entry.get("rule_source")
+        sources_raw = entry.get("rule_sources")
+        sources = (
+            [s for s in sources_raw if _is_nonempty_str(s)] if isinstance(sources_raw, list) else []
+        )
         fixes.append(
             {
                 "rule_id": rule_id,
-                "rule_source": rule_source if _is_nonempty_str(rule_source) else "",
+                "rule_sources": sources,
                 "invalidated_record_ids": ids,
             }
         )
@@ -4186,7 +4348,7 @@ def load_run_state(run_dir: str | None, expected_run_id: str | None = None) -> d
 
     The persisted run state holds three sibling decision keys: the ``disregarded``
     record_ids the canvas dims on every re-render, the ``rule_fixes_applied`` entries
-    (each ``{rule_id, rule_source, invalidated_record_ids[]}``) whose invalidated rows
+    (each ``{rule_id, rule_sources[], invalidated_record_ids[]}``) whose invalidated rows
     are dimmed with a reason, and the ``fixed`` record_ids the canvas marks done (a
     ``.finding.fixed`` row). Any read/parse problem — or a ``run_id`` that does not
     match *expected_run_id* (stale state from a different run) — yields an empty
@@ -4275,13 +4437,14 @@ def persist_disregard(run_dir: str | None, run_id: str, record_ids: list[str]) -
 def persist_rule_fixes(run_dir: str | None, run_id: str, fixes: list[dict]) -> dict:
     """Merge applied rule-fix *fixes* into run-state (add-only, run_id-stamped).
 
-    Mirrors :func:`persist_disregard`. Each fix is ``{rule_id, rule_source,
+    Mirrors :func:`persist_disregard`. Each fix is ``{rule_id, rule_sources[],
     invalidated_record_ids[]}``; entries are merged by ``rule_id`` (a re-applied
-    rule unions its invalidated ids, never duplicating or dropping), new rules are
-    appended in first-seen order, and the sibling ``disregarded`` and ``fixed`` sets
-    are preserved. render-review then re-applies the invalidation dim on every
-    subsequent re-render. The caller (the validate-action round-trip) is expected to
-    have resolved the ids via :func:`_rule_dependency_map` first.
+    rule unions its ``rule_sources`` and invalidated ids, never duplicating or
+    dropping), new rules are appended in first-seen order, and the sibling
+    ``disregarded`` and ``fixed`` sets are preserved. render-review then re-applies
+    the invalidation dim on every subsequent re-render. The caller (the
+    validate-action round-trip) is expected to have resolved the ids via
+    :func:`_rule_dependency_map` first.
     """
     existing = load_run_state(run_dir, expected_run_id=run_id)
     applied = [dict(e) for e in existing.get("rule_fixes_applied", [])]
@@ -4293,19 +4456,24 @@ def persist_rule_fixes(run_dir: str | None, run_id: str, fixes: list[dict]) -> d
         if not _is_nonempty_str(rule_id):
             continue
         new_ids = [r for r in (fix.get("invalidated_record_ids") or []) if _is_nonempty_str(r)]
-        rule_source = fix.get("rule_source") if _is_nonempty_str(fix.get("rule_source")) else ""
+        new_sources = [s for s in (fix.get("rule_sources") or []) if _is_nonempty_str(s)]
         entry = by_rule.get(rule_id)
         if entry is None:
-            entry = {"rule_id": rule_id, "rule_source": rule_source, "invalidated_record_ids": []}
+            entry = {"rule_id": rule_id, "rule_sources": [], "invalidated_record_ids": []}
             by_rule[rule_id] = entry
             applied.append(entry)
-        elif rule_source and not entry.get("rule_source"):
-            entry["rule_source"] = rule_source
-        seen = set(entry["invalidated_record_ids"])
+        merged_sources = list(entry.get("rule_sources") or [])
+        for source in new_sources:
+            if source not in merged_sources:
+                merged_sources.append(source)
+        entry["rule_sources"] = merged_sources
+        merged_ids = list(entry.get("invalidated_record_ids") or [])
+        seen = set(merged_ids)
         for rid in new_ids:
             if rid not in seen:
                 seen.add(rid)
-                entry["invalidated_record_ids"].append(rid)
+                merged_ids.append(rid)
+        entry["invalidated_record_ids"] = merged_ids
     return _write_run_state(
         run_dir,
         run_id,
@@ -4350,7 +4518,8 @@ def _invalidated_reasons(rule_fixes_applied: object) -> dict[str, str]:
     where the reason names the rule(s) that knocked the finding out — e.g.
     "invalidated — rule RQ2 fixed", or "invalidated — rules RQ2, RQ3 fixed" when a
     multi-rule finding lost all its rules. The rule ids are collected in first-seen
-    order so the reason is deterministic across renders.
+    order so the reason is deterministic across renders, and each is rendered as its
+    **uppercase** display label (the persisted id is lowercase ``rq#``).
     """
     by_record: dict[str, list[str]] = {}
     for entry in _sanitize_rule_fixes(rule_fixes_applied):
@@ -4362,9 +4531,10 @@ def _invalidated_reasons(rule_fixes_applied: object) -> dict[str, str]:
     reasons: dict[str, str] = {}
     for rid, rule_ids in by_record.items():
         if len(rule_ids) == 1:
-            reasons[rid] = f"invalidated — rule {rule_ids[0]} fixed"
+            reasons[rid] = f"invalidated — rule {_display_label(rule_ids[0])} fixed"
         else:
-            reasons[rid] = f"invalidated — rules {', '.join(rule_ids)} fixed"
+            labels = ", ".join(_display_label(r) for r in rule_ids)
+            reasons[rid] = f"invalidated — rules {labels} fixed"
     return reasons
 
 
@@ -4396,37 +4566,46 @@ def _accumulated_rule_fixes(
     notes = data.get("rule_quality_notes")
     notes = notes if isinstance(notes, list) else []
 
-    # Canonical rule_source for every rule applied so far: the already-persisted
-    # entries plus the rules resolved from the current batch (the batch value
-    # refreshes/fills the source). Insertion order — persisted first, then this
-    # batch — gives the rebuilt entries a deterministic first-seen order.
+    # Canonical rule_sources for every rule applied so far: the already-persisted
+    # entries unioned with the rules resolved from the current batch. Insertion
+    # order — persisted first, then this batch — gives the rebuilt entries a
+    # deterministic first-seen order, and each rule's source labels accumulate
+    # (a note can carry several rule--<name> chunk labels of one rule) without
+    # duplication.
     existing = load_run_state(run_dir, expected_run_id=run_id).get("rule_fixes_applied", [])
-    rule_source: dict[str, str] = {}
+    rule_sources_by_id: dict[str, list[str]] = {}
+
+    def _merge_sources(rule_id: str, sources: object) -> None:
+        bucket = rule_sources_by_id.setdefault(rule_id, [])
+        for source in sources if isinstance(sources, list) else []:
+            if _is_nonempty_str(source) and source not in bucket:
+                bucket.append(source)
+
     for entry in existing:
         rid = entry.get("rule_id")
         if _is_nonempty_str(rid):
-            rule_source.setdefault(rid, entry.get("rule_source") or "")
+            _merge_sources(rid, entry.get("rule_sources"))
     for rule in resolved_rules:
         rid = rule.get("rule_id")
         if _is_nonempty_str(rid):
-            rule_source[rid] = rule.get("rule_source") or rule_source.get(rid, "")
+            _merge_sources(rid, rule.get("rule_sources"))
 
     # Dying = findings whose full rule-dependency set is within the accumulated
     # applied set (Decision 12). _rule_dependency_map already excludes findings kept
     # alive by a concern/unrecognised source or carrying an un-noted rule.
-    applied_ids = set(rule_source)
+    applied_ids = set(rule_sources_by_id)
     dep_map = _rule_dependency_map(findings, notes)
     dying = {rid: deps for rid, deps in dep_map.items() if set(deps) <= applied_ids}
 
     return [
         {
             "rule_id": rule_id,
-            "rule_source": source,
+            "rule_sources": sources,
             "invalidated_record_ids": [
                 rid for rid, deps in dying.items() if rule_id in deps
             ],
         }
-        for rule_id, source in rule_source.items()
+        for rule_id, sources in rule_sources_by_id.items()
     ]
 
 
@@ -4434,13 +4613,14 @@ def _resolve_action_finding(finding: dict) -> dict:
     """Resolve a finding to the fields the orchestrator needs to act on it.
 
     The spec requires file/line/title/suggestion; the rest (severity, verdict,
-    fix_complexity, the stable ids, display_number) give the orchestrator enough
-    context to describe the action to the human and to scope a fix precisely.
+    fix_complexity, the stable ``f#`` ``record_id``) give the orchestrator enough
+    context to describe the action to the human and to scope a fix precisely. There
+    is no separate ``display_number`` — the numeric part of the ``f#`` id *is* the
+    visible number.
     """
     return {
         "record_id": finding.get("record_id"),
         "assessment_id": finding.get("assessment_id"),
-        "display_number": finding.get("display_number"),
         "title": finding.get("title", ""),
         "file": finding.get("file", ""),
         "line": finding.get("line"),
@@ -4455,7 +4635,7 @@ def _resolve_action_rule(note: dict, invalidated_record_ids: list[str]) -> dict:
     """Resolve a rule-quality note to the fields needed to apply its rule fix.
 
     The spec requires the rule file path, the suggested change, and the
-    ``record_id``s the fix invalidates; ``rule`` / ``rule_source`` / ``observation``
+    ``record_id``s the fix invalidates; ``rule`` / ``rule_sources`` / ``observation``
     give the orchestrator (and the human) enough context to describe the change.
     ``rule_file`` is the schema-validated safe path under the rules directory the
     agent edits; ``invalidated_record_ids`` are the findings this rule fix knocks
@@ -4467,7 +4647,7 @@ def _resolve_action_rule(note: dict, invalidated_record_ids: list[str]) -> dict:
     return {
         "rule_id": note.get("id"),
         "rule": note.get("rule", ""),
-        "rule_source": note.get("rule_source", ""),
+        "rule_sources": [s for s in (note.get("rule_sources") or []) if _is_nonempty_str(s)],
         "rule_file": note.get("rule_file", ""),
         "observation": note.get("observation", ""),
         "suggestion": note.get("suggestion", ""),
@@ -4489,19 +4669,20 @@ def validate_action(
     Returns ``(expanded, errors)``. ``errors`` is a list of structured per-id error
     dicts (same shape as :func:`validate_records`, scope ``"action"``); when it is
     empty, ``expanded`` is the resolved action. ``ids`` is the unified,
-    prefix-disambiguated id list the canvas posts — findings keep their
-    ``record_id`` (``f#``) and rule-quality notes use ``RQ#``. Each id is resolved
-    **by prefix**: an ``f#`` to a finding (file/line/title/suggestion) in
-    ``expanded["findings"]``, an ``RQ#`` to a rule (rule_file/suggested change/the
-    ``record_id``s its fix invalidates) in ``expanded["rules"]``. An id matching
-    *neither* prefix, or a well-formed id absent from the envelope, is rejected —
-    the trust boundary stays in Python because the canvas content is untrusted.
+    prefix-disambiguated id list the canvas posts — findings use their ``f#``
+    ``record_id`` and rule-quality notes use ``rq#``. Each id is resolved **by
+    prefix, case-insensitively** (a posted/typed ``F2`` normalizes to ``f2``): an
+    ``f#`` to a finding (file/line/title/suggestion) in ``expanded["findings"]``,
+    an ``rq#`` to a rule (rule_file/suggested change/the ``record_id``s its fix
+    invalidates) in ``expanded["rules"]``. An id matching *neither* prefix, or a
+    well-formed id absent from the envelope, is rejected — the trust boundary stays
+    in Python because the canvas content is untrusted.
 
     The ``action`` verb (when present) must be one of :data:`VALID_ACTIONS`; a
     mismatched/forged ``run_id`` is rejected. Never raises; never executes anything.
 
     ``rules_dir`` is the configured review-rules directory; each resolved rule's
-    ``rule_file`` is re-validated against it (path safety + ``rule_source``
+    ``rule_file`` is re-validated against it (path safety + ``rule_sources``
     consistency) because the action round-trip loads records.json *without* schema
     validation, so this is the only place those checks run at action time (Findings
     C-12 / C-13). When ``None`` it defaults to :data:`DEFAULT_RULES_DIR` so a caller
@@ -4588,7 +4769,7 @@ def validate_action(
             _records_error(
                 "action", None, "ids", "ids",
                 "no ids provided; a canvas action must target at least one finding "
-                "(f#) or rule-quality note (RQ#)",
+                "(f#) or rule-quality note (rq#)",
             )
         )
     for i, raw in enumerate(ids):
@@ -4601,21 +4782,27 @@ def validate_action(
                 )
             )
             continue
+        # Resolve references case-insensitively: the canvas badge shows the
+        # uppercase label (F2 / RQ1) while the data ids are lowercase (f2 / rq1),
+        # so a posted — or hand-typed — F2 normalizes to f2 before prefix-dispatch
+        # and envelope lookup. The error echoes the original token (what the caller
+        # posted) while the prefix match and the lookup use the normalized form.
         token = raw.strip()
-        if _FINDING_ID_RE.match(token):
-            finding = by_record_id.get(token)
+        lookup = token.lower()
+        if _FINDING_ID_RE.match(lookup):
+            finding = by_record_id.get(lookup)
             if finding is None:
                 errors.append(
                     _records_error(
                         "action", i, f"ids[{i}]", "record_id",
-                        f"unknown record_id {token!r}: not present in records.json",
+                        f"unknown finding id {token!r}: not present in records.json",
                         record_id=token,
                     )
                 )
             else:
                 resolved_findings.append(_resolve_action_finding(finding))
-        elif _RULE_QUALITY_NOTE_ID_RE.match(token):
-            note = by_note_id.get(token)
+        elif _RULE_QUALITY_NOTE_ID_RE.match(lookup):
+            note = by_note_id.get(lookup)
             if note is None:
                 errors.append(
                     _records_error(
@@ -4631,14 +4818,14 @@ def validate_action(
                 _records_error(
                     "action", i, f"ids[{i}]", "id",
                     f"unrecognized id {token!r}: must be a finding id (f#) or a "
-                    f"rule-quality note id (RQ#)",
+                    f"rule-quality note id (rq#)",
                     record_id=token,
                 )
             )
 
     # Defense-in-depth (Findings C-12 / C-13): the action round-trip loads
     # records.json via _load_records_only, which deliberately SKIPS schema
-    # validation — so the rule_file path-safety check and the rule_source
+    # validation — so the rule_file path-safety check and the rule_sources
     # consistency check that render-review applied are NOT in force here, at the
     # very point the agent consumes rule_file to *edit* it. Re-apply both against
     # the configured rules_dir (defaulting to the secure-by-default review/ prefix
@@ -4649,7 +4836,7 @@ def validate_action(
     for note_index, note in enumerate(matched_notes):
         note_id = note.get("id")
         for message in _collect_rule_file_errors(
-            note.get("rule_file", ""), note.get("rule_source"), effective_rules_dir
+            note.get("rule_file", ""), note.get("rule_sources"), effective_rules_dir
         ):
             errors.append(
                 _records_error(
@@ -4723,9 +4910,11 @@ def _split_ids(raw: str | None) -> list[str]:
     """Parse the comma-separated ``--ids`` value into a de-duped list.
 
     The posted ids are per-run tokens (findings ``f1``, ``f2``, …; rule-quality
-    notes ``RQ1``, ``RQ2``, …) so a comma is a safe separator. Order is preserved
-    (first-seen) and blanks/dupes are dropped. The id *type* is disambiguated later
-    by prefix in :func:`validate_action`.
+    notes ``rq1``, ``rq2``, …) so a comma is a safe separator. Order is preserved
+    (first-seen) and blanks are dropped. De-duplication is **case-insensitive** so a
+    ``F2`` and an ``f2`` collapse to one entry (they name the same id); the
+    first-seen spelling is kept and the id *type* is disambiguated later by prefix
+    in :func:`validate_action`, which also resolves case-insensitively.
     """
     if not raw:
         return []
@@ -4733,8 +4922,9 @@ def _split_ids(raw: str | None) -> list[str]:
     ids: list[str] = []
     for tok in raw.split(","):
         tok = tok.strip()
-        if tok and tok not in seen:
-            seen.add(tok)
+        key = tok.lower()
+        if tok and key not in seen:
+            seen.add(key)
             ids.append(tok)
     return ids
 
@@ -4759,7 +4949,7 @@ def validate_action_command(args: argparse.Namespace) -> None:
     """CLI: validate/expand a posted canvas action against records.json.
 
     On success prints the resolved action JSON to stdout (exit 0) — ``findings[]``
-    (resolved ``f#`` ids) and ``rules[]`` (resolved ``RQ#`` ids). On a forged
+    (resolved ``f#`` ids) and ``rules[]`` (resolved ``rq#`` ids). On a forged
     run_id, an unknown/unrecognised id, an unknown action verb, or a
     missing/unparseable records.json, prints the structured errors to stderr and
     exits 1 — so the orchestrator rejects the action instead of executing it.
@@ -4837,6 +5027,17 @@ def validate_action_command(args: argparse.Namespace) -> None:
         _emit_action_error(path, posted_run_id, action, [load_error])
         sys.exit(1)
 
+    # The display layer (finding f# / note rq# ids, ordering) is Python-assigned
+    # by finalize_records and is what validate_action resolves a posted id
+    # against. render-review persists an already-finalized records.json, but
+    # finalize in memory here so this command is SELF-SUFFICIENT rather than
+    # silently depending on render-review having run first (the action contract
+    # must hold against any validated records.json). finalize is pure +
+    # idempotent (re-finalizing the enriched file is a no-op that reproduces the
+    # same ids) and never raises, mirroring validate_records_command; it is NOT
+    # persisted — the action round-trip only reads.
+    data = finalize_records(data)
+
     # Resolve the review-rules directory the same way render-review/validate-records
     # do (--rules-dir override, else the repo's configured value). validate_action
     # re-validates each resolved rule_file against it, so the action path enforces
@@ -4862,7 +5063,7 @@ def validate_action_command(args: argparse.Namespace) -> None:
     # successful validation (so a forged run_id / unknown id can never write
     # state). The ``action == DISREGARD_ACTION`` guard is co-located with the side
     # effect so it holds even for a caller that bypasses the argparse/early gate
-    # above. Only the resolved *finding* ids are disregarded — any RQ# in the mix
+    # above. Only the resolved *finding* ids are disregarded — any rq# in the mix
     # is a rule fix, not a record to dim, so it is never written to the disregarded set.
     if getattr(args, "apply_disregard", False) and action == DISREGARD_ACTION:
         run_dir = args.run_dir or os.path.dirname(path) or "."
@@ -5060,7 +5261,7 @@ def main() -> int:
     post_parser.add_argument(
         "--exclude",
         default=None,
-        help="Comma-separated list of finding IDs to exclude",
+        help="Comma-separated finding f# ids to exclude (e.g. 'f2,f5'); case-insensitive",
     )
     post_parser.set_defaults(func=post_comments)
 
@@ -5172,7 +5373,8 @@ def main() -> int:
         "--ids",
         required=True,
         help="Comma-separated stable ids the action targets: finding ids (f#) "
-             "and/or rule-quality note ids (RQ#), e.g. f1,f3,RQ2",
+             "and/or rule-quality note ids (rq#), e.g. f1,f3,rq2 (resolved "
+             "case-insensitively)",
     )
     action_parser.add_argument(
         "--action",

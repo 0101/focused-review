@@ -61,19 +61,19 @@ def _make_args(
 
 SAMPLE_INLINE_COMMENTS = [
     {
-        "id": 1,
+        "id": "f1",
         "path": "src/foo.cs",
         "line": 42,
         "body": "### 🔴 [High] Null reference risk\nDetails...",
     },
     {
-        "id": 2,
+        "id": "f2",
         "path": "src/bar.cs",
         "line": 10,
         "body": "### 🟡 [Medium] Missing validation\nDetails...",
     },
     {
-        "id": 3,
+        "id": "f3",
         "path": "src/baz.cs",
         "line": 99,
         "body": "### 🔵 [Low] Code style\nDetails...",
@@ -385,7 +385,7 @@ class TestPostCommentsAdoExclude:
         mock_run.side_effect = _az_preflight_success()
         mock_urlopen.return_value = _mock_urlopen_response()
 
-        args = _make_args(comments_path, exclude="2")
+        args = _make_args(comments_path, exclude="f2")
         with patch("builtins.print") as mock_print:
             fr.post_comments(args)
 
@@ -405,7 +405,7 @@ class TestPostCommentsAdoExclude:
         mock_run.side_effect = _az_preflight_success()
         mock_urlopen.return_value = _mock_urlopen_response()
 
-        args = _make_args(comments_path, exclude="1,2,3")
+        args = _make_args(comments_path, exclude="f1,f2,f3")
         with patch("builtins.print") as mock_print:
             fr.post_comments(args)
 

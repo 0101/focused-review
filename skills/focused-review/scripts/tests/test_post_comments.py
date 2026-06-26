@@ -69,19 +69,19 @@ def _gh_api_success(review_url: str = "https://github.com/test-owner/test-repo/p
 
 SAMPLE_INLINE_COMMENTS = [
     {
-        "id": 1,
+        "id": "f1",
         "path": "src/foo.cs",
         "line": 42,
         "body": "### 🔴 [High] Null reference risk\nDetails...",
     },
     {
-        "id": 2,
+        "id": "f2",
         "path": "src/bar.cs",
         "line": 10,
         "body": "### 🟡 [Medium] Missing validation\nDetails...",
     },
     {
-        "id": 3,
+        "id": "f3",
         "path": "src/baz.cs",
         "line": 99,
         "body": "### 🔵 [Low] Code style\nDetails...",
@@ -260,7 +260,14 @@ class TestPostCommentsSuccess:
 
 
 class TestPostCommentsExclude:
-    """Test --exclude filtering of findings by ID."""
+    """Test --exclude filtering of findings by their globally-unique f# id.
+
+    The selector switched from the old non-unique per-bucket integer to the
+    ``f#`` id (finding r8): a token is matched case-insensitively against the
+    ``inline_comments[].id`` string, empty segments are skipped, and a token that
+    matches nothing is ignored (no error). ``comments_excluded`` reports how many
+    distinct ids the caller asked to drop, not how many matched.
+    """
 
     @patch("subprocess.run")
     def test_exclude_single_finding(
@@ -275,7 +282,7 @@ class TestPostCommentsExclude:
             _gh_api_success(),
         ]
 
-        args = _make_args(comments_path, exclude="2")
+        args = _make_args(comments_path, exclude="f2")
         with patch("builtins.print") as mock_print:
             fr.post_comments(args)
 
@@ -304,7 +311,7 @@ class TestPostCommentsExclude:
             _gh_api_success(),
         ]
 
-        args = _make_args(comments_path, exclude="1,3")
+        args = _make_args(comments_path, exclude="f1,f3")
         with patch("builtins.print") as mock_print:
             fr.post_comments(args)
 
@@ -325,13 +332,41 @@ class TestPostCommentsExclude:
             _gh_api_success(),
         ]
 
-        args = _make_args(comments_path, exclude="1,2,3")
+        args = _make_args(comments_path, exclude="f1,f2,f3")
         with patch("builtins.print") as mock_print:
             fr.post_comments(args)
 
         result = json.loads(mock_print.call_args[0][0])
         assert result["comments_posted"] == 0
         assert result["comments_excluded"] == 3
+
+    @patch("subprocess.run")
+    def test_exclude_case_insensitive(
+        self, mock_run: MagicMock, tmp_path: Path
+    ) -> None:
+        """An uppercase F# token (what the user sees on the canvas/review.md) matches
+        the lowercase f# id stored in comments.json."""
+        comments_path = _make_comments(
+            tmp_path, inline_comments=SAMPLE_INLINE_COMMENTS
+        )
+        mock_run.side_effect = [
+            MagicMock(returncode=0),
+            MagicMock(returncode=0),
+            _gh_api_success(),
+        ]
+
+        args = _make_args(comments_path, exclude="F2")
+        with patch("builtins.print") as mock_print:
+            fr.post_comments(args)
+
+        result = json.loads(mock_print.call_args[0][0])
+        assert result["comments_posted"] == 2
+        assert result["comments_excluded"] == 1
+
+        api_call = mock_run.call_args_list[2]
+        payload = json.loads(api_call.kwargs.get("input", api_call[1].get("input", "")))
+        paths = [c["path"] for c in payload["comments"]]
+        assert "src/bar.cs" not in paths
 
     @patch("subprocess.run")
     def test_exclude_nonexistent_id_ignored(
@@ -346,7 +381,7 @@ class TestPostCommentsExclude:
             _gh_api_success(),
         ]
 
-        args = _make_args(comments_path, exclude="99")
+        args = _make_args(comments_path, exclude="f99")
         with patch("builtins.print") as mock_print:
             fr.post_comments(args)
 
@@ -368,7 +403,7 @@ class TestPostCommentsExclude:
             _gh_api_success(),
         ]
 
-        args = _make_args(comments_path, exclude=" 1 , 2 ")
+        args = _make_args(comments_path, exclude=" f1 , f2 ")
         with patch("builtins.print") as mock_print:
             fr.post_comments(args)
 
@@ -389,7 +424,7 @@ class TestPostCommentsExclude:
             _gh_api_success(),
         ]
 
-        args = _make_args(comments_path, exclude="1,2,")
+        args = _make_args(comments_path, exclude="f1,f2,")
         with patch("builtins.print") as mock_print:
             fr.post_comments(args)
 
@@ -397,15 +432,31 @@ class TestPostCommentsExclude:
         assert result["comments_posted"] == 1
         assert result["comments_excluded"] == 2
 
-    def test_exclude_non_integer_value(self, tmp_path: Path) -> None:
-        """Non-integer --exclude value should exit with code 1."""
+    @patch("subprocess.run")
+    def test_exclude_non_finding_token_ignored(
+        self, mock_run: MagicMock, tmp_path: Path
+    ) -> None:
+        """The selector is now an opaque f#-string, not an integer: a non-f# token
+        (e.g. a stray word) no longer aborts the command — it is simply treated as
+        an id that matches no finding and is skipped. This replaces the old
+        integer-only ``--exclude`` contract that exited with code 1."""
         comments_path = _make_comments(
             tmp_path, inline_comments=SAMPLE_INLINE_COMMENTS
         )
-        args = _make_args(comments_path, exclude="1,abc,3")
-        with pytest.raises(SystemExit) as exc_info:
+        mock_run.side_effect = [
+            MagicMock(returncode=0),
+            MagicMock(returncode=0),
+            _gh_api_success(),
+        ]
+
+        args = _make_args(comments_path, exclude="f1,abc,f3")
+        with patch("builtins.print") as mock_print:
             fr.post_comments(args)
-        assert exc_info.value.code == 1
+
+        result = json.loads(mock_print.call_args[0][0])
+        # f1 and f3 dropped; "abc" matches nothing; no SystemExit.
+        assert result["comments_posted"] == 1
+        assert result["comments_excluded"] == 3
 
     @patch("subprocess.run")
     def test_exclude_leading_and_double_commas(
@@ -421,7 +472,7 @@ class TestPostCommentsExclude:
             _gh_api_success(),
         ]
 
-        args = _make_args(comments_path, exclude=",1,,3,")
+        args = _make_args(comments_path, exclude=",f1,,f3,")
         with patch("builtins.print") as mock_print:
             fr.post_comments(args)
 
@@ -590,14 +641,14 @@ class TestPostCommentsArgparseWiring:
                 "--comments",
                 "c.json",
                 "--exclude",
-                "1,2,3",
+                "f1,f2,f3",
             ],
         ):
             with patch.object(fr, "post_comments") as mock_fn:
                 mock_fn.return_value = None
                 fr.main()
                 called_args = mock_fn.call_args[0][0]
-                assert called_args.exclude == "1,2,3"
+                assert called_args.exclude == "f1,f2,f3"
                 assert called_args.comments == "c.json"
 
     def test_post_comments_exclude_default_none(self) -> None:
@@ -611,3 +662,97 @@ class TestPostCommentsArgparseWiring:
                 fr.main()
                 called_args = mock_fn.call_args[0][0]
                 assert called_args.exclude is None
+
+
+# ---------------------------------------------------------------------------
+# Producer → consumer section contract (golden / shape lock)
+#
+# POST-COMMENTS.md Step 4a extracts findings out of review.md by these exact
+# ``## `` section headings and maps each to a verdict/section label. The renderer
+# (``render_review_markdown`` — the producer) is the single source of those
+# headings, so this lock couples the consumer's expectation to the producer's
+# real output: a future rename of a producer section fails here instead of
+# silently desyncing post-comments. That silent desync is exactly the regression
+# (finding r1, High) where the renderer's "Questionable Findings" section was
+# renamed to "Needs Your Decision" / "Pre-existing" but POST-COMMENTS.md kept
+# reading the dead heading and dropped every finding under the new ones.
+# ---------------------------------------------------------------------------
+
+
+# The section headings POST-COMMENTS.md Step 4a reads. Keep in lockstep with the
+# "Confirmed Findings / Needs Your Decision / Pre-existing" list in POST-COMMENTS.md.
+POST_COMMENTS_SECTIONS = ("Confirmed Findings", "Needs Your Decision", "Pre-existing")
+
+
+def _section_contract_envelope() -> dict:
+    """A finalized envelope with one visible finding in each of the three sections."""
+
+    def _finding(rid: str, bucket: str, introduced_by: str, verdict: str) -> dict:
+        return {
+            "record_id": rid,
+            "assessment_id": f"A-{rid}",
+            "display_bucket": bucket,
+            "title": f"Title {rid}",
+            "file": f"src/{rid}.py",
+            "line": 10,
+            "original_severity": "Medium",
+            "severity": "Medium",
+            "fix_complexity": "moderate",
+            "verdict": verdict,
+            "type": "concern",
+            "introduced_by": introduced_by,
+            "description": "desc",
+            "assessment": "assess",
+            "suggestion": "fix",
+            "provenance": ["concern--bugs--opus"],
+            "has_detail": False,
+        }
+
+    return {
+        "schema_version": 1,
+        "run": {
+            "run_id": "20260101-000000",
+            "scope": "branch",
+            "date": "2026-01-01T00:00:00Z",
+            "rule_count": 1,
+            "concern_count": 1,
+            "consolidated_count": 3,
+            "confirmed": 2,
+            "questionable": 1,
+            "invalid": 0,
+        },
+        "rebuttal_overrides": [],
+        "rule_quality_notes": [],
+        "findings": [
+            _finding("f1", "confirmed", "diff", "Confirmed"),
+            _finding("f2", "needs-decision", "diff", "Questionable"),
+            _finding("f3", "pre-existing", "pre-existing", "Confirmed"),
+        ],
+    }
+
+
+class TestPostCommentsSectionContract:
+    """Lock the review.md section headings the post-comments consumer depends on."""
+
+    def test_renderer_emits_every_section_post_comments_reads(self) -> None:
+        out = fr.render_review_markdown(_section_contract_envelope())
+        for section in POST_COMMENTS_SECTIONS:
+            assert f"## {section}" in out, (
+                f"render_review_markdown no longer emits '## {section}'. "
+                "Update POST-COMMENTS.md Step 4a (and this lock) in lockstep — "
+                "a consumer that reads a renamed/removed section silently drops findings (r1)."
+            )
+
+    def test_stale_questionable_findings_heading_never_returns(self) -> None:
+        # The pre-rename heading POST-COMMENTS.md used to read. If it ever reappears
+        # as a real section while the doc reads the new names, findings desync again.
+        out = fr.render_review_markdown(_section_contract_envelope())
+        assert "## Questionable Findings" not in out
+
+    def test_inline_comment_identity_is_the_f_hash_label(self) -> None:
+        # The id the consumer writes to inline_comments[].id and excludes by is the
+        # gap-free f# label, rendered uppercase as the heading's leading token.
+        out = fr.render_review_markdown(_section_contract_envelope())
+        assert "### F1." in out
+        assert "### F2." in out
+        assert "### F3." in out

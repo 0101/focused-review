@@ -663,6 +663,31 @@ class TestRuleDependencyMap:
         notes = [_dep_note("rq-1", "rule--a"), _dep_note("rq-2", "rule--a")]
         assert fr._rule_dependency_map(findings, notes) == {"f1": ["rq-1"]}
 
+    def test_chunk_suffixed_provenance_resolves_to_one_note(self) -> None:
+        # Finding r10: a rule split across diff chunks tags each chunk's findings
+        # with its own --<digits> provenance label (rule--gr--1, rule--gr--2) while
+        # a single quality note covers the whole rule. The trailing chunk suffix is
+        # normalized off both sides, so every chunk's findings map to that one note.
+        findings = [_dep_finding("f1", ["rule--gr--1"]), _dep_finding("f2", ["rule--gr--2"])]
+        notes = [_dep_note("rq1", "rule--gr--1")]  # note lists one chunk label
+        assert fr._rule_dependency_map(findings, notes) == {"f1": ["rq1"], "f2": ["rq1"]}
+
+    def test_chunk_suffixed_provenance_matches_canonical_note_source(self) -> None:
+        # The note may instead name the canonical (un-chunked) rule source; chunked
+        # finding provenance still resolves to it after suffix normalization.
+        findings = [_dep_finding("f1", ["rule--gr--1"]), _dep_finding("f2", ["rule--gr--2"])]
+        notes = [_dep_note("rq1", "rule--gr")]
+        assert fr._rule_dependency_map(findings, notes) == {"f1": ["rq1"], "f2": ["rq1"]}
+
+    def test_chunk_suffix_does_not_merge_distinct_rules(self) -> None:
+        # Normalization only strips a trailing --<digits>; distinct rule names with
+        # numeric-looking but non-chunk segments stay distinct. rule--http2 is its
+        # own rule (no "--" before the digit), so an un-noted rule--http2 finding is
+        # still excluded rather than collapsing into the noted rule--http.
+        findings = [_dep_finding("f1", ["rule--http2"])]
+        notes = [_dep_note("rq1", "rule--http")]
+        assert fr._rule_dependency_map(findings, notes) == {}
+
 
 class TestCanvasRuleDeps:
     """The canvas advertises each invalidatable row's RQ deps + schedulable notes."""
@@ -754,15 +779,15 @@ class TestInvalidatedReasons:
     """``_invalidated_reasons``: persisted rule fixes → per-record dim reasons."""
 
     def test_single_rule_reason(self) -> None:
-        fixes = [{"rule_id": "RQ2", "rule_source": "rule--x", "invalidated_record_ids": ["r1"]}]
-        assert fr._invalidated_reasons(fixes) == {"r1": "invalidated — rule RQ2 fixed"}
+        fixes = [{"rule_id": "rq2", "rule_sources": ["rule--x"], "invalidated_record_ids": ["f1"]}]
+        assert fr._invalidated_reasons(fixes) == {"f1": "invalidated — rule RQ2 fixed"}
 
     def test_multi_rule_reason_lists_rules_in_first_seen_order(self) -> None:
         fixes = [
-            {"rule_id": "RQ2", "rule_source": "rule--x", "invalidated_record_ids": ["r1"]},
-            {"rule_id": "RQ3", "rule_source": "rule--y", "invalidated_record_ids": ["r1"]},
+            {"rule_id": "rq2", "rule_sources": ["rule--x"], "invalidated_record_ids": ["f1"]},
+            {"rule_id": "rq3", "rule_sources": ["rule--y"], "invalidated_record_ids": ["f1"]},
         ]
-        assert fr._invalidated_reasons(fixes) == {"r1": "invalidated — rules RQ2, RQ3 fixed"}
+        assert fr._invalidated_reasons(fixes) == {"f1": "invalidated — rules RQ2, RQ3 fixed"}
 
     def test_non_list_input_is_empty(self) -> None:
         assert fr._invalidated_reasons(None) == {}
@@ -771,10 +796,10 @@ class TestInvalidatedReasons:
     def test_junk_entries_are_ignored(self) -> None:
         fixes = [
             "not-a-dict",
-            {"rule_source": "rule--x", "invalidated_record_ids": ["r1"]},  # no rule_id
-            {"rule_id": "RQ4", "invalidated_record_ids": ["r9"]},
+            {"rule_sources": ["rule--x"], "invalidated_record_ids": ["f1"]},  # no rule_id
+            {"rule_id": "rq4", "invalidated_record_ids": ["f9"]},
         ]
-        assert fr._invalidated_reasons(fixes) == {"r9": "invalidated — rule RQ4 fixed"}
+        assert fr._invalidated_reasons(fixes) == {"f9": "invalidated — rule RQ4 fixed"}
 
 
 # Run id used by the run-state persistence tests below (matches the envelope's run).
@@ -855,14 +880,14 @@ class TestFixedRunState:
         fr.persist_disregard(str(tmp_path), FIXED_RUN_ID, ["r1"])
         fr.persist_rule_fixes(
             str(tmp_path), FIXED_RUN_ID,
-            [{"rule_id": "RQ1", "rule_source": "rule--a", "invalidated_record_ids": ["r4"]}],
+            [{"rule_id": "RQ1", "rule_sources": ["rule--a"], "invalidated_record_ids": ["r4"]}],
         )
         state = fr.persist_fixed(str(tmp_path), FIXED_RUN_ID, ["r2"])
         # Marking a finding fixed must not wipe either sibling decision key.
         assert state["fixed"] == ["r2"]
         assert state["disregarded"] == ["r1"]
         assert state["rule_fixes_applied"] == [
-            {"rule_id": "RQ1", "rule_source": "rule--a", "invalidated_record_ids": ["r4"]}
+            {"rule_id": "RQ1", "rule_sources": ["rule--a"], "invalidated_record_ids": ["r4"]}
         ]
 
     def test_persist_disregard_preserves_fixed(self, tmp_path: Path) -> None:
@@ -876,7 +901,7 @@ class TestFixedRunState:
         fr.persist_fixed(str(tmp_path), FIXED_RUN_ID, ["r1"])
         state = fr.persist_rule_fixes(
             str(tmp_path), FIXED_RUN_ID,
-            [{"rule_id": "RQ1", "rule_source": "rule--a", "invalidated_record_ids": ["r4"]}],
+            [{"rule_id": "RQ1", "rule_sources": ["rule--a"], "invalidated_record_ids": ["r4"]}],
         )
         # Writing a rule fix must not wipe the recorded fixed set.
         assert state["fixed"] == ["r1"]
@@ -1147,6 +1172,68 @@ class TestRenderReviewCLI:
 
         assert not review_out.exists()
         assert not canvas_out.exists()
+
+
+class TestAtomicWrite:
+    """``_write_text`` is atomic: a temp file in the destination directory is
+    swapped over the target with ``os.replace``, so an interrupt can never leave
+    a truncated half-write. This guards render-review's in-place ``records.json``
+    overwrite — the reporter's validated source of truth (Finding F4)."""
+
+    def test_overwrites_existing_atomically_and_leaves_no_temp(
+        self, tmp_path: Path
+    ) -> None:
+        target = tmp_path / "records.json"
+        target.write_text("OLD CONTENT", encoding="utf-8")
+        fr._write_text(str(target), "NEW CONTENT")
+        assert target.read_text(encoding="utf-8") == "NEW CONTENT"
+        # The temp sibling is renamed away, never left behind.
+        assert [p.name for p in tmp_path.iterdir()] == ["records.json"]
+
+    def test_creates_new_file_with_content(self, tmp_path: Path) -> None:
+        target = tmp_path / "nested" / "review.md"
+        fr._write_text(str(target), "body\n")
+        assert target.read_text(encoding="utf-8") == "body\n"
+        assert [p.name for p in target.parent.iterdir()] == ["review.md"]
+
+    def test_failed_swap_preserves_original_and_cleans_temp(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Simulate a kill/disk-full at the worst moment: just before the rename.
+        # The original must survive intact (the truncate-then-write hazard a plain
+        # open(path, "w") would have caused is gone) and no orphan temp remains.
+        target = tmp_path / "records.json"
+        target.write_text("ORIGINAL SOURCE OF TRUTH", encoding="utf-8")
+
+        def boom(src: str, dst: str) -> None:
+            raise OSError("simulated interrupt before the atomic swap")
+
+        monkeypatch.setattr(os, "replace", boom)
+        with pytest.raises(OSError):
+            fr._write_text(str(target), "REPLACEMENT")
+
+        assert target.read_text(encoding="utf-8") == "ORIGINAL SOURCE OF TRUTH"
+        assert [p.name for p in tmp_path.iterdir()] == ["records.json"]
+
+    def test_temp_is_written_in_target_directory(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # os.replace is only atomic on the same filesystem, so the temp file must
+        # be a sibling of the target (not in a global temp dir on another volume).
+        target = tmp_path / "sub" / "records.json"
+        target.parent.mkdir()
+        target.write_text("OLD", encoding="utf-8")
+        seen: dict[str, Path] = {}
+        real_replace = os.replace
+
+        def capture(src: str, dst: str) -> None:
+            seen["src_parent"] = Path(src).resolve().parent
+            real_replace(src, dst)
+
+        monkeypatch.setattr(os, "replace", capture)
+        fr._write_text(str(target), "NEW")
+        assert seen["src_parent"] == target.resolve().parent
+        assert target.read_text(encoding="utf-8") == "NEW"
 
 
 class TestRenderReviewSubprocess:

@@ -460,6 +460,14 @@
       var deps = (f.getAttribute("data-rule-deps") || "").split(/\s+/).filter(Boolean);
       var dies = deps.length > 0 && deps.every(function (rq) { return state.scheduledRules.has(rq); });
       f.classList.toggle("pending-invalid", dies);
+      if (dies) {
+        // Now non-actionable: drop any prior selection and clear the checkbox so a
+        // scheduled rule fix can't leave this finding's id in the next posted payload.
+        var id = f.getAttribute("data-record-id");
+        if (id) state.selected.delete(id);
+        var cb = f.querySelector(".row-cb");
+        if (cb) cb.checked = false;
+      }
     });
   }
 
@@ -467,6 +475,15 @@
     var t = e.target;
     if (!t || !t.classList) return;
     if (t.classList.contains("row-cb")) {
+      // Actionable rows only: a dimmed (disregarded) or pending-invalid (rule-fix
+      // scheduled) row is non-actionable, so refuse a manual check rather than let
+      // its id enter state.selected / the posted payload — the same contract
+      // ACTIONABLE_ROW_CB enforces for the section select-all.
+      var f = t.closest(".finding");
+      if (t.checked && f && (f.classList.contains("dimmed") || f.classList.contains("pending-invalid"))) {
+        t.checked = false;
+        return;
+      }
       var id = recordId(t);
       if (id) { if (t.checked) state.selected.add(id); else state.selected.delete(id); }
       syncSections();
@@ -485,12 +502,15 @@
       var rq = t.getAttribute("data-rq-id");
       if (rq) { if (t.checked) state.scheduledRules.add(rq); else state.scheduledRules.delete(rq); }
       applyRulePreview();
+      // The preview may have cleared selections that just became pending-invalid,
+      // so re-sync the section select-all tri-state to match.
+      syncSections();
       updateBar();
     }
   });
 
   // Action buttons → postMessage to the Treemon parent. Unified prefix-disambiguated
-  // payload: ids (r# findings + RQ# rule fixes), button (bare verb), text, run_id.
+  // payload: ids (f# findings + rq# rule fixes), button (bare verb), text, run_id.
   document.addEventListener("click", function (e) {
     var btn = e.target && e.target.closest ? e.target.closest("[data-action]") : null;
     if (!btn || btn.disabled) return;
