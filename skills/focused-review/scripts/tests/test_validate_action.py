@@ -278,6 +278,39 @@ def _two_rule_renderable_envelope() -> dict:
     }
 
 
+def _fix_envelope() -> dict:
+    """A minimal envelope whose findings carry the current ``f#`` record_ids.
+
+    The shared ``_envelope`` / ``_finding`` fixtures still use the pre-relabel
+    ``r#`` / ``RQ#`` ids (the inherited reds in this file), which ``validate_action``
+    no longer resolves. The ``--apply-fixed`` round-trip must actually *resolve* its
+    findings to persist their ids, so this fixture uses the ``f#`` ids the resolver
+    matches today (``_FINDING_ID_RE`` = ``^f[0-9]+$``). No ``rule_quality_notes``:
+    ``--apply-fixed`` targets findings only, so there is nothing to rule-resolve and
+    no ``rule_file`` trust boundary to satisfy.
+    """
+    return {
+        "schema_version": 1,
+        "run": {
+            "run_id": RUN_ID,
+            "scope": "branch",
+            "date": "2026-06-17T12:00:00Z",
+            "rule_count": 0,
+            "concern_count": 2,
+            "consolidated_count": 2,
+            "confirmed": 2,
+            "questionable": 0,
+            "invalid": 0,
+        },
+        "rebuttal_overrides": [],
+        "rule_quality_notes": [],
+        "findings": [
+            {**_finding("f1", "Null deref", ["concern--bugs--opus"]), "display_number": 1},
+            {**_finding("f2", "Off-by-one", ["concern--bugs--opus"]), "display_number": 2},
+        ],
+    }
+
+
 def _write_records(tmp_path: Path, env: dict | None = None) -> Path:
     records = tmp_path / "records.json"
     records.write_text(json.dumps(env if env is not None else _envelope()), encoding="utf-8")
@@ -293,6 +326,7 @@ def _action_args(records: Path, run_id: str, ids: str, **overrides) -> argparse.
         instructions="",
         apply_disregard=False,
         apply_rule_fixes=False,
+        apply_fixed=False,
         run_dir=None,
         # Pin the rules dir so the action-time rule_file re-validation (C-12/C-13)
         # is deterministic regardless of the cwd's configured rules_dir; the note
@@ -953,6 +987,152 @@ class TestValidateActionCommand:
         assert not (tmp_path / "run-state.json").exists()
 
 
+class TestApplyFixed:
+    """``validate-action --apply-fixed``: the fix verb's second persisted side
+    effect — it marks the resolved FINDING ids done (a ``.finding.fixed`` row) in
+    run-state.json, gated to ``focused-review.fix`` and to a clean validation, and
+    coexisting with the disregard / rule-fix decisions. Uses ``_fix_envelope`` (the
+    current ``f#`` ids) so the findings actually resolve.
+    """
+
+    def test_apply_fixed_persists_and_reports(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # fix verb + --apply-fixed persists the resolved FINDING ids (not rules)
+        # into the `fixed` key so the re-render bakes .finding.fixed — mirroring
+        # --apply-disregard's persist, but under the fix verb.
+        records = _write_records(tmp_path, _fix_envelope())
+        fr.validate_action_command(
+            _action_args(
+                records, RUN_ID, "f1,f2",
+                action="focused-review.fix",
+                apply_fixed=True,
+                run_dir=str(tmp_path),
+            )
+        )
+        out = json.loads(capsys.readouterr().out)
+        assert out["fixed"] == ["f1", "f2"]
+        assert out["run_state_path"] == str(tmp_path / "run-state.json")
+        state = json.loads((tmp_path / "run-state.json").read_text(encoding="utf-8"))
+        assert state["run_id"] == RUN_ID
+        assert state["fixed"] == ["f1", "f2"]
+        # The fix-mark path writes no disregard / rule-fix state of its own.
+        assert state["disregarded"] == []
+        assert state["rule_fixes_applied"] == []
+
+    def test_no_fixed_side_effect_without_flag(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # A plain fix validation (no --apply-fixed) resolves but persists nothing:
+        # the mark is gated behind the explicit, human-confirmed flag.
+        records = _write_records(tmp_path, _fix_envelope())
+        fr.validate_action_command(
+            _action_args(
+                records, RUN_ID, "f1,f2",
+                action="focused-review.fix",
+                run_dir=str(tmp_path),
+            )
+        )
+        out = json.loads(capsys.readouterr().out)
+        assert out["valid"] is True
+        assert "fixed" not in out
+        assert not (tmp_path / "run-state.json").exists()
+
+    def test_apply_fixed_with_non_fix_action_rejected(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # --apply-fixed is bound to the fix verb: pairing it with disregard is
+        # rejected and writes NO run state (the persisted side effect is gated).
+        records = _write_records(tmp_path, _fix_envelope())
+        with pytest.raises(SystemExit) as exc:
+            fr.validate_action_command(
+                _action_args(
+                    records, RUN_ID, "f1",
+                    action="focused-review.disregard",
+                    apply_fixed=True,
+                    run_dir=str(tmp_path),
+                )
+            )
+        assert exc.value.code == 1
+        payload = json.loads(capsys.readouterr().err)
+        assert payload["valid"] is False
+        assert any(
+            e["field"] == "action" and "apply-fixed" in e["message"]
+            for e in payload["errors"]
+        )
+        assert not (tmp_path / "run-state.json").exists()
+
+    def test_apply_fixed_with_no_action_rejected(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # Even with no --action at all (the argparse default), --apply-fixed must
+        # not silently persist state — it is rejected outright, before any records
+        # IO (the fail-fast gate, so a forged/absent verb never touches the disk).
+        records = _write_records(tmp_path, _fix_envelope())
+        with pytest.raises(SystemExit) as exc:
+            fr.validate_action_command(
+                _action_args(
+                    records, RUN_ID, "f1",
+                    apply_fixed=True,
+                    run_dir=str(tmp_path),
+                )
+            )
+        assert exc.value.code == 1
+        payload = json.loads(capsys.readouterr().err)
+        assert any(e["field"] == "action" for e in payload["errors"])
+        assert not (tmp_path / "run-state.json").exists()
+
+    def test_apply_fixed_does_not_persist_on_forged_run_id(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # Symmetric with the disregard / rule-fix gates: the side effect is gated
+        # behind a clean validation, so a forged run_id leaves NO run-state.json
+        # behind even though the verb pairing (fix + --apply-fixed) is itself valid.
+        records = _write_records(tmp_path, _fix_envelope())
+        with pytest.raises(SystemExit) as exc:
+            fr.validate_action_command(
+                _action_args(
+                    records, "FORGED", "f1",
+                    action="focused-review.fix",
+                    apply_fixed=True,
+                    run_dir=str(tmp_path),
+                )
+            )
+        assert exc.value.code == 1
+        payload = json.loads(capsys.readouterr().err)
+        assert any(e["field"] == "run_id" for e in payload["errors"])
+        assert not (tmp_path / "run-state.json").exists()
+
+    def test_apply_fixed_preserves_disregarded_and_rule_fixes(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # --apply-fixed routes through the shared four-key writer, so marking a
+        # finding done must NOT wipe a pre-existing disregard or rule-fix decision:
+        # the fix verb's two side effects (and disregard's) coexist in run-state.
+        run_dir = str(tmp_path)
+        fr.persist_disregard(run_dir, RUN_ID, ["f3"])
+        fr.persist_rule_fixes(
+            run_dir, RUN_ID,
+            [{"rule_id": "rq9", "rule_source": "rule--x", "invalidated_record_ids": ["f8"]}],
+        )
+        records = _write_records(tmp_path, _fix_envelope())
+        fr.validate_action_command(
+            _action_args(
+                records, RUN_ID, "f1,f2",
+                action="focused-review.fix",
+                apply_fixed=True,
+                run_dir=run_dir,
+            )
+        )
+        capsys.readouterr()
+        state = json.loads((tmp_path / "run-state.json").read_text(encoding="utf-8"))
+        assert state["fixed"] == ["f1", "f2"]
+        # The sibling decisions survive untouched.
+        assert state["disregarded"] == ["f3"]
+        assert [f["rule_id"] for f in state["rule_fixes_applied"]] == ["rq9"]
+        assert state["rule_fixes_applied"][0]["invalidated_record_ids"] == ["f8"]
+
+
 class TestValidateActionParser:
     def test_parser_rejects_unknown_action_choice(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
@@ -1017,6 +1197,30 @@ class TestValidateActionParser:
                 fr.main()
         assert captured["apply_rule_fixes"] is True
         assert captured["ids"] == "RQ1"
+
+    def test_parser_accepts_apply_fixed(self, tmp_path: Path) -> None:
+        # The --apply-fixed store_true flag parses and reaches the handler (the
+        # gate that binds it to the fix verb lives in the handler, not argparse).
+        records = _write_records(tmp_path)
+        captured: dict[str, object] = {}
+
+        def spy(args: argparse.Namespace) -> None:
+            captured["apply_fixed"] = args.apply_fixed
+            captured["ids"] = args.ids
+
+        argv = [
+            "focused-review", "validate-action",
+            "--records", str(records),
+            "--run-id", RUN_ID,
+            "--ids", "f1",
+            "--action", "focused-review.fix",
+            "--apply-fixed",
+        ]
+        with patch("sys.argv", argv):
+            with patch.object(fr, "validate_action_command", spy):
+                fr.main()
+        assert captured["apply_fixed"] is True
+        assert captured["ids"] == "f1"
 
     def test_parser_accepts_rules_dir_and_repo(self, tmp_path: Path) -> None:
         # The validate-action subparser gained --repo / --rules-dir (mirroring

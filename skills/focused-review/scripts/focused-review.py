@@ -4764,12 +4764,17 @@ def validate_action_command(args: argparse.Namespace) -> None:
     missing/unparseable records.json, prints the structured errors to stderr and
     exits 1 — so the orchestrator rejects the action instead of executing it.
 
-    Two flags persist run-state after a successful validation, each bound to its
+    Three flags persist run-state after a successful validation, each bound to its
     verb and gated behind the human-confirmation step in SKILL.md:
     ``--apply-disregard`` (``focused-review.disregard`` only) dims the resolved
     **finding** ids; ``--apply-rule-fixes`` (``focused-review.fix`` only) writes the
     resolved **rules'** invalidated record_ids so the re-render dims them with a
-    reason. Both refuse to run for any other verb.
+    reason; ``--apply-fixed`` (``focused-review.fix`` only) marks the resolved
+    **finding** ids done so the re-render bakes the ``.finding.fixed`` class.
+    ``focused-review.fix`` thus carries two independent side effects
+    (``--apply-rule-fixes`` and ``--apply-fixed``) that may both fire from a single
+    call and persist through the shared writer without clobbering each other. Each
+    flag refuses to run for any other verb.
     """
     path: str = args.records
     posted_run_id = args.run_id
@@ -4804,6 +4809,24 @@ def validate_action_command(args: argparse.Namespace) -> None:
                 "action", None, "apply_rule_fixes", "action",
                 f"--apply-rule-fixes requires --action {FIX_ACTION!r}, "
                 f"got {action!r}; refusing to persist rule-fix state for a "
+                f"non-fix action",
+            )],
+        )
+        sys.exit(1)
+
+    # --apply-fixed is the second fix-bound flag: it marks the resolved FINDING
+    # ids done (a .finding.fixed "done" mark), distinct from --apply-rule-fixes,
+    # which dims rule-invalidated rows. Like its siblings it is the gate for a
+    # persisted side effect, so refuse it for any other (or absent) action rather
+    # than writing fixed run-state for a disregard/document call. Fail-closed and
+    # fail-fast, before any records IO.
+    if getattr(args, "apply_fixed", False) and action != FIX_ACTION:
+        _emit_action_error(
+            path, posted_run_id, action,
+            [_records_error(
+                "action", None, "apply_fixed", "action",
+                f"--apply-fixed requires --action {FIX_ACTION!r}, "
+                f"got {action!r}; refusing to persist fixed state for a "
                 f"non-fix action",
             )],
         )
@@ -4862,6 +4885,25 @@ def validate_action_command(args: argparse.Namespace) -> None:
         fixes = _accumulated_rule_fixes(data, run_dir, posted_run_id, resolved["rules"])
         state = persist_rule_fixes(run_dir, posted_run_id, fixes)
         resolved["rule_fixes_applied"] = state.get("rule_fixes_applied", [])
+        resolved["run_state_path"] = _run_state_path(run_dir)
+
+    # --apply-fixed is the fix verb's second persisted side effect: after the agent
+    # has applied the user-confirmed code fixes, this marks the resolved FINDING
+    # ids done so the re-render bakes the ``.finding.fixed`` class. Persisted like
+    # --apply-disregard — the resolved *finding* ids ([f["record_id"] …]), NOT the
+    # rules / _accumulated_rule_fixes — because "fixed" and rule-fix invalidation
+    # are orthogonal states. Only after a successful validation (so a forged run_id
+    # / unknown id never writes), and the ``action == FIX_ACTION`` guard is
+    # co-located with the side effect so it holds even for a caller that bypasses
+    # the early gate above. ``persist_fixed`` is add-only and routes through the
+    # shared four-key ``_write_run_state``, preserving the sibling ``disregarded``
+    # and ``rule_fixes_applied`` keys — so --apply-fixed and --apply-rule-fixes may
+    # both fire from one fix call without clobbering each other.
+    if getattr(args, "apply_fixed", False) and action == FIX_ACTION:
+        run_dir = args.run_dir or os.path.dirname(path) or "."
+        fixed_ids = [f["record_id"] for f in resolved["findings"]]
+        state = persist_fixed(run_dir, posted_run_id, fixed_ids)
+        resolved["fixed"] = state.get("fixed", [])
         resolved["run_state_path"] = _run_state_path(run_dir)
 
     # ensure_ascii (default) keeps this pure-ASCII, so a plain print is encoding
@@ -5157,6 +5199,15 @@ def main() -> int:
              "as rule-fix run state (canvas dims them with a reason across "
              "re-renders). Bound to --action focused-review.fix. Use only after the "
              "rule files have been edited and the human has confirmed.",
+    )
+    action_parser.add_argument(
+        "--apply-fixed",
+        action="store_true",
+        help="After validation, persist the resolved finding ids as fixed run "
+             "state (canvas marks them done — a green check + strikethrough — "
+             "across re-renders). Bound to --action focused-review.fix; may be "
+             "combined with --apply-rule-fixes in one call. Use only after the "
+             "code fixes have been applied and the human has confirmed.",
     )
     action_parser.add_argument(
         "--run-dir",
