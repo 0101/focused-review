@@ -295,6 +295,8 @@ python {script_path} render-review --records {run_dir}/records.json --repo .
 - **On success (exit 0):** the command writes `{run_dir}/review.md` and the always-on canvas at `.agents/canvas/focused-review.html`, and prints the **terminal summary to stdout**. Capture that stdout exactly — it is the user-facing result for Step 6c.
 - **On validation failure (exit 1):** the command writes nothing and prints structured per-record errors as JSON to **stderr** (each error has `record_id` / `assessment_id` / `path` / `field` / `message`). Do **not** relay these to the user — hand them back to the reporter and retry, per "Retry and fallback" below.
 
+**Claim canvas ownership (Treemon).** Right after the canvas is first written (the successful `render-review` above), call your **`edit` tool** on `.agents/canvas/focused-review.html` with `old_str` = `</body>` and `new_str` = `</body> ` (just appends a space). **Why (don't strip this):** Treemon records the doc's owning session only when the canvas is written via the `create`/`edit` tool, not `render-review`'s subprocess write — without this, the action-bar replies (**Step 6d**) reach a new session instead of this one. Once set, the owner sticks across later re-renders (subprocess rewrites don't re-orphan it), so you only need to do this once per run. Skip it when the canvas wasn't written (the validation-failure fallback below); harmless when Treemon is down.
+
 **Retry and fallback (validation failures only — the pipeline never hard-fails on a bad serialization):**
 
 1. Read the JSON error payload from `render-review`'s stderr.
@@ -361,7 +363,7 @@ python {script_path} validate-action --records "{run_dir}/records.json" --run-id
   python {script_path} render-review --records {run_dir}/records.json --repo .
   ```
 
-  The first call re-validates and writes `{run_dir}/run-state.json` (merging with any earlier disregards); the second re-renders `review.md` + the canvas with those findings dimmed. The dim **persists across re-renders** because `render-review` reads `run-state.json` back on every run. Relay the re-render's terminal summary verbatim (as in Step 6c).
+  The first call re-validates and writes `{run_dir}/run-state.json` (merging with any earlier disregards); the second re-renders `review.md` + the canvas with those findings dimmed. The dim **persists across re-renders** because `render-review` reads `run-state.json` back on every run. Relay the re-render's terminal summary verbatim (as in Step 6c). (No need to re-claim canvas ownership here — Treemon keeps the owner set in Step 6b across re-renders.)
 
 - **`focused-review.document`** — Write a tracking doc capturing the resolved findings (id, `file:line`, title, severity) plus `instructions`, so they can be picked up later (e.g. `{run_dir}/follow-up.md`, or a repo issue/TODO if the user prefers). Tell the user the path you wrote.
 
