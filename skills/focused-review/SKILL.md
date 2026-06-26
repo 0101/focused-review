@@ -360,19 +360,19 @@ python {script_path} validate-action --records "{run_dir}/records.json" --repo .
 **3. After confirmation, dispatch on `button`, resolving the mixed selection by id prefix:**
 
 - **`fix`** — handle any combination of resolved findings and rules:
-  - **Findings (`r#`)** — Propose fixes for the resolved `findings[]`, guided by the free-text box (`text`). Work through them using the normal edit flow (each carries its `file` / `line` / `suggestion`); apply changes only with the user's approval and only to findings in the resolved set. Do not touch findings outside it. After the approved code-fixes are applied, persist the fix and re-render so the canvas marks those rows done:
+  - **Findings (`f#`)** — Propose fixes for the resolved `findings[]`, guided by the free-text box (`text`). Work through them using the normal edit flow (each carries its `file` / `line` / `suggestion`); apply changes only with the user's approval and only to findings in the resolved set. Do not touch findings outside it. After the approved code-fixes are applied, persist the fix and re-render so the canvas marks those rows done:
 
     ```bash
-    python {script_path} validate-action --records {run_dir}/records.json --repo . --run-id {run_id} --ids {the r# ids you actually fixed, comma-joined} --action focused-review.fix --apply-fixed --run-dir {run_dir}
-    python {script_path} render-review --records {run_dir}/records.json --repo .
+    python "{script_path}" validate-action --records "{run_dir}/records.json" --repo . --run-id "{run_id}" --ids "{the f# ids you actually fixed, comma-joined}" --action focused-review.fix --apply-fixed --run-dir "{run_dir}"
+    python "{script_path}" render-review --records "{run_dir}/records.json" --repo .
     ```
 
-    Pass **only** the `r#` ids you actually fixed — a partial fix marks only what was resolved, never the whole selection. The first call re-validates and writes the `fixed` key into `{run_dir}/run-state.json`; the second re-renders `review.md` + the canvas with those rows shown **done** (green ✓ + strikethrough title). The mark **persists across re-renders** because `render-review` reads `run-state.json` back on every run. Relay the re-render's terminal summary verbatim (as in Step 6c). `--apply-fixed` (code-fix → done) is distinct from `--apply-rule-fixes` (rule-invalidation dim): a `fix` message that mixes `r#` and `RQ#` fires **both** — `--apply-fixed` here for the findings you fixed, `--apply-rule-fixes` below for the rules you edited — so keep both.
+    Pass **only** the `f#` ids you actually fixed — a partial fix marks only what was resolved, never the whole selection. The first call re-validates and writes the `fixed` key into `{run_dir}/run-state.json`; the second re-renders `review.md` + the canvas with those rows shown **done** (green ✓ + strikethrough title). The mark **persists across re-renders** because `render-review` reads `run-state.json` back on every run. Relay the re-render's terminal summary verbatim (as in Step 6c). `--apply-fixed` (code-fix → done) is distinct from `--apply-rule-fixes` (rule-invalidation dim): a `fix` message that mixes `f#` and `RQ#` fires **both** — `--apply-fixed` here for the findings you fixed, `--apply-rule-fixes` below for the rules you edited — so keep both.
   - **Rules (`RQ#`)** — For each resolved rule, edit its `rule_file` (a safe path under `review/`): when `text` is **empty**, apply the rule's `suggestion` (accept the suggested change); when `text` is **present**, do what the text says (the `suggestion` is context). After the rule files are edited, persist the invalidation and re-render so the now-moot findings disappear:
 
     ```bash
-    python {script_path} validate-action --records {run_dir}/records.json --repo . --run-id {run_id} --ids {the RQ# ids, comma-joined} --action focused-review.fix --apply-rule-fixes --run-dir {run_dir}
-    python {script_path} render-review --records {run_dir}/records.json --repo .
+    python "{script_path}" validate-action --records "{run_dir}/records.json" --repo . --run-id "{run_id}" --ids "{the RQ# ids, comma-joined}" --action focused-review.fix --apply-rule-fixes --run-dir "{run_dir}"
+    python "{script_path}" render-review --records "{run_dir}/records.json" --repo .
     ```
 
     Pass **all** the scheduled `RQ#` ids in the one `--apply-rule-fixes` call — the invalidation is computed against the full set, so a finding flagged by two rules disappears only when **both** are applied. The first call re-validates and writes the `rule_fixes_applied` key into `{run_dir}/run-state.json`; the second re-renders with those findings **dimmed with a reason** ("invalidated — rule RQ# fixed"). The dim **persists across re-renders**. Relay the re-render's terminal summary verbatim (as in Step 6c).
@@ -380,8 +380,8 @@ python {script_path} validate-action --records "{run_dir}/records.json" --repo .
 - **`disregard`** — Persist the disregard as run state (the resolved **finding** ids only; any `RQ#` in the mix is ignored, since rules are fixed, not disregarded), then re-render so the canvas dims those findings on this and every future render:
 
   ```bash
-  python {script_path} validate-action --records {run_dir}/records.json --repo . --run-id {run_id} --ids {ids} --action focused-review.disregard --apply-disregard --run-dir {run_dir}
-  python {script_path} render-review --records {run_dir}/records.json --repo .
+  python "{script_path}" validate-action --records "{run_dir}/records.json" --repo . --run-id "{run_id}" --ids "{ids}" --action focused-review.disregard --apply-disregard --run-dir "{run_dir}"
+  python "{script_path}" render-review --records "{run_dir}/records.json" --repo .
   ```
 
   The first call re-validates and writes `{run_dir}/run-state.json` (merging with any earlier disregards); the second re-renders `review.md` + the canvas with those findings dimmed. The dim **persists across re-renders** because `render-review` reads `run-state.json` back on every run. Relay the re-render's terminal summary verbatim (as in Step 6c).
@@ -392,16 +392,16 @@ python {script_path} validate-action --records "{run_dir}/records.json" --repo .
 
 #### Step 6e: Handle a terminal "fix finding N" request
 
-The user may ask you to fix findings **in the terminal** (e.g. "fix finding 3", "fix r1 and r4") instead of pressing the canvas button. It is the **same** fix flow as Step 6d's `fix` branch — not a new mode:
+The user may ask you to fix findings **in the terminal** (e.g. "fix finding 3", "fix f1 and f4") instead of pressing the canvas button. It is the **same** fix flow as Step 6d's `fix` branch — not a new mode:
 
 1. **Locate the run.** If you rendered it this session, reuse that `run_dir` / `run_id`. Otherwise find the latest run exactly as **Post-Mortem Mode → "Step 1: Locate latest report"** does (the newest dir under `.agents/focused-review/`); `records.json` and `run-state.json` sit beside its `review.md`, and `{run_id}` is `records.json`'s `run.run_id`.
-2. **Resolve to `r#` ids against `records.json`.** Map the requested findings to their `record_id`s. Prefer the parenthesized `(rN)` ids from the report — bare display numbers restart per section and are ambiguous (the same caveat Post-Mortem Step 2 calls out); if the user gave a bare number, confirm which `rN` they mean before touching code.
+2. **Resolve to `f#` ids against `records.json`.** Map the requested findings to their `record_id`s, identifying each by the globally-unique `### F#.` heading in the report (a bare number `N` means `fN`). Confirm the resolved findings before touching code.
 3. **Confirm, then fix.** Show the resolved `file:line` + title, get explicit approval (the Step 6d confirmation gate applies here too), and edit only the approved findings.
-4. **Mark fixed + re-render**, exactly as the canvas `fix` path above — pass only the `r#` ids you actually fixed:
+4. **Mark fixed + re-render**, exactly as the canvas `fix` path above — pass only the `f#` ids you actually fixed:
 
    ```bash
-   python {script_path} validate-action --records {run_dir}/records.json --repo . --run-id {run_id} --ids {the r# ids you fixed, comma-joined} --action focused-review.fix --apply-fixed --run-dir {run_dir}
-   python {script_path} render-review --records {run_dir}/records.json --repo .
+   python "{script_path}" validate-action --records "{run_dir}/records.json" --repo . --run-id "{run_id}" --ids "{the f# ids you fixed, comma-joined}" --action focused-review.fix --apply-fixed --run-dir "{run_dir}"
+   python "{script_path}" render-review --records "{run_dir}/records.json" --repo .
    ```
 
    Relay the re-render's terminal summary verbatim; the canvas morphs those rows to ✓ done.
@@ -426,19 +426,19 @@ Read the report file.
 
 ### Step 2: Identify invalid findings
 
-Each review.md finding heading has the shape `### {display_number}. ({record_id}) [{severity}] {title}`. The leading `{display_number}` restarts at 1 in every section (Confirmed, Needs Your Decision, Pre-existing), so it is **not** unique across the report — always identify a finding by its parenthesized `record_id` (e.g. `(r1)`), which is globally unique.
+Each review.md finding heading has the shape `### F#. [{severity}] {title}` (e.g. `### F1. [Medium] …`). The leading `F#` id is globally unique across the report — always identify a finding by it.
 
-Parse the arguments after `post-mortem` for **finding ids** (`record_id`s). Accept comma-separated, space-separated, or mixed (e.g., `r1,r3,r5` or `r1 r3 r5` or `r1, r3, r5`).
+Parse the arguments after `post-mortem` for **finding ids** (`record_id`s). Accept comma-separated, space-separated, or mixed (e.g., `f1,f3,f5` or `f1 f3 f5` or `f1, f3, f5`).
 
-If no ids are provided, present the report's findings grouped by section — each shown with its `(rN)` id, severity, file, and title — and ask the user which findings they consider invalid. Wait for their response before continuing.
+If no ids are provided, present the report's findings grouped by section — each shown with its `F#` id, severity, file, and title — and ask the user which findings they consider invalid. Wait for their response before continuing.
 
-For each specified id, locate the matching finding by its `(rN)` anchor in the `### {display_number}. ({record_id}) …` heading (search the Confirmed, Needs Your Decision, and Pre-existing sections). Extract:
+For each specified id, locate the matching finding by its `### F#.` heading anchor (search the Confirmed, Needs Your Decision, and Pre-existing sections). Extract:
 - **Title** and **severity**
 - **File** path
 - **Provenance** line (e.g., `rule:sealed-classes, concern:bugs (opus)`)
 - **Description** and **assessment reasoning**
 
-If an id matches no finding, warn the user and skip it. If the user supplies a bare number instead of an `rN` id, explain that section numbers repeat across sections and ask them to re-specify using the `(rN)` ids shown in the headings.
+If an id matches no finding, warn the user and skip it. A bare number `N` denotes finding `fN`.
 
 ### Step 3: Trace provenance to sources
 
