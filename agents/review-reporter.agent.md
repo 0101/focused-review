@@ -145,9 +145,11 @@ A finding has a rich-detail sidecar when the file `{run_dir}/assessments/{assess
 ### 6. Synthesize rule-quality notes
 
 Add a `rule_quality_notes[]` entry when any of these hold:
-- A finding carries a `Rule quality note:` annotation from the assessor (the rule is technically correct but counterproductive in context).
+- One or more findings carry a `Rule quality note:` annotation from the assessor (a valid match the assessor Confirmed but judged *not* net-positive — the rule is counterproductive here). The assessor's note is mandatory in that case, so this is the common trigger.
 - A single rule produced **3+ findings assessed as Invalid** (the rule may be too broad/noisy).
-- Multiple findings from the same rule were assessed as **Questionable** (the rule may need tightening).
+- A single rule produced multiple **`mixed`-type** findings assessed as **Questionable** (the rule may need tightening). *(Pure `rule` findings are never Questionable, so they never hit this trigger.)*
+
+**One note per rule — merge before you write.** A rule that fires on several findings produces several per-finding annotations, but the schema permits **exactly one note per rule**. Group every annotation/trigger by the rule it names and emit a **single** note per rule: one `rule_file`, with `rule_sources` listing every contributing `rule--<name>` provenance label (collapsing any `--<chunk>` suffixes of that same rule). Never emit two notes for the same rule — validation rejects cross-note duplicates and forces a retry.
 
 Each entry is `{ rule_sources, rule_file, observation, suggestion }` (Python assigns the `rq#` id and derives the `rule` display label from `rule_file` — do not emit them):
 - `rule_sources` — a **non-empty array** of the `rule--<name>` provenance labels the note covers (usually one; list several only when one rule was split across discovery chunks, e.g. `["rule--no-foo--1", "rule--no-foo--2"]`). Every label must name the **same** rule as `rule_file`, match the explained findings' provenance, and be **unique across notes** — one note per rule (cover a different rule with a separate note).

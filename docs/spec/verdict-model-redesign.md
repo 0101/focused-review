@@ -50,7 +50,7 @@ Scope is the orthogonal `introduced_by` flag. The "only net-positives surface" r
 | Needs your decision | Decide — decision section | recorded only — not shown |
 | Invalid | never rendered — internal only | never rendered — internal only |
 
-- Pre-existing **rule** violations stay out of scope entirely — not recorded, not shown. Only pre-existing *concerns* can surface (and only when Confirmed).
+- Pre-existing **rule** violations surface the **same way as concerns**: a **Confirmed** pre-existing finding — rule or concern — appears in the non-gating Pre-existing ("Consider") section; a pre-existing `Questionable` is recorded only. *(Updated — originally these were kept fully out of scope; see Decision 7.)*
 - Pre-existing items are **bounded by design**: they only ever arrive through normal discovery and happen to be pre-existing. Nothing hunts for them; the assessor simply stops discarding the net-positive ones it's handed, and weighs "this may have been intentional" as a counter-argument.
 
 ## Rule-Quality Notes → Schedulable Fixes
@@ -150,7 +150,7 @@ Current-code anchors gathered during planning (line numbers approximate, verify 
 
 - Discovery agents / concerns — **no new detection**, no hunting for pre-existing issues.
 - The core pipeline **phase structure** stays (Discovery → Consolidation → Assessment → Rebuttal → Presentation) — but the rebuttal prompt is narrowed.
-- Rules remain absolute; pre-existing **rule** violations stay out of scope.
+- Rules remain absolute (a valid match is always Confirmed).
 - Existing canvas infrastructure (section/row checkboxes, free-text box, send-to-agent) is **reused and extended**, not rebuilt.
 
 ## Decision Log (locked)
@@ -161,7 +161,7 @@ Current-code anchors gathered during planning (line numbers approximate, verify 
 4. Critical → always Confirmed (must-fix), even with a large/risky fix. Severity otherwise doesn't demote.
 5. Fix cost is a visual tag, orthogonal to the bucket; it can additionally make a non-critical net-positive a decision, but never hides/downgrades.
 6. Rules are the authority — any valid match (clear-cut or judgment-call) → Confirmed, never Needs your decision; mandatory rule-quality note when a valid match isn't net-positive (the one exception to Confirmed=net-positive).
-7. Pre-existing rule violations stay out of scope (not recorded, not shown).
+7. Pre-existing rule violations stay out of scope (not recorded, not shown). **[SUPERSEDED]** Pre-existing rule violations now surface like concerns — a Confirmed pre-existing rule violation appears in the non-gating Pre-existing section (routed by `(verdict, introduced_by)`, not by `type`); only `Invalid` and pre-existing `Questionable` stay hidden.
 8. Don't hunt pre-existing; assessor reassesses only its assigned finding; never raises new ones.
 9. Pre-existing net-positive concern → own section via the `introduced_by` scope flag (not a 4th verdict); carried structurally so counts/numbering stay valid.
 10. Pre-existing-but-doubtful is recorded, not shown (Confirmed-only surfaces).

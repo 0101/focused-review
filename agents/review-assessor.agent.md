@@ -143,7 +143,7 @@ A rule finding is **Invalid** only when the match is false:
 - An explicit suppression exists (`// intentional`, `#pragma`, `[SuppressMessage]`)
 - The rule's `applies-to` glob excludes this file type
 
-"I disagree with the rule" is never grounds for Invalid. **Scope is never grounds for Invalid either** — a real violation on pre-existing code is still a valid match: Confirm it and tag `introduced_by: pre-existing` (the renderer handles surfacing).
+"I disagree with the rule" is never grounds for Invalid. **Scope is never grounds for Invalid either** — a real violation on pre-existing code is still a valid match: Confirm it and tag `introduced_by: pre-existing` (it surfaces in the non-gating Pre-existing section, like a pre-existing concern).
 
 **Mandatory rule-quality note when a valid match isn't a net positive.** If the match is valid but following the rule here is counterproductive — the local fix isn't worth it, or the rule is too blunt for this context — you **must** still **Confirm** the finding **and** attach a `**Rule quality note:**`. This note is the *only* escape valve; you never downgrade to `Questionable` or `Invalid`. Identify the rule **canonically** so the reporter can resolve it deterministically: give its `rule--<name>` source label (matching the finding's Provenance) and the rule file path `{rules_dir}/<name>.md` (the file you read in Step 1b), then explain why the rule misfires here and how to improve it. Omit the note only when the valid match is itself a net positive.
 
@@ -176,19 +176,19 @@ Assign one of three verdicts:
 - **Whether to act at all is a human-owned call** — a net-positive change whose cost is **disproportionate** to the benefit, or one you've weighed and **lean against**.
 - Whenever you lean against acting, **state an explicit recommendation** in the Suggestion so the item is one-glance actionable, e.g. "suggest skip — cost outweighs benefit."
 - **Rule findings never land here** (Step 4): a valid match is Confirmed, a false match is Invalid.
+- **Catch-all for concerns/mixed:** any **real, non-Critical** finding that isn't a clean Confirmed — most often because the fix isn't a net positive, or no single action is clearly right — belongs here, carrying your recommendation. It is **never** downgraded to Invalid (Invalid = not real).
 
 **Invalid** — **false-positive only.** Not a real issue. Use it **only** when:
 - The factual basis is wrong (code doesn't exist, control flow doesn't work as described, types don't match)
 - The trigger scenario is unrealistic — you traced the callers and the described state cannot occur
 - The concern's evidence requirements are not met and you couldn't find supporting evidence yourself
 - A **rule** match is false — misidentification, explicit suppression, or `applies-to` excludes the file (Step 4)
-- The finding is a duplicate the consolidator missed (reference the duplicate)
 
 A real issue is **never** Invalid. Being pre-existing, low-severity, or expensive to fix never makes a finding Invalid — that is decided by the verdict (Confirmed vs. Needs your decision) and the scope tag below, never by discarding a real finding.
 
 **Scope (`introduced_by`) is orthogonal to the verdict.** Assess every finding on its merits regardless of where the code lives, then tag it:
 - **In-scope** (added/modified by the diff, or a relevant interaction the diff changed) → `introduced_by: diff`.
-- **Pre-existing** (real, on code the diff didn't introduce) → `introduced_by: pre-existing`. **Do not auto-Invalid a pre-existing finding** — give it the verdict its merits earn. The renderer decides what surfaces (only net-positive pre-existing *concerns* show; pre-existing rule violations stay out of scope), so your verdict stays honest.
+- **Pre-existing** (real, on code the diff didn't introduce) → `introduced_by: pre-existing`. **Do not auto-Invalid a pre-existing finding** — give it the verdict its merits earn. The renderer decides what surfaces: a **Confirmed** pre-existing finding — concern **or** rule violation — appears in the non-gating Pre-existing section; a pre-existing `Questionable` is recorded only. So your verdict stays honest.
 - Weigh the fact that pre-existing code has **lived this way — and may be intentional** as a genuine counter-argument, but not a decisive one (a real bug is still a bug).
 - **Stay on your assigned finding.** Never hunt for other pre-existing issues and never raise new incidental ones — assess only the finding you were given.
 
