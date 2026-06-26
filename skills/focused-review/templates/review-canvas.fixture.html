@@ -151,6 +151,9 @@
   .finding.dimmed { opacity: 0.35; }
   .finding.dimmed .title { text-decoration: line-through; }
 
+  .finding.fixed .title { text-decoration: line-through; }
+  .finding.fixed .title::before { content: '✓'; color: #a6e3a1; font-weight: 700; margin-right: 6px; }
+
   .finding.pending-invalid { opacity: 0.35; }
   .finding.pending-invalid .title { text-decoration: line-through; }
 
@@ -391,6 +394,7 @@
   var state = {
     selected: new Set(),
     disregarded: new Set(),
+    fixed: new Set(),
     scheduledRules: new Set(),
     openId: null
   };
@@ -538,10 +542,12 @@
     // cold load, not just an in-session morph (see the template for the rationale).
     all(".finding").forEach(function (f) {
       if (f.classList.contains("dimmed")) state.disregarded.add(f.getAttribute("data-record-id"));
+      if (f.classList.contains("fixed")) state.fixed.add(f.getAttribute("data-record-id"));
     });
     var present = presentIds();
     pruneTo(state.selected, present);
     pruneTo(state.disregarded, present);
+    pruneTo(state.fixed, present);
     if (state.openId && !present.has(state.openId)) state.openId = null;
 
     all(".finding").forEach(function (f) {
@@ -549,6 +555,7 @@
       var cb = f.querySelector(".row-cb");
       if (cb) cb.checked = state.selected.has(id);
       f.classList.toggle("dimmed", state.disregarded.has(id));
+      f.classList.toggle("fixed", state.fixed.has(id));
       if (id && id === state.openId) {
         var d = f.querySelector(".finding-d");
         if (d && !d.open) d.open = true;

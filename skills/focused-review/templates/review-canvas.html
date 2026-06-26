@@ -242,6 +242,12 @@
   .finding.dimmed { opacity: 0.35; }
   .finding.dimmed .title { text-decoration: line-through; }
 
+  /* Fixed (orchestrator applied the code-fix): reads as DONE — a green check glyph +
+     strikethrough title, NOT the 0.35 dim, so "fixed" is never read as "ignored".
+     Orthogonal to .dimmed; a row may carry both and the two treatments stack. */
+  .finding.fixed .title { text-decoration: line-through; }
+  .finding.fixed .title::before { content: '✓'; color: #a6e3a1; font-weight: 700; margin-right: 6px; }
+
   /* Live rule-fix preview: checking a rule-quality note greys the rows whose every
      rule source is scheduled to be fixed (client-only, no agent round-trip). Same
      look as .dimmed but a distinct class, so a transient preview is never mistaken
@@ -507,6 +513,7 @@
   var state = {
     selected: new Set(),                 // record_ids currently checked
     disregarded: new Set(),              // record_ids marked disregarded (dimmed)
+    fixed: new Set(),                    // record_ids the orchestrator marked fixed (done)
     scheduledRules: new Set(),           // RQ ids whose rule-fix checkbox is checked
     openId: null                         // record_id of the open accordion, if any
   };
@@ -677,6 +684,7 @@
     // — keeps those findings dimmed. Disregard is add-only, so this union is safe.
     all(".finding").forEach(function (f) {
       if (f.classList.contains("dimmed")) state.disregarded.add(f.getAttribute("data-record-id"));
+      if (f.classList.contains("fixed")) state.fixed.add(f.getAttribute("data-record-id"));
     });
     // Prune tracked state to record_ids still present: a morph can drop a finding from
     // the selectable set (e.g. it is re-categorized into a hidden bucket and loses its checkbox), so
@@ -684,6 +692,7 @@
     var present = presentIds();
     pruneTo(state.selected, present);
     pruneTo(state.disregarded, present);
+    pruneTo(state.fixed, present);
     if (state.openId && !present.has(state.openId)) state.openId = null;
 
     all(".finding").forEach(function (f) {
@@ -691,6 +700,7 @@
       var cb = f.querySelector(".row-cb");
       if (cb) cb.checked = state.selected.has(id);
       f.classList.toggle("dimmed", state.disregarded.has(id));
+      f.classList.toggle("fixed", state.fixed.has(id));
       if (id && id === state.openId) {
         var d = f.querySelector(".finding-d");
         if (d && !d.open) d.open = true;

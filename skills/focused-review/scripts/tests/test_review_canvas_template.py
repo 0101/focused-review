@@ -299,6 +299,50 @@ def test_fixture_has_no_optimistic_disregard_dimming(fixture_text: str):
     assert 'action === NS + "disregard"' not in fixture_text
 
 
+# ── fixed: green-check / strikethrough "done" mark (distinct from the disregard dim) ──
+
+
+def test_template_defines_fixed_css(template_text: str):
+    # A fixed finding renders as DONE — a strikethrough title + a green check glyph, NOT
+    # the 0.35 dim — so "fixed" never reads as "ignored". Orthogonal to .dimmed: a row may
+    # carry both `fixed` and `dimmed` and the two treatments stack.
+    assert ".finding.fixed" in template_text
+
+
+def test_fixture_defines_fixed_css(fixture_text: str):
+    assert ".finding.fixed" in fixture_text
+
+
+def test_template_seeds_fixed_from_dom(template_text: str):
+    # restoreState() seeds state.fixed SOLELY from server-rendered .fixed classes
+    # (mirroring dimmed), so the persisted mark drives both an in-session morph and a
+    # cold load. fixed: new Set() must exist in the state object for this to land.
+    assert "fixed: new Set()" in template_text
+    assert 'f.classList.contains("fixed")' in template_text
+    assert "state.fixed.add(" in template_text
+
+
+def test_fixture_seeds_fixed_from_dom(fixture_text: str):
+    assert "fixed: new Set()" in fixture_text
+    assert 'f.classList.contains("fixed")' in fixture_text
+    assert "state.fixed.add(" in fixture_text
+
+
+def test_template_has_no_optimistic_fixed_marking(template_text: str):
+    # Single source of truth (the C-17 rule, extended to `fixed`): the mark is seeded only
+    # from server-rendered run-state via restoreState(), never optimistically added on a
+    # fix click. `fixed` may only be read (classList.contains) or reconciled
+    # (classList.toggle) — never added on dispatch.
+    assert 'classList.add("fixed")' not in template_text
+
+
+def test_fixture_has_no_optimistic_fixed_marking(fixture_text: str):
+    # Checked on the fixture explicitly too: test_fixture_executable_js_identical_to_template
+    # only proves the two ends match each other, so without this both could re-introduce
+    # an optimistic fix-marking in lockstep and still pass.
+    assert 'classList.add("fixed")' not in fixture_text
+
+
 # ── origin-validated postMessage channel (C-03 outbound / C-15 inbound) ──────
 
 
