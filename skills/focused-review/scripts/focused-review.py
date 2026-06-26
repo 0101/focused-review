@@ -4110,12 +4110,12 @@ def render_review(args: argparse.Namespace) -> None:
 # validate-action (Phase 6): the canvas action-bar round-trip.
 #
 # The canvas posts {ids[], button, text, run_id} to the orchestrator. The `ids`
-# are a single, prefix-disambiguated list: findings keep their record_id (r#),
+# are a single, prefix-disambiguated list: findings keep their record_id (f#),
 # rule-quality notes use RQ#. Before the orchestrator does anything (and only
 # after a human confirms), it calls `validate-action` to validate/expand the
 # payload against records.json: the posted run_id must match the rendered run
 # (rejecting a forged action from injected canvas JS), every id must resolve by
-# prefix (r# -> finding file/line/title/suggestion; RQ# -> rule file + suggested
+# prefix (f# -> finding file/line/title/suggestion; RQ# -> rule file + suggested
 # change + the record_ids its fix invalidates), and an id matching neither prefix
 # (or absent from the envelope) is rejected. Python's role stays mechanical — it
 # validates a schema-defined contract and resolves stable ids; it never executes
@@ -4490,8 +4490,8 @@ def validate_action(
     dicts (same shape as :func:`validate_records`, scope ``"action"``); when it is
     empty, ``expanded`` is the resolved action. ``ids`` is the unified,
     prefix-disambiguated id list the canvas posts — findings keep their
-    ``record_id`` (``r#``) and rule-quality notes use ``RQ#``. Each id is resolved
-    **by prefix**: an ``r#`` to a finding (file/line/title/suggestion) in
+    ``record_id`` (``f#``) and rule-quality notes use ``RQ#``. Each id is resolved
+    **by prefix**: an ``f#`` to a finding (file/line/title/suggestion) in
     ``expanded["findings"]``, an ``RQ#`` to a rule (rule_file/suggested change/the
     ``record_id``s its fix invalidates) in ``expanded["rules"]``. An id matching
     *neither* prefix, or a well-formed id absent from the envelope, is rejected —
@@ -4588,7 +4588,7 @@ def validate_action(
             _records_error(
                 "action", None, "ids", "ids",
                 "no ids provided; a canvas action must target at least one finding "
-                "(r#) or rule-quality note (RQ#)",
+                "(f#) or rule-quality note (RQ#)",
             )
         )
     for i, raw in enumerate(ids):
@@ -4630,7 +4630,7 @@ def validate_action(
             errors.append(
                 _records_error(
                     "action", i, f"ids[{i}]", "id",
-                    f"unrecognized id {token!r}: must be a finding id (r#) or a "
+                    f"unrecognized id {token!r}: must be a finding id (f#) or a "
                     f"rule-quality note id (RQ#)",
                     record_id=token,
                 )
@@ -4722,7 +4722,7 @@ def _load_records_only(path: str | os.PathLike) -> tuple[object, dict | None]:
 def _split_ids(raw: str | None) -> list[str]:
     """Parse the comma-separated ``--ids`` value into a de-duped list.
 
-    The posted ids are per-run tokens (findings ``r1``, ``r2``, …; rule-quality
+    The posted ids are per-run tokens (findings ``f1``, ``f2``, …; rule-quality
     notes ``RQ1``, ``RQ2``, …) so a comma is a safe separator. Order is preserved
     (first-seen) and blanks/dupes are dropped. The id *type* is disambiguated later
     by prefix in :func:`validate_action`.
@@ -4759,7 +4759,7 @@ def validate_action_command(args: argparse.Namespace) -> None:
     """CLI: validate/expand a posted canvas action against records.json.
 
     On success prints the resolved action JSON to stdout (exit 0) — ``findings[]``
-    (resolved ``r#`` ids) and ``rules[]`` (resolved ``RQ#`` ids). On a forged
+    (resolved ``f#`` ids) and ``rules[]`` (resolved ``RQ#`` ids). On a forged
     run_id, an unknown/unrecognised id, an unknown action verb, or a
     missing/unparseable records.json, prints the structured errors to stderr and
     exits 1 — so the orchestrator rejects the action instead of executing it.
@@ -5171,8 +5171,8 @@ def main() -> int:
     action_parser.add_argument(
         "--ids",
         required=True,
-        help="Comma-separated stable ids the action targets: finding ids (r#) "
-             "and/or rule-quality note ids (RQ#), e.g. r1,r3,RQ2",
+        help="Comma-separated stable ids the action targets: finding ids (f#) "
+             "and/or rule-quality note ids (RQ#), e.g. f1,f3,RQ2",
     )
     action_parser.add_argument(
         "--action",
