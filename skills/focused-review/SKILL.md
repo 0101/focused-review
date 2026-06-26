@@ -350,7 +350,7 @@ When the Treemon canvas is live, its sticky action bar posts one **unified** mes
 python {script_path} validate-action --records "{run_dir}/records.json" --repo . --run-id "{run_id}" --ids "{comma-joined ids}" --action "focused-review.{button}" --instructions "{text}"
 ```
 
-- **Non-zero exit ⇒ reject the action, execute nothing, stop.** **Exit 1** (forged/mismatched `run_id`; an `r#` not in `records.json`; an `RQ#` not in `records.json`; an id matching neither prefix; an `RQ#` whose `rule_file` is unsafe — absolute, `..`, non-`.md`, or outside the rules dir — or whose `rule_file` is inconsistent with its `rule_source`; `--apply-disregard`/`--apply-rule-fixes` paired with the wrong verb; or an unreadable `records.json`) writes a structured error JSON to **stderr** — tell the user it was rejected and why (relay the `errors[].message` fields). A `button` that maps to a verb not on the allowlist is rejected by the argument parser itself (**exit 2**, an `invalid choice` usage message on stderr — no structured JSON). Either way, do **not** execute anything. Stop.
+- **Non-zero exit ⇒ reject the action, execute nothing, stop.** **Exit 1** (forged/mismatched `run_id`; an `r#` not in `records.json`; an `RQ#` not in `records.json`; an id matching neither prefix; an `RQ#` whose `rule_file` is unsafe — absolute, `..`, non-`.md`, or outside the rules dir — or whose `rule_file` is inconsistent with its `rule_source`; `--apply-disregard`/`--apply-rule-fixes`/`--apply-fixed` paired with the wrong verb; or an unreadable `records.json`) writes a structured error JSON to **stderr** — tell the user it was rejected and why (relay the `errors[].message` fields). A `button` that maps to a verb not on the allowlist is rejected by the argument parser itself (**exit 2**, an `invalid choice` usage message on stderr — no structured JSON). Either way, do **not** execute anything. Stop.
 - **Exit 0**: **stdout** is the expanded action with two resolved lists. Use **these resolved values**, never anything from the raw payload:
   - `findings[]` — each `r#` resolved to `record_id` / `file` / `line` / `title` / `severity` / `verdict` / `fix_complexity` / `suggestion`.
   - `rules[]` — each `RQ#` resolved to `rule_id` / `rule` / `rule_source` / `rule_file` (the safe path to edit) / `observation` / `suggestion` (the suggested rule change) / `invalidated_record_ids` (the findings this rule fix removes).
@@ -360,7 +360,14 @@ python {script_path} validate-action --records "{run_dir}/records.json" --repo .
 **3. After confirmation, dispatch on `button`, resolving the mixed selection by id prefix:**
 
 - **`fix`** — handle any combination of resolved findings and rules:
-  - **Findings (`r#`)** — Propose fixes for the resolved `findings[]`, guided by the free-text box (`text`). Work through them using the normal edit flow (each carries its `file` / `line` / `suggestion`); apply changes only with the user's approval and only to findings in the resolved set. Do not touch findings outside it.
+  - **Findings (`r#`)** — Propose fixes for the resolved `findings[]`, guided by the free-text box (`text`). Work through them using the normal edit flow (each carries its `file` / `line` / `suggestion`); apply changes only with the user's approval and only to findings in the resolved set. Do not touch findings outside it. After the approved code-fixes are applied, persist the fix and re-render so the canvas marks those rows done:
+
+    ```bash
+    python {script_path} validate-action --records {run_dir}/records.json --repo . --run-id {run_id} --ids {the r# ids you actually fixed, comma-joined} --action focused-review.fix --apply-fixed --run-dir {run_dir}
+    python {script_path} render-review --records {run_dir}/records.json --repo .
+    ```
+
+    Pass **only** the `r#` ids you actually fixed — a partial fix marks only what was resolved, never the whole selection. The first call re-validates and writes the `fixed` key into `{run_dir}/run-state.json`; the second re-renders `review.md` + the canvas with those rows shown **done** (green ✓ + strikethrough title). The mark **persists across re-renders** because `render-review` reads `run-state.json` back on every run. Relay the re-render's terminal summary verbatim (as in Step 6c). `--apply-fixed` (code-fix → done) is distinct from `--apply-rule-fixes` (rule-invalidation dim): a `fix` message that mixes `r#` and `RQ#` fires **both** — `--apply-fixed` here for the findings you fixed, `--apply-rule-fixes` below for the rules you edited — so keep both.
   - **Rules (`RQ#`)** — For each resolved rule, edit its `rule_file` (a safe path under `review/`): when `text` is **empty**, apply the rule's `suggestion` (accept the suggested change); when `text` is **present**, do what the text says (the `suggestion` is context). After the rule files are edited, persist the invalidation and re-render so the now-moot findings disappear:
 
     ```bash
@@ -382,6 +389,22 @@ python {script_path} validate-action --records "{run_dir}/records.json" --repo .
 - **`document`** — Write a tracking doc capturing the resolved findings (id, `file:line`, title, severity) plus `text`, so they can be picked up later (e.g. `{run_dir}/follow-up.md`, or a repo issue/TODO if the user prefers). Tell the user the path you wrote.
 
 **4. Re-validate every message independently.** Do not cache a prior expansion: re-run `validate-action` for each posted action so a stale or forged `run_id`, or an id no longer in `records.json`, is always rejected before you act.
+
+#### Step 6e: Handle a terminal "fix finding N" request
+
+The user may ask you to fix findings **in the terminal** (e.g. "fix finding 3", "fix r1 and r4") instead of pressing the canvas button. It is the **same** fix flow as Step 6d's `fix` branch — not a new mode:
+
+1. **Locate the run.** If you rendered it this session, reuse that `run_dir` / `run_id`. Otherwise find the latest run exactly as **Post-Mortem Mode → "Step 1: Locate latest report"** does (the newest dir under `.agents/focused-review/`); `records.json` and `run-state.json` sit beside its `review.md`, and `{run_id}` is `records.json`'s `run.run_id`.
+2. **Resolve to `r#` ids against `records.json`.** Map the requested findings to their `record_id`s. Prefer the parenthesized `(rN)` ids from the report — bare display numbers restart per section and are ambiguous (the same caveat Post-Mortem Step 2 calls out); if the user gave a bare number, confirm which `rN` they mean before touching code.
+3. **Confirm, then fix.** Show the resolved `file:line` + title, get explicit approval (the Step 6d confirmation gate applies here too), and edit only the approved findings.
+4. **Mark fixed + re-render**, exactly as the canvas `fix` path above — pass only the `r#` ids you actually fixed:
+
+   ```bash
+   python {script_path} validate-action --records {run_dir}/records.json --repo . --run-id {run_id} --ids {the r# ids you fixed, comma-joined} --action focused-review.fix --apply-fixed --run-dir {run_dir}
+   python {script_path} render-review --records {run_dir}/records.json --repo .
+   ```
+
+   Relay the re-render's terminal summary verbatim; the canvas morphs those rows to ✓ done.
 
 ---
 
