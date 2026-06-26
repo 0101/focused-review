@@ -343,6 +343,38 @@ def test_fixture_has_no_optimistic_fixed_marking(fixture_text: str):
     assert 'classList.add("fixed")' not in fixture_text
 
 
+# ── F2 regression: restoreState rebuilds the server-derived sets fresh (no stale re-add) ──
+
+
+def _restore_state_js(html_text: str) -> str:
+    """restoreState()'s executable JS (comments stripped) onward, as one normalized string.
+
+    The reset/seed/toggle tokens checked below are unique to restoreState(), so slicing from
+    its definition to the end of the script is enough to assert their presence and ordering.
+    """
+    js = "\n".join(_executable_js(html_text))
+    return js[js.index("function restoreState()") :]
+
+
+@pytest.mark.parametrize("end", ["template", "fixture"])
+def test_restore_state_rebuilds_server_sets_fresh(template_text: str, fixture_text: str, end: str):
+    # F2 regression. The canvas is one morph-in-place file whose JS state survives across runs
+    # (window.__frCanvasInit), and record_ids are positional (f1..fN every run). If restoreState()
+    # UNIONED the server-derived sets into prior client state (the old add-only seed), a finding
+    # fixed/dimmed in an earlier run would be RE-applied to the same-position id in a genuinely
+    # new run (new run_id) whose server render correctly dropped the class — a false done/ignored
+    # mark that defeats the "new run_id => clean canvas" goal. The two server-derived sets must be
+    # rebuilt FRESH from the current DOM each call (state.<set> = new Set() before the reseed), so
+    # they exactly mirror the server-baked classes and never accumulate cross-run state. (selected
+    # is genuine client state and is intentionally NOT reset.)
+    body = _restore_state_js(template_text if end == "template" else fixture_text)
+    for reset in ("state.disregarded = new Set()", "state.fixed = new Set()"):
+        assert reset in body, f"restoreState must rebuild {reset!r} fresh (F2 stale re-add)"
+    # The fresh rebuild must precede the reseed adds, else it would wipe the just-seeded ids.
+    assert body.index("state.disregarded = new Set()") < body.index("state.disregarded.add(")
+    assert body.index("state.fixed = new Set()") < body.index("state.fixed.add(")
+
+
 # ── origin-validated postMessage channel (C-03 outbound / C-15 inbound) ──────
 
 

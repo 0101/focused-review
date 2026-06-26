@@ -678,10 +678,15 @@
   }
 
   function restoreState() {
-    // Seed from server-rendered dimmed classes: render-review bakes the persisted
-    // disregard (read back from run-state.json) into the HTML, so a cold canvas load
-    // — not just an in-session morph where the click handler already populated the set
-    // — keeps those findings dimmed. Disregard is add-only, so this union is safe.
+    // Reconcile the server-derived sets from the CURRENT DOM on every call. render-review
+    // bakes the persisted disregard/fixed (read back from run-state.json, gated on run_id)
+    // into the HTML, and that server round-trip is the single source of truth (no optimistic
+    // add — the C-17 rule). Rebuild the sets fresh instead of unioning into prior state: the
+    // canvas is one morph-in-place file whose JS state survives across runs and record_ids are
+    // positional (f1..fN every run), so a stale mark from an earlier run would otherwise be
+    // re-applied to a still-present id even after a new run_id correctly dropped the class.
+    state.disregarded = new Set();
+    state.fixed = new Set();
     all(".finding").forEach(function (f) {
       if (f.classList.contains("dimmed")) state.disregarded.add(f.getAttribute("data-record-id"));
       if (f.classList.contains("fixed")) state.fixed.add(f.getAttribute("data-record-id"));
