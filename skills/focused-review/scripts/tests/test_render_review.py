@@ -777,6 +777,123 @@ class TestInvalidatedReasons:
         assert fr._invalidated_reasons(fixes) == {"r9": "invalidated — rule RQ4 fixed"}
 
 
+# Run id used by the run-state persistence tests below (matches the envelope's run).
+FIXED_RUN_ID = "20260203-100000"
+
+
+class TestCanvasFixedMark:
+    """A persisted ``fixed`` id bakes the ``.finding.fixed`` done-mark onto its row.
+
+    ``fixed`` is orthogonal to the dim (disregard / rule-fix invalidation): a row
+    can be ``finding`` / ``finding dimmed`` / ``finding fixed`` /
+    ``finding fixed dimmed``, and when both apply the classes stack in that
+    canonical order — no precedence / "winner" logic.
+    """
+
+    def _template(self) -> str:
+        return fr.CANVAS_TEMPLATE_PATH.read_text(encoding="utf-8")
+
+    def test_fixed_id_bakes_fixed_class_onto_its_row(self) -> None:
+        out = fr.render_canvas_html(_render_envelope(), self._template(), fixed={"f1"})
+        assert '<div class="finding fixed" data-record-id="f1"' in out
+
+    def test_non_fixed_rows_stay_plain(self) -> None:
+        out = fr.render_canvas_html(_render_envelope(), self._template(), fixed={"f1"})
+        # f3 is not in the fixed set (and not costly) -> the bare finding class.
+        assert '<div class="finding" data-record-id="f3"' in out
+
+    def test_default_no_fixed_set_marks_nothing(self) -> None:
+        # Existing callers/tests pass no ``fixed`` arg -> no row gains the class.
+        out = _canvas(_render_envelope())
+        assert 'class="finding fixed"' not in out
+
+    def test_disregarded_and_fixed_coexist_and_stack(self) -> None:
+        # The SAME finding marked both fixed and disregarded carries both classes in
+        # the canonical ``finding fixed dimmed`` order (the two treatments stack).
+        out = fr.render_canvas_html(
+            _render_envelope(), self._template(), disregarded={"f1"}, fixed={"f1"}
+        )
+        assert '<div class="finding fixed dimmed" data-record-id="f1"' in out
+
+    def test_fixed_stacks_with_rule_fix_invalidation_dim(self) -> None:
+        # The invalidation dim routes through the same ``dimmed`` class, so a row that
+        # is both fixed and invalidated stacks both classes the same way.
+        out = fr.render_canvas_html(
+            _render_envelope(),
+            self._template(),
+            invalidated={"f1": "invalidated — rule RQ1 fixed"},
+            fixed={"f1"},
+        )
+        assert '<div class="finding fixed dimmed" data-record-id="f1"' in out
+
+
+class TestFixedRunState:
+    """``persist_fixed`` round-trips and coexists with the sibling decision keys.
+
+    ``fixed`` is the third run-state decision key beside ``disregarded`` and
+    ``rule_fixes_applied``; all three route through the shared ``_write_run_state``
+    so writing any one preserves the others (the four-key envelope).
+    """
+
+    def test_persist_fixed_round_trips(self, tmp_path: Path) -> None:
+        state = fr.persist_fixed(str(tmp_path), FIXED_RUN_ID, ["r1"])
+        assert state["fixed"] == ["r1"]
+        # Read back from disk, run_id-stamped.
+        loaded = fr.load_run_state(str(tmp_path), expected_run_id=FIXED_RUN_ID)
+        assert loaded["fixed"] == ["r1"]
+
+    def test_persist_fixed_merges_monotonic_dedup_order(self, tmp_path: Path) -> None:
+        s1 = fr.persist_fixed(str(tmp_path), FIXED_RUN_ID, ["r1"])
+        assert s1["fixed"] == ["r1"]
+        # Re-applying r1 and adding r2 merges without duplication, preserving order.
+        s2 = fr.persist_fixed(str(tmp_path), FIXED_RUN_ID, ["r1", "r2"])
+        assert s2["fixed"] == ["r1", "r2"]
+        s3 = fr.persist_fixed(str(tmp_path), FIXED_RUN_ID, ["r3", "r2"])
+        assert s3["fixed"] == ["r1", "r2", "r3"]
+
+    def test_persist_fixed_preserves_disregarded_and_rule_fixes(self, tmp_path: Path) -> None:
+        fr.persist_disregard(str(tmp_path), FIXED_RUN_ID, ["r1"])
+        fr.persist_rule_fixes(
+            str(tmp_path), FIXED_RUN_ID,
+            [{"rule_id": "RQ1", "rule_source": "rule--a", "invalidated_record_ids": ["r4"]}],
+        )
+        state = fr.persist_fixed(str(tmp_path), FIXED_RUN_ID, ["r2"])
+        # Marking a finding fixed must not wipe either sibling decision key.
+        assert state["fixed"] == ["r2"]
+        assert state["disregarded"] == ["r1"]
+        assert state["rule_fixes_applied"] == [
+            {"rule_id": "RQ1", "rule_source": "rule--a", "invalidated_record_ids": ["r4"]}
+        ]
+
+    def test_persist_disregard_preserves_fixed(self, tmp_path: Path) -> None:
+        fr.persist_fixed(str(tmp_path), FIXED_RUN_ID, ["r1"])
+        state = fr.persist_disregard(str(tmp_path), FIXED_RUN_ID, ["r2"])
+        # Writing a disregard must not wipe the recorded fixed set.
+        assert state["fixed"] == ["r1"]
+        assert state["disregarded"] == ["r2"]
+
+    def test_persist_rule_fixes_preserves_fixed(self, tmp_path: Path) -> None:
+        fr.persist_fixed(str(tmp_path), FIXED_RUN_ID, ["r1"])
+        state = fr.persist_rule_fixes(
+            str(tmp_path), FIXED_RUN_ID,
+            [{"rule_id": "RQ1", "rule_source": "rule--a", "invalidated_record_ids": ["r4"]}],
+        )
+        # Writing a rule fix must not wipe the recorded fixed set.
+        assert state["fixed"] == ["r1"]
+        assert state["rule_fixes_applied"][0]["rule_id"] == "RQ1"
+
+    def test_load_run_state_drops_non_string_fixed_ids(self, tmp_path: Path) -> None:
+        (tmp_path / "run-state.json").write_text(
+            json.dumps({"run_id": FIXED_RUN_ID, "fixed": ["r1", 5, "", None, "r2"]}),
+            encoding="utf-8",
+        )
+        assert fr.load_run_state(str(tmp_path))["fixed"] == ["r1", "r2"]
+
+    def test_load_run_state_absent_has_empty_fixed(self, tmp_path: Path) -> None:
+        # Fail-open: a missing state file yields an empty ``fixed`` set, never raising.
+        assert fr.load_run_state(str(tmp_path))["fixed"] == []
+
+
 # ---------------------------------------------------------------------------
 # Escaping / injection safety
 # ---------------------------------------------------------------------------

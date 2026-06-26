@@ -1060,15 +1060,27 @@ class TestRunState:
         assert s3["disregarded"] == ["r1", "r2", "r3"]
 
     def test_load_run_state_absent_is_empty(self, tmp_path: Path) -> None:
-        assert fr.load_run_state(str(tmp_path)) == {"disregarded": [], "rule_fixes_applied": []}
+        assert fr.load_run_state(str(tmp_path)) == {
+            "disregarded": [],
+            "rule_fixes_applied": [],
+            "fixed": [],
+        }
 
     def test_load_run_state_malformed_is_empty(self, tmp_path: Path) -> None:
         (tmp_path / "run-state.json").write_text("{ broken", encoding="utf-8")
-        assert fr.load_run_state(str(tmp_path)) == {"disregarded": [], "rule_fixes_applied": []}
+        assert fr.load_run_state(str(tmp_path)) == {
+            "disregarded": [],
+            "rule_fixes_applied": [],
+            "fixed": [],
+        }
 
     def test_load_run_state_non_dict_is_empty(self, tmp_path: Path) -> None:
         (tmp_path / "run-state.json").write_text("[1, 2]", encoding="utf-8")
-        assert fr.load_run_state(str(tmp_path)) == {"disregarded": [], "rule_fixes_applied": []}
+        assert fr.load_run_state(str(tmp_path)) == {
+            "disregarded": [],
+            "rule_fixes_applied": [],
+            "fixed": [],
+        }
 
     def test_load_run_state_stale_run_id_ignored(self, tmp_path: Path) -> None:
         fr.persist_disregard(str(tmp_path), "OLD-RUN", ["r1"])
@@ -1076,6 +1088,7 @@ class TestRunState:
         assert fr.load_run_state(str(tmp_path), expected_run_id="NEW-RUN") == {
             "disregarded": [],
             "rule_fixes_applied": [],
+            "fixed": [],
         }
         # Matching run_id => the state is honoured.
         assert fr.load_run_state(str(tmp_path), expected_run_id="OLD-RUN")["disregarded"] == ["r1"]
@@ -1088,6 +1101,7 @@ class TestRunState:
         assert fr.load_run_state(str(tmp_path), expected_run_id="RID") == {
             "disregarded": [],
             "rule_fixes_applied": [],
+            "fixed": [],
         }
         # ...but a raw read (no expected run_id) still surfaces it.
         assert fr.load_run_state(str(tmp_path))["disregarded"] == ["r1"]

@@ -3700,6 +3700,7 @@ def _canvas_finding_block(
     *,
     dim_reason: str | None = None,
     rule_deps: list[str] | None = None,
+    fixed: bool = False,
 ) -> str:
     """One ``.finding`` accordion block for the canvas (every text field escaped).
 
@@ -3726,6 +3727,13 @@ def _canvas_finding_block(
     A large/costly fix (``fix_complexity == "complex"``) additionally gets the
     ``costly`` row class (a subtle tint) and a ``fix-tag`` pill on the title —
     pure presentation, orthogonal to the verdict bucket.
+
+    ``fixed`` bakes the ``fixed`` class onto the block so a finding the orchestrator
+    has actually fixed (persisted in run state, read back by render-review) renders
+    as *done* (green ✓ + strikethrough) on every re-render. It is orthogonal to
+    ``dimmed`` (disregard / rule-fix invalidation): a row can be ``finding`` /
+    ``finding dimmed`` / ``finding fixed`` / ``finding fixed dimmed``, and when both
+    apply the two treatments stack with no precedence logic.
     """
     rid = finding.get("record_id", "")
     label = _finding_label(finding)
@@ -3783,6 +3791,8 @@ def _canvas_finding_block(
         title_html += f' <span class="dim-reason">{html.escape(str(dim_reason))}</span>'
 
     class_names = ["finding"]
+    if fixed:
+        class_names.append("fixed")
     if dimmed:
         class_names.append("dimmed")
     if costly:
@@ -3848,6 +3858,7 @@ def render_canvas_html(
     parent_origin: str = DEFAULT_PARENT_ORIGIN,
     *,
     invalidated: dict[str, str] | None = None,
+    fixed: set[str] | None = None,
 ) -> str:
     """Fill the canvas template with pre-rendered, escaped markup.
 
@@ -3876,6 +3887,12 @@ def render_canvas_html(
     invalidation keeps an audit trail. Both are passed as data (no file IO here) to
     keep this function pure and testable, mirroring ``details``.
 
+    ``fixed`` is the set of ``record_id``s persisted as fixed run state (read back
+    from ``run-state.json``); their ``.finding`` block gains the ``fixed`` class so
+    the canvas renders them as done (green ✓ + strikethrough) across re-renders. It
+    is orthogonal to ``disregarded``/``invalidated`` (which drive the dim), so a row
+    may carry both — the treatments stack.
+
     The rule-quality dependency map (:func:`_rule_dependency_map`) is computed from
     the envelope and threaded onto each row's ``data-rule-deps`` so the canvas can
     live-grey the rows a *scheduled* rule fix would invalidate — no agent round-trip.
@@ -3883,6 +3900,7 @@ def render_canvas_html(
     details = details or {}
     disregarded = disregarded or set()
     invalidated = invalidated or {}
+    fixed = fixed or set()
     run = data.get("run", {})
     findings = data.get("findings", [])
     notes = data.get("rule_quality_notes", []) or []
@@ -3905,6 +3923,7 @@ def render_canvas_html(
             dimmed=(rid in disregarded or reason is not None),
             dim_reason=reason,
             rule_deps=rule_deps.get(rid),
+            fixed=(rid in fixed),
         )
 
     meta = (
@@ -4055,13 +4074,17 @@ def render_review(args: argparse.Namespace) -> None:
     # canvas dims those findings on every re-render. Rule-fix invalidations
     # (`rule_fixes_applied`) are the sibling key: their `invalidated_record_ids` are
     # unioned in and dimmed with a reason ("invalidated — rule RQ# fixed"), reusing
-    # the same dim mechanism (an audit trail, not a hard drop). Fail-open (empty)
-    # when the state file is absent/unreadable or belongs to a different run_id.
+    # the same dim mechanism (an audit trail, not a hard drop). The `fixed` key
+    # (written by `validate-action --apply-fixed`) is the third sibling: its
+    # record_ids get the `.finding.fixed` "done" mark (orthogonal to the dim, so a
+    # row may carry both). Fail-open (empty) when the state file is absent/unreadable
+    # or belongs to a different run_id.
     run = data.get("run", {}) if isinstance(data, dict) else {}
     expected_run_id = run.get("run_id") if isinstance(run, dict) else None
     run_state = load_run_state(run_dir, expected_run_id=expected_run_id)
     disregarded = set(run_state.get("disregarded", []))
     invalidated = _invalidated_reasons(run_state.get("rule_fixes_applied", []))
+    fixed = set(run_state.get("fixed", []))
 
     # Render both artifacts in memory, THEN write — so any render-time failure
     # also leaves no partial output. review.md is Markdown (raw text fields, no
@@ -4069,7 +4092,8 @@ def render_review(args: argparse.Namespace) -> None:
     # Treemon is down).
     review_md = render_review_markdown(data)
     canvas_html = render_canvas_html(
-        data, template, details, disregarded, parent_origin, invalidated=invalidated
+        data, template, details, disregarded, parent_origin,
+        invalidated=invalidated, fixed=fixed,
     )
     # Persist the enriched records.json (the display-layer is now the single
     # source of truth read by validate-action / post-comments). Written in the
@@ -4160,15 +4184,16 @@ def _sanitize_rule_fixes(raw: object) -> list[dict]:
 def load_run_state(run_dir: str | None, expected_run_id: str | None = None) -> dict:
     """Read ``{run_dir}/run-state.json``; fail-open to an empty state.
 
-    The persisted run state holds the ``disregarded`` record_ids the canvas dims
-    on every re-render and the sibling ``rule_fixes_applied`` entries (each
-    ``{rule_id, rule_source, invalidated_record_ids[]}``) whose invalidated rows are
-    dimmed with a reason. Any read/parse problem — or a ``run_id`` that does not
+    The persisted run state holds three sibling decision keys: the ``disregarded``
+    record_ids the canvas dims on every re-render, the ``rule_fixes_applied`` entries
+    (each ``{rule_id, rule_source, invalidated_record_ids[]}``) whose invalidated rows
+    are dimmed with a reason, and the ``fixed`` record_ids the canvas marks done (a
+    ``.finding.fixed`` row). Any read/parse problem — or a ``run_id`` that does not
     match *expected_run_id* (stale state from a different run) — yields an empty
-    state: the dim is an additive canvas affordance, never a hard dependency, so a
+    state: these marks are additive canvas affordances, never a hard dependency, so a
     missing or unreadable file must never block the always-written canvas.
     """
-    empty: dict = {"disregarded": [], "rule_fixes_applied": []}
+    empty: dict = {"disregarded": [], "rule_fixes_applied": [], "fixed": []}
     path = _run_state_path(run_dir)
     try:
         with open(path, encoding="utf-8") as fh:
@@ -4187,9 +4212,12 @@ def load_run_state(run_dir: str | None, expected_run_id: str | None = None) -> d
             return empty
     raw = data.get("disregarded")
     disregarded = [r for r in raw if _is_nonempty_str(r)] if isinstance(raw, list) else []
+    raw_fixed = data.get("fixed")
+    fixed = [r for r in raw_fixed if _is_nonempty_str(r)] if isinstance(raw_fixed, list) else []
     return {
         "disregarded": disregarded,
         "rule_fixes_applied": _sanitize_rule_fixes(data.get("rule_fixes_applied")),
+        "fixed": fixed,
     }
 
 
@@ -4198,19 +4226,21 @@ def _write_run_state(
     run_id: str,
     disregarded: list[str],
     rule_fixes_applied: list[dict],
+    fixed: list[str] | None = None,
 ) -> dict:
-    """Serialize the full run-state envelope (both sibling keys) and write it.
+    """Serialize the full run-state envelope (all sibling keys) and write it.
 
-    Both persist helpers route through here so writing one key always preserves
-    the other — applying a disregard never wipes the recorded rule fixes, and
-    vice-versa. The shape is ``{schema_version, run_id, disregarded[],
-    rule_fixes_applied[]}``.
+    All three persist helpers route through here so writing one key always
+    preserves the others — applying a disregard never wipes the recorded rule fixes
+    or the fixed set, and vice-versa. The shape is ``{schema_version, run_id,
+    disregarded[], rule_fixes_applied[], fixed[]}``.
     """
     state = {
         "schema_version": RECORDS_SCHEMA_VERSION,
         "run_id": run_id,
         "disregarded": list(disregarded),
         "rule_fixes_applied": list(rule_fixes_applied),
+        "fixed": list(fixed or []),
     }
     _write_text(_run_state_path(run_dir), json.dumps(state, indent=2) + "\n")
     return state
@@ -4221,9 +4251,10 @@ def persist_disregard(run_dir: str | None, run_id: str, record_ids: list[str]) -
 
     Disregard is monotonic within a run (add-only): the existing set is preserved
     and new ids appended in first-seen order, so render-review re-applies the dim
-    on every subsequent re-render. The sibling ``rule_fixes_applied`` key is read
-    back and re-written untouched. Returns the persisted state dict. The caller is
-    expected to have validated *record_ids* (via :func:`validate_action`) first.
+    on every subsequent re-render. The sibling ``rule_fixes_applied`` and ``fixed``
+    keys are read back and re-written untouched. Returns the persisted state dict.
+    The caller is expected to have validated *record_ids* (via
+    :func:`validate_action`) first.
     """
     existing = load_run_state(run_dir, expected_run_id=run_id)
     disregarded = list(existing.get("disregarded", []))
@@ -4233,7 +4264,11 @@ def persist_disregard(run_dir: str | None, run_id: str, record_ids: list[str]) -
             seen.add(rid)
             disregarded.append(rid)
     return _write_run_state(
-        run_dir, run_id, disregarded, existing.get("rule_fixes_applied", [])
+        run_dir,
+        run_id,
+        disregarded,
+        existing.get("rule_fixes_applied", []),
+        existing.get("fixed", []),
     )
 
 
@@ -4243,10 +4278,10 @@ def persist_rule_fixes(run_dir: str | None, run_id: str, fixes: list[dict]) -> d
     Mirrors :func:`persist_disregard`. Each fix is ``{rule_id, rule_source,
     invalidated_record_ids[]}``; entries are merged by ``rule_id`` (a re-applied
     rule unions its invalidated ids, never duplicating or dropping), new rules are
-    appended in first-seen order, and the sibling ``disregarded`` set is preserved.
-    render-review then re-applies the invalidation dim on every subsequent
-    re-render. The caller (the validate-action round-trip) is expected to have
-    resolved the ids via :func:`_rule_dependency_map` first.
+    appended in first-seen order, and the sibling ``disregarded`` and ``fixed`` sets
+    are preserved. render-review then re-applies the invalidation dim on every
+    subsequent re-render. The caller (the validate-action round-trip) is expected to
+    have resolved the ids via :func:`_rule_dependency_map` first.
     """
     existing = load_run_state(run_dir, expected_run_id=run_id)
     applied = [dict(e) for e in existing.get("rule_fixes_applied", [])]
@@ -4271,7 +4306,41 @@ def persist_rule_fixes(run_dir: str | None, run_id: str, fixes: list[dict]) -> d
             if rid not in seen:
                 seen.add(rid)
                 entry["invalidated_record_ids"].append(rid)
-    return _write_run_state(run_dir, run_id, existing.get("disregarded", []), applied)
+    return _write_run_state(
+        run_dir,
+        run_id,
+        existing.get("disregarded", []),
+        applied,
+        existing.get("fixed", []),
+    )
+
+
+def persist_fixed(run_dir: str | None, run_id: str, record_ids: list[str]) -> dict:
+    """Merge *record_ids* into the run-state's fixed set and write it.
+
+    Mirrors :func:`persist_disregard`. ``fixed`` is monotonic within a run
+    (add-only): the existing set is preserved and new ids appended in first-seen
+    order, so render-review re-applies the ``.finding.fixed`` mark on every
+    subsequent re-render. The sibling ``disregarded`` and ``rule_fixes_applied``
+    keys are read back and re-written untouched (the shared :func:`_write_run_state`
+    writes all four keys, so marking a finding fixed never wipes the recorded
+    disregards or rule fixes). Returns the persisted state dict. The caller is
+    expected to have validated *record_ids* (via :func:`validate_action`) first.
+    """
+    existing = load_run_state(run_dir, expected_run_id=run_id)
+    fixed = list(existing.get("fixed", []))
+    seen = set(fixed)
+    for rid in record_ids:
+        if _is_nonempty_str(rid) and rid not in seen:
+            seen.add(rid)
+            fixed.append(rid)
+    return _write_run_state(
+        run_dir,
+        run_id,
+        existing.get("disregarded", []),
+        existing.get("rule_fixes_applied", []),
+        fixed,
+    )
 
 
 def _invalidated_reasons(rule_fixes_applied: object) -> dict[str, str]:
