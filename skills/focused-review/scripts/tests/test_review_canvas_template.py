@@ -28,10 +28,10 @@ PLACEHOLDERS = [
     "<!-- FR:SUMMARY_BADGES -->",
     "<!-- FR:CONFIRMED_COUNT -->",
     "<!-- FR:CONFIRMED_ROWS -->",
-    "<!-- FR:QUESTIONABLE_COUNT -->",
-    "<!-- FR:QUESTIONABLE_ROWS -->",
-    "<!-- FR:INVALID_SUMMARY -->",
-    "<!-- FR:INVALID_ROWS -->",
+    "<!-- FR:NEEDS_DECISION_COUNT -->",
+    "<!-- FR:NEEDS_DECISION_ROWS -->",
+    "<!-- FR:PREEXISTING_COUNT -->",
+    "<!-- FR:PREEXISTING_ROWS -->",
     "<!-- FR:QUALITY_SUMMARY -->",
     "<!-- FR:QUALITY_NOTES -->",
 ]
@@ -149,6 +149,73 @@ def test_template_defines_palette_class(template_text: str, cls: str):
     assert cls in template_text, f"palette class {cls!r} not defined in template CSS"
 
 
+# ── verdict-model sections: confirmed / needs-decision / pre-existing, no invalid ──
+
+
+VISIBLE_SECTIONS = ["confirmed", "needs-decision", "pre-existing"]
+
+
+@pytest.mark.parametrize("section", VISIBLE_SECTIONS)
+def test_template_has_visible_section(template_text: str, section: str):
+    # The three visible buckets each get a labelled <section> shell.
+    assert f'data-section="{section}"' in template_text, f"template missing section {section!r}"
+
+
+@pytest.mark.parametrize("dropped", ["invalid", "questionable"])
+def test_template_drops_old_sections(template_text: str, dropped: str):
+    # Invalid is records-only (D-15); "Questionable" was relabelled "Needs your decision".
+    assert f'data-section="{dropped}"' not in template_text
+
+
+def test_template_has_no_invalid_markers(template_text: str):
+    # No Invalid section header, badge, or fill markers survive anywhere in the shell.
+    assert "FR:INVALID" not in template_text
+    assert "FR:QUESTIONABLE" not in template_text
+    assert ".badge-invalid" not in template_text
+    assert ".invalid-table" not in template_text
+
+
+def test_template_section_order_confirmed_then_decision_then_preexisting(template_text: str):
+    # D-17 canvas order: Confirmed → Needs your decision → Pre-existing.
+    i_conf = template_text.index('data-section="confirmed"')
+    i_need = template_text.index('data-section="needs-decision"')
+    i_pre = template_text.index('data-section="pre-existing"')
+    assert i_conf < i_need < i_pre
+
+
+# ── fix-cost tag (visual large-fix marker) ───────────────────────────────────
+
+
+def test_template_defines_fix_tag_css(template_text: str):
+    # The large-fix tag pill and its row tint must be styleable in the shell.
+    assert ".fix-tag" in template_text
+    assert ".finding.costly" in template_text
+
+
+def test_fixture_defines_fix_tag_css(fixture_text: str):
+    assert ".fix-tag" in fixture_text
+    assert ".finding.costly" in fixture_text
+
+
+def test_fixture_exercises_fix_tag(fixture_text: str):
+    # The hand-filled twin marks at least one finding as a large fix so the tag +
+    # tint are exercised by the browser test.
+    assert 'class="finding costly"' in fixture_text
+    assert 'class="fix-tag"' in fixture_text
+
+
+@pytest.mark.parametrize("section", VISIBLE_SECTIONS)
+def test_fixture_has_visible_section(fixture_text: str, section: str):
+    assert f'data-section="{section}"' in fixture_text, f"fixture missing section {section!r}"
+
+
+def test_fixture_has_no_invalid_section(fixture_text: str):
+    # The fixture renders no Invalid section or table (records-only, D-15).
+    assert 'data-section="invalid"' not in fixture_text
+    assert "invalid-section" not in fixture_text
+    assert "invalid-table" not in fixture_text
+
+
 # ── accordion via <details>/<summary> ────────────────────────────────────────
 
 
@@ -169,11 +236,36 @@ def test_script_uses_document_level_delegation(template_text: str):
     assert "document.addEventListener" in template_text
 
 
-def test_script_posts_namespaced_action_payload(template_text: str):
+def test_script_posts_unified_action_payload(template_text: str):
     assert "window.parent.postMessage" in template_text
-    # payload shape: { action, run_id, record_ids[], instructions }
-    for key in ("action:", "run_id:", "record_ids:", "instructions:"):
+    # Unified, prefix-disambiguated payload (verdict-model redesign):
+    #   { ids: [f#/rq#], button: "<bare verb>", text: "<free text>", run_id }
+    for key in ("ids:", "button:", "text:", "run_id:"):
         assert key in template_text, f"postMessage payload missing {key!r}"
+    # The legacy keys are gone — this is an API migration, not an additive change,
+    # so the old shape ({ action, record_ids, instructions }) must not linger.
+    for legacy in ("action:", "record_ids:", "instructions:"):
+        assert legacy not in template_text, f"legacy payload key {legacy!r} still present"
+    # ids unions the selected findings (f#) with the scheduled rule fixes (rq#),
+    # button is the bare verb (the namespace prefix sliced off), text is the box.
+    assert "Array.from(state.selected).concat(Array.from(state.scheduledRules))" in template_text
+    assert "button: action.slice(NS.length)" in template_text
+    assert "text: instructions()" in template_text
+
+
+def test_script_enables_bar_for_findings_or_rules(template_text: str, fixture_text: str):
+    # The action bar must enable on a findings-only, rules-only, OR mixed selection so
+    # a rule-quality-only fix can be dispatched; both ends count the union of the two.
+    for text in (template_text, fixture_text):
+        assert "state.selected.size + state.scheduledRules.size" in text
+
+
+def test_script_clears_scheduled_rules_on_dispatch(template_text: str, fixture_text: str):
+    # Dispatch resets BOTH selections (findings + scheduled rule fixes) and re-derives
+    # the live preview, so a follow-up action starts clean and the persisted dim (from
+    # the agent's re-render) becomes the only post-action source of truth.
+    for text in (template_text, fixture_text):
+        assert "state.scheduledRules.clear()" in text
 
 
 @pytest.mark.parametrize("action", NAMESPACED_ACTIONS)
@@ -288,7 +380,7 @@ def test_fixture_uses_exclusive_accordion(fixture_text: str):
 def test_fixture_checkbox_outside_summary(fixture_text: str):
     # the per-row checkbox must precede <details>, never inside <summary>,
     # so selecting a finding never toggles its accordion.
-    block = fixture_text.split('data-record-id="A-01"', 1)[1]
+    block = fixture_text.split('data-record-id="f1"', 1)[1]
     cb = block.index('class="row-cb"')
     details = block.index("<details")
     assert cb < details

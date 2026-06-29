@@ -48,8 +48,8 @@
   }
   .summary-badge .count { font-size: 16px; margin-right: 4px; }
   .badge-confirmed { background: #a6e3a122; color: #a6e3a1; }
-  .badge-questionable { background: #f9e2af22; color: #f9e2af; }
-  .badge-invalid { background: #6c708622; color: #6c7086; }
+  .badge-needs-decision { background: #f9e2af22; color: #f9e2af; }
+  .badge-preexisting { background: #89dceb22; color: #89dceb; }
 
   .review-list { width: 100%; }
   .list-header {
@@ -150,6 +150,36 @@
 
   .finding.dimmed { opacity: 0.35; }
   .finding.dimmed .title { text-decoration: line-through; }
+
+  .finding.pending-invalid { opacity: 0.35; }
+  .finding.pending-invalid .title { text-decoration: line-through; }
+
+  .dim-reason {
+    display: inline-block;
+    margin-left: 6px;
+    padding: 0 7px;
+    border-radius: 8px;
+    font-size: 11px;
+    font-weight: 600;
+    white-space: nowrap;
+    background: #45475a;
+    color: #bac2de;
+    vertical-align: middle;
+  }
+
+  .finding.costly { background: #fab38710; }
+  .fix-tag {
+    display: inline-block;
+    margin-left: 6px;
+    padding: 0 7px;
+    border-radius: 8px;
+    font-size: 11px;
+    font-weight: 600;
+    white-space: nowrap;
+    background: #fab38722;
+    color: #fab387;
+    vertical-align: middle;
+  }
 
   .detail-content {
     background: #11111b;
@@ -294,22 +324,17 @@
   .collapsible[open] > .collapsible-summary::before { content: '▾ '; }
   .collapsible-body { padding: 0 16px 12px; }
 
-  .invalid-table { width: 100%; border-collapse: collapse; font-size: 13px; }
-  .invalid-table th {
-    text-align: left;
-    padding: 6px 8px;
-    color: #6c7086;
-    border-bottom: 1px solid #45475a;
-    font-weight: 600;
-  }
-  .invalid-table td {
-    padding: 6px 8px;
-    border-bottom: 1px solid #31324488;
-    color: #a6adc8;
-  }
-
   .quality-item { margin: 8px 0; color: #a6adc8; }
   .quality-item strong { color: #f9e2af; }
+  .quality-cb {
+    accent-color: #89b4fa;
+    width: 15px;
+    height: 15px;
+    cursor: pointer;
+    margin-right: 6px;
+    vertical-align: middle;
+  }
+  .quality-id { color: #f9e2af; font-weight: 600; margin-right: 2px; }
 
   .action-bar {
     position: fixed;
@@ -366,6 +391,7 @@
   var state = {
     selected: new Set(),
     disregarded: new Set(),
+    scheduledRules: new Set(),
     openId: null
   };
 
@@ -397,15 +423,20 @@
   }
 
   function updateBar() {
-    var n = state.selected.size;
+    // Findings + scheduled rule fixes both count, so the bar enables for a
+    // findings-only, rules-only, or mixed action.
+    var n = state.selected.size + state.scheduledRules.size;
     var c = document.querySelector("[data-sel-count]");
     if (c) c.textContent = n + " selected";
     all("[data-action]").forEach(function (b) { b.disabled = n === 0; });
   }
 
+  // Actionable rows only: section select-all skips .dimmed / .pending-invalid findings.
+  var ACTIONABLE_ROW_CB = ".finding:not(.dimmed):not(.pending-invalid) .row-cb";
+
   function syncSections() {
     all(".finding-section").forEach(function (sec) {
-      var cbs = all(".row-cb", sec);
+      var cbs = all(ACTIONABLE_ROW_CB, sec);
       var total = cbs.length, checked = 0;
       cbs.forEach(function (cb) { if (cb.checked) checked++; });
       var sc = sec.querySelector(".section-cb");
@@ -416,10 +447,39 @@
     });
   }
 
+  // Live rule-fix preview: grey every finding whose ENTIRE rule-source set is
+  // scheduled to be fixed. data-rule-deps (from _rule_dependency_map) lists the RQ
+  // ids a row depends on; the row greys only once they are all checked. Pure
+  // client-side — no agent round-trip — and a distinct class from the persisted dim.
+  function applyRulePreview() {
+    all(".finding[data-rule-deps]").forEach(function (f) {
+      var deps = (f.getAttribute("data-rule-deps") || "").split(/\s+/).filter(Boolean);
+      var dies = deps.length > 0 && deps.every(function (rq) { return state.scheduledRules.has(rq); });
+      f.classList.toggle("pending-invalid", dies);
+      if (dies) {
+        // Now non-actionable: drop any prior selection and clear the checkbox so a
+        // scheduled rule fix can't leave this finding's id in the next posted payload.
+        var id = f.getAttribute("data-record-id");
+        if (id) state.selected.delete(id);
+        var cb = f.querySelector(".row-cb");
+        if (cb) cb.checked = false;
+      }
+    });
+  }
+
   document.addEventListener("change", function (e) {
     var t = e.target;
     if (!t || !t.classList) return;
     if (t.classList.contains("row-cb")) {
+      // Actionable rows only: a dimmed (disregarded) or pending-invalid (rule-fix
+      // scheduled) row is non-actionable, so refuse a manual check rather than let
+      // its id enter state.selected / the posted payload — the same contract
+      // ACTIONABLE_ROW_CB enforces for the section select-all.
+      var f = t.closest(".finding");
+      if (t.checked && f && (f.classList.contains("dimmed") || f.classList.contains("pending-invalid"))) {
+        t.checked = false;
+        return;
+      }
       var id = recordId(t);
       if (id) { if (t.checked) state.selected.add(id); else state.selected.delete(id); }
       syncSections();
@@ -427,35 +487,48 @@
     } else if (t.classList.contains("section-cb")) {
       var sec = t.closest(".finding-section");
       if (!sec) return;
-      all(".row-cb", sec).forEach(function (cb) {
+      all(ACTIONABLE_ROW_CB, sec).forEach(function (cb) {
         cb.checked = t.checked;
         var rid = recordId(cb);
         if (rid) { if (t.checked) state.selected.add(rid); else state.selected.delete(rid); }
       });
       syncSections();
       updateBar();
+    } else if (t.classList.contains("quality-cb")) {
+      var rq = t.getAttribute("data-rq-id");
+      if (rq) { if (t.checked) state.scheduledRules.add(rq); else state.scheduledRules.delete(rq); }
+      applyRulePreview();
+      // The preview may have cleared selections that just became pending-invalid,
+      // so re-sync the section select-all tri-state to match.
+      syncSections();
+      updateBar();
     }
   });
 
+  // Action buttons → postMessage to the Treemon parent. Unified prefix-disambiguated
+  // payload: ids (f# findings + rq# rule fixes), button (bare verb), text, run_id.
   document.addEventListener("click", function (e) {
     var btn = e.target && e.target.closest ? e.target.closest("[data-action]") : null;
     if (!btn || btn.disabled) return;
     var action = btn.getAttribute("data-action") || "";
     if (action.indexOf(NS) !== 0) return;
-    var ids = Array.from(state.selected);
+    var ids = Array.from(state.selected).concat(Array.from(state.scheduledRules));
     if (!ids.length) return;
 
     window.parent.postMessage({
-      action: action,
-      run_id: getRunId(),
-      record_ids: ids,
-      instructions: instructions()
+      ids: ids,
+      button: action.slice(NS.length),
+      text: instructions(),
+      run_id: getRunId()
     }, getParentOrigin());
 
     // No optimistic disregard dimming (C-17): dimming is server-seeded via restoreState.
 
     state.selected.clear();
+    state.scheduledRules.clear();
     all(".row-cb").forEach(function (cb) { cb.checked = false; });
+    all(".quality-cb").forEach(function (cb) { cb.checked = false; });
+    applyRulePreview();
     syncSections();
     updateBar();
   });
@@ -501,6 +574,16 @@
         if (d && !d.open) d.open = true;
       }
     });
+    // Re-apply the rule-fix preview after a morph: prune scheduled RQ ids to those
+    // still present, re-check their boxes, and re-grey the rows their combined fix
+    // would kill (a fresh DOM loses the transient class until we re-derive it).
+    var presentRq = new Set();
+    all(".quality-cb").forEach(function (cb) { presentRq.add(cb.getAttribute("data-rq-id")); });
+    pruneTo(state.scheduledRules, presentRq);
+    all(".quality-cb").forEach(function (cb) {
+      cb.checked = state.scheduledRules.has(cb.getAttribute("data-rq-id"));
+    });
+    applyRulePreview();
     syncSections();
     updateBar();
   }
@@ -531,8 +614,8 @@
   <div class="meta">Scope: branch · 2026-06-04 · 17 rules + 7 concerns → 23 unique → 5 actionable</div>
   <div class="summary-badges">
     <span class="summary-badge badge-confirmed"><span class="count">3</span> Confirmed</span>
-    <span class="summary-badge badge-questionable"><span class="count">2</span> Questionable</span>
-    <span class="summary-badge badge-invalid"><span class="count">2</span> Invalid</span>
+    <span class="summary-badge badge-needs-decision"><span class="count">2</span> Needs your decision</span>
+    <span class="summary-badge badge-preexisting"><span class="count">1</span> Pre-existing</span>
   </div>
 </div>
 
@@ -552,12 +635,12 @@
       <span class="section-title">Confirmed Findings (3)</span>
     </div>
 
-    <div class="finding" data-record-id="A-01">
-      <input type="checkbox" class="row-cb" aria-label="Select finding 1: Incremental refresh forces dashboard visible even when Issues tab is selected">
+    <div class="finding" data-record-id="f1">
+      <input type="checkbox" class="row-cb" aria-label="Select finding F1: Incremental refresh forces dashboard visible even when Issues tab is selected">
       <details class="finding-d" name="findings">
         <summary class="finding-summary">
           <span class="caret" aria-hidden="true"></span>
-          <span class="num">1</span>
+          <span class="num">F1</span>
           <span class="sev sev-high">High</span>
           <span class="found-by"><span class="found-tag found-tag-concern">bugs(opus,codex)</span></span>
           <span class="title">Incremental refresh forces dashboard visible even when Issues tab is selected</span>
@@ -590,20 +673,20 @@ newDashView.classList.add('active');             // unconditional
       </details>
     </div>
 
-    <div class="finding" data-record-id="A-02">
-      <input type="checkbox" class="row-cb" aria-label="Select finding 2: Blocked-only bead sets treated as no issues - deletes dashboard file">
+    <div class="finding costly" data-record-id="f2">
+      <input type="checkbox" class="row-cb" aria-label="Select finding F2: Blocked-only bead sets treated as no issues - deletes dashboard file">
       <details class="finding-d" name="findings">
         <summary class="finding-summary">
           <span class="caret" aria-hidden="true"></span>
-          <span class="num">2</span>
+          <span class="num">F2</span>
           <span class="sev sev-high">High</span>
           <span class="found-by"><span class="found-tag found-tag-concern">bugs(opus,codex)</span></span>
-          <span class="title">Blocked-only bead sets treated as "no issues" — deletes dashboard file</span>
+          <span class="title">Blocked-only bead sets treated as "no issues" — deletes dashboard file <span class="fix-tag">⚠ Large fix</span></span>
         </summary>
         <div class="detail-content">
           <div class="detail-section">
             <div class="detail-label">Location</div>
-            <span class="detail-file">src/Server/RefreshScheduler.fs:457</span> · quickfix
+            <span class="detail-file">src/Server/RefreshScheduler.fs:457</span> · complex
           </div>
           <div class="detail-section">
             <div class="detail-label">Description</div>
@@ -621,12 +704,12 @@ newDashView.classList.add('active');             // unconditional
       </details>
     </div>
 
-    <div class="finding" data-record-id="A-03">
-      <input type="checkbox" class="row-cb" aria-label="Select finding 3: Dead data-stat update code immediately overwritten by full DOM rebuild">
+    <div class="finding" data-record-id="f3">
+      <input type="checkbox" class="row-cb" aria-label="Select finding F3: Dead data-stat update code immediately overwritten by full DOM rebuild">
       <details class="finding-d" name="findings">
         <summary class="finding-summary">
           <span class="caret" aria-hidden="true"></span>
-          <span class="num">3</span>
+          <span class="num">F3</span>
           <span class="sev sev-medium">Medium</span>
           <span class="found-by"><span class="found-tag found-tag-concern">arch(opus)</span><span class="found-tag found-tag-rule">simplicity</span></span>
           <span class="title">Dead data-stat update code immediately overwritten by full DOM rebuild</span>
@@ -671,18 +754,18 @@ replaceChild(view-dashboard)</div>
     </div>
   </section>
 
-  <section class="finding-section" data-section="questionable">
+  <section class="finding-section" data-section="needs-decision">
     <div class="section-header">
-      <input type="checkbox" class="section-cb" aria-label="Select all questionable findings">
-      <span class="section-title">Questionable Findings (2)</span>
+      <input type="checkbox" class="section-cb" aria-label="Select all needs-your-decision findings">
+      <span class="section-title">Needs Your Decision (2)</span>
     </div>
 
-    <div class="finding" data-record-id="A-18">
-      <input type="checkbox" class="row-cb" aria-label="Select finding 4: esc() HTML escaper insufficient for attribute context">
+    <div class="finding" data-record-id="f4">
+      <input type="checkbox" class="row-cb" aria-label="Select finding F4: esc() HTML escaper insufficient for attribute context">
       <details class="finding-d" name="findings">
         <summary class="finding-summary">
           <span class="caret" aria-hidden="true"></span>
-          <span class="num">4</span>
+          <span class="num">F4</span>
           <span class="sev sev-low">Low</span>
           <span class="found-by"><span class="found-tag found-tag-concern">security(opus)</span></span>
           <span class="title">esc() HTML escaper insufficient for attribute context — double quotes not escaped</span>
@@ -708,12 +791,12 @@ replaceChild(view-dashboard)</div>
       </details>
     </div>
 
-    <div class="finding" data-record-id="A-20">
-      <input type="checkbox" class="row-cb" aria-label="Select finding 5: Section divider comment in production code at line 1481">
+    <div class="finding" data-record-id="f5" data-rule-deps="rq2">
+      <input type="checkbox" class="row-cb" aria-label="Select finding F5: Section divider comment in production code at line 1481">
       <details class="finding-d" name="findings">
         <summary class="finding-summary">
           <span class="caret" aria-hidden="true"></span>
-          <span class="num">5</span>
+          <span class="num">F5</span>
           <span class="sev sev-low">Low</span>
           <span class="found-by"><span class="found-tag found-tag-rule">no-unnecessary-comments</span></span>
           <span class="title">Section divider comment in production code at line 1481</span>
@@ -726,28 +809,51 @@ replaceChild(view-dashboard)</div>
       </details>
     </div>
   </section>
-</div>
 
-<details class="collapsible invalid-section">
-  <summary class="collapsible-summary">2 findings filtered as invalid</summary>
-  <div class="collapsible-body">
-    <table class="invalid-table">
-      <thead>
-        <tr><th>ID</th><th>Sev</th><th>Title</th><th>Reason</th></tr>
-      </thead>
-      <tbody>
-        <tr><td>A-09</td><td><span class="sev sev-medium">Med</span></td><td>updateDashboard mixes two DOM update strategies</td><td>Rule exempts sequential steps of a single cohesive operation</td></tr>
-        <tr><td>A-13</td><td><span class="sev sev-low">Low</span></td><td>Section divider at line 1454</td><td>Navigational aid in 600+ line embedded JS</td></tr>
-      </tbody>
-    </table>
-  </div>
-</details>
+  <section class="finding-section" data-section="pre-existing">
+    <div class="section-header">
+      <input type="checkbox" class="section-cb" aria-label="Select all pre-existing findings">
+      <span class="section-title">Pre-existing — non-gating (1)</span>
+    </div>
+
+    <div class="finding" data-record-id="f6">
+      <input type="checkbox" class="row-cb" aria-label="Select finding F6: SQL string built by concatenation in legacy export path">
+      <details class="finding-d" name="findings">
+        <summary class="finding-summary">
+          <span class="caret" aria-hidden="true"></span>
+          <span class="num">F6</span>
+          <span class="sev sev-medium">Medium</span>
+          <span class="found-by"><span class="found-tag found-tag-concern">security(opus)</span></span>
+          <span class="title">SQL string built by concatenation in legacy export path</span>
+        </summary>
+        <div class="detail-content">
+          <div class="detail-section">
+            <div class="detail-label">Location</div>
+            <span class="detail-file">src/Server/ExportService.fs:212</span> · moderate
+          </div>
+          <div class="detail-section">
+            <div class="detail-label">Description</div>
+            <p>The export query interpolates <code>reportName</code> straight into the SQL text. The value is operator-supplied today, but the pattern is fragile.</p>
+          </div>
+          <div class="detail-assessment">
+            <div class="detail-label">Assessment</div>
+            <p>Real and worth fixing, but <strong>not introduced by this change</strong> — the concatenation predates the diff. Surfaced here as net-positive, non-gating context.</p>
+          </div>
+          <div class="detail-suggestion">
+            <div class="detail-label">Suggestion</div>
+            <p>Parameterize the export query when this module is next touched.</p>
+          </div>
+        </div>
+      </details>
+    </div>
+  </section>
+</div>
 
 <details class="collapsible quality-notes" open>
   <summary class="collapsible-summary">Rule Quality Notes (2)</summary>
   <div class="collapsible-body">
-    <div class="quality-item"><strong>single-responsibility</strong>: 4 findings, all Invalid. Each flagged sequential steps of a single cohesive operation, which the rule explicitly exempts. — Add examples of exempted orchestrator patterns to the rule's "Right" section.</div>
-    <div class="quality-item"><strong>no-unnecessary-comments</strong>: 10 findings; 4 Invalid, 4 Questionable, 2 Confirmed (Low). Mostly navigational comments in embedded JavaScript inside an F# string template. — Consider an exception for embedded template code.</div>
+    <div class="quality-item" data-rq-id="rq1"><input type="checkbox" class="quality-cb" data-rq-id="rq1" aria-label="Schedule rule fix RQ1: single-responsibility"><span class="quality-id">RQ1</span> <strong>single-responsibility</strong>: 4 findings, all Invalid. Each flagged sequential steps of a single cohesive operation, which the rule explicitly exempts. — Add examples of exempted orchestrator patterns to the rule's "Right" section.</div>
+    <div class="quality-item" data-rq-id="rq2"><input type="checkbox" class="quality-cb" data-rq-id="rq2" aria-label="Schedule rule fix RQ2: no-unnecessary-comments"><span class="quality-id">RQ2</span> <strong>no-unnecessary-comments</strong>: 10 findings; 4 Invalid, 4 Questionable, 2 Confirmed (Low). Mostly navigational comments in embedded JavaScript inside an F# string template. — Consider an exception for embedded template code.</div>
   </div>
 </details>
 

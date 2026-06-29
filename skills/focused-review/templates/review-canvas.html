@@ -18,28 +18,39 @@
                                     messages, so the action-bar channel is origin-validated
                                     (never the wildcard "*"). Default http://localhost:5000.
     <!-- FR:META -->                header meta line (scope · date · rule/concern counts).
-    <!-- FR:SUMMARY_BADGES -->      confirmed/questionable/invalid count badges.
+    <!-- FR:SUMMARY_BADGES -->      confirmed/needs-decision/pre-existing count badges.
     <!-- FR:CONFIRMED_COUNT -->     integer shown in the Confirmed section header.
     <!-- FR:CONFIRMED_ROWS -->      one ".finding" block per confirmed finding (see shape below).
-    <!-- FR:QUESTIONABLE_COUNT -->  integer shown in the Questionable section header.
-    <!-- FR:QUESTIONABLE_ROWS -->   one ".finding" block per questionable finding.
-    <!-- FR:INVALID_SUMMARY -->     e.g. "9 findings filtered as invalid".
-    <!-- FR:INVALID_ROWS -->        <tr>…</tr> rows for the invalid-findings table.
+    <!-- FR:NEEDS_DECISION_COUNT -->  integer shown in the Needs-your-decision section header.
+    <!-- FR:NEEDS_DECISION_ROWS -->   one ".finding" block per needs-your-decision finding.
+    <!-- FR:PREEXISTING_COUNT -->   integer shown in the Pre-existing section header.
+    <!-- FR:PREEXISTING_ROWS -->    one ".finding" block per pre-existing (non-gating) finding.
     <!-- FR:QUALITY_SUMMARY -->     e.g. "Rule Quality Notes (2)".
-    <!-- FR:QUALITY_NOTES -->       ".quality-item" blocks.
+    <!-- FR:QUALITY_NOTES -->       ".quality-item" blocks. Each note with an rq# id carries a
+                                    "quality-cb" checkbox (data-rq-id="rq#", visible label "RQ#");
+                                    checking it live-greys the findings whose entire rule-source
+                                    set is scheduled to be fixed (client-only preview, no round-trip).
+
+  Invalid findings are NEVER rendered (no Invalid section, badge, or summary row); they
+  stay in records.json only. A finding's verdict bucket is decided server-side from its
+  display_bucket, so the template just provides the three visible sections below.
 
   The HTML-comment placeholders are forge-proof: html.escape() turns "<" into "&lt;",
   so escaped finding text can never reproduce a "<!-- FR:* -->" marker. Replace each
   marker exactly once (a single-pass regex substitution is safest).
 
-  Per-finding ".finding" block shape (Python emits this into the *_ROWS placeholders):
+  Per-finding ".finding" block shape (Python emits this into the *_ROWS placeholders).
+  data-record-id carries the lowercase f# id; the ".num" badge shows it uppercased (F2):
 
-    <div class="finding" data-record-id="STABLE_RECORD_ID">
-      <input type="checkbox" class="row-cb" aria-label="Select finding N: TITLE">
+    <div class="finding" data-record-id="f2">
+      <!-- a costly fix adds class "costly"; a persisted disregard/invalidation adds
+           "dimmed"; a finding a rule fix could kill adds data-rule-deps="rq1 rq2"
+           (the rq ids that must ALL be checked to live-grey it). -->
+      <input type="checkbox" class="row-cb" aria-label="Select finding F2: TITLE">
       <details class="finding-d" name="findings">
         <summary class="finding-summary">
           <span class="caret" aria-hidden="true"></span>
-          <span class="num">N</span>
+          <span class="num">F2</span>
           <span class="sev sev-high">High</span>
           <span class="found-by"><span class="found-tag found-tag-concern">bugs(opus)</span></span>
           <span class="title">TITLE</span>
@@ -121,8 +132,8 @@
   }
   .summary-badge .count { font-size: 16px; margin-right: 4px; }
   .badge-confirmed { background: #a6e3a122; color: #a6e3a1; }
-  .badge-questionable { background: #f9e2af22; color: #f9e2af; }
-  .badge-invalid { background: #6c708622; color: #6c7086; }
+  .badge-needs-decision { background: #f9e2af22; color: #f9e2af; }
+  .badge-preexisting { background: #89dceb22; color: #89dceb; }
 
   /* ── List header (column titles) ────────────────────────────────────────── */
   .review-list { width: 100%; }
@@ -141,7 +152,7 @@
     z-index: 10;
   }
 
-  /* ── Section (Confirmed / Questionable) ─────────────────────────────────── */
+  /* ── Section (Confirmed / Needs your decision / Pre-existing) ───────────── */
   .section-header {
     display: grid;
     grid-template-columns: var(--col-cb) 1fr;
@@ -227,9 +238,47 @@
     cursor: pointer;
   }
 
-  /* Dimmed (disregarded) */
+  /* Dimmed (disregarded, or invalidated by an applied rule fix) */
   .finding.dimmed { opacity: 0.35; }
   .finding.dimmed .title { text-decoration: line-through; }
+
+  /* Live rule-fix preview: checking a rule-quality note greys the rows whose every
+     rule source is scheduled to be fixed (client-only, no agent round-trip). Same
+     look as .dimmed but a distinct class, so a transient preview is never mistaken
+     for persisted disregard run-state by restoreState(). */
+  .finding.pending-invalid { opacity: 0.35; }
+  .finding.pending-invalid .title { text-decoration: line-through; }
+
+  /* Reason pill on a server-dimmed invalidated row ("invalidated — rule RQ2 fixed"). */
+  .dim-reason {
+    display: inline-block;
+    margin-left: 6px;
+    padding: 0 7px;
+    border-radius: 8px;
+    font-size: 11px;
+    font-weight: 600;
+    white-space: nowrap;
+    background: #45475a;
+    color: #bac2de;
+    vertical-align: middle;
+  }
+
+  /* Large/costly fix flag (fix_complexity == "complex"), orthogonal to the verdict
+     bucket: a subtle row tint + a tag pill on the title. Pure presentation — it
+     never routes, hides, or downgrades the finding. */
+  .finding.costly { background: #fab38710; }
+  .fix-tag {
+    display: inline-block;
+    margin-left: 6px;
+    padding: 0 7px;
+    border-radius: 8px;
+    font-size: 11px;
+    font-weight: 600;
+    white-space: nowrap;
+    background: #fab38722;
+    color: #fab387;
+    vertical-align: middle;
+  }
 
   /* ── Detail panel (server-rendered structural fields) ───────────────────── */
   .detail-content {
@@ -358,7 +407,7 @@
     .before-after { grid-template-columns: 1fr; }
   }
 
-  /* ── Collapsibles (invalid findings, rule-quality notes) ────────────────── */
+  /* ── Collapsibles (rule-quality notes) ──────────────────────────────────── */
   .collapsible {
     margin-top: 16px;
     background: #313244;
@@ -380,22 +429,17 @@
   .collapsible[open] > .collapsible-summary::before { content: '▾ '; }
   .collapsible-body { padding: 0 16px 12px; }
 
-  .invalid-table { width: 100%; border-collapse: collapse; font-size: 13px; }
-  .invalid-table th {
-    text-align: left;
-    padding: 6px 8px;
-    color: #6c7086;
-    border-bottom: 1px solid #45475a;
-    font-weight: 600;
-  }
-  .invalid-table td {
-    padding: 6px 8px;
-    border-bottom: 1px solid #31324488;
-    color: #a6adc8;
-  }
-
   .quality-item { margin: 8px 0; color: #a6adc8; }
   .quality-item strong { color: #f9e2af; }
+  .quality-cb {
+    accent-color: #89b4fa;
+    width: 15px;
+    height: 15px;
+    cursor: pointer;
+    margin-right: 6px;
+    vertical-align: middle;
+  }
+  .quality-id { color: #f9e2af; font-weight: 600; margin-right: 2px; }
 
   /* ── Sticky action bar ──────────────────────────────────────────────────── */
   .action-bar {
@@ -463,6 +507,7 @@
   var state = {
     selected: new Set(),                 // record_ids currently checked
     disregarded: new Set(),              // record_ids marked disregarded (dimmed)
+    scheduledRules: new Set(),           // rq ids whose rule-fix checkbox is checked
     openId: null                         // record_id of the open accordion, if any
   };
 
@@ -494,15 +539,27 @@
   }
 
   function updateBar() {
-    var n = state.selected.size;
+    // Findings (row checkboxes) and scheduled rule fixes (rq checkboxes) both count
+    // toward an actionable selection, so the bar enables for a findings-only,
+    // rules-only, or mixed action — the unified payload carries whatever is selected.
+    var n = state.selected.size + state.scheduledRules.size;
     var c = document.querySelector("[data-sel-count]");
     if (c) c.textContent = n + " selected";
     all("[data-action]").forEach(function (b) { b.disabled = n === 0; });
   }
 
+  // Actionable rows only. A section select-all (and the tri-state that mirrors it) skips
+  // .dimmed (disregarded) and .pending-invalid (rule-fix scheduled) findings: they carry
+  // no actionable selection, so bulk-checking them would push non-actionable ids into
+  // state.selected and the posted payload (C-01). .pending-invalid is new in this diff,
+  // which is exactly why the previously unfiltered all(".row-cb", sec) had to narrow.
+  var ACTIONABLE_ROW_CB = ".finding:not(.dimmed):not(.pending-invalid) .row-cb";
+
   function syncSections() {
     all(".finding-section").forEach(function (sec) {
-      var cbs = all(".row-cb", sec);
+      // Count only actionable rows so a section's select-all reads "fully checked" exactly
+      // when every row it would actually select is checked (never the dimmed/pending ones).
+      var cbs = all(ACTIONABLE_ROW_CB, sec);
       var total = cbs.length, checked = 0;
       cbs.forEach(function (cb) { if (cb.checked) checked++; });
       var sc = sec.querySelector(".section-cb");
@@ -513,11 +570,40 @@
     });
   }
 
-  // Checkbox changes: per-row and section select-all.
+  // Live rule-fix preview: grey every finding whose ENTIRE rule-source set is
+  // scheduled to be fixed. data-rule-deps (from _rule_dependency_map) lists the rq
+  // ids a row depends on; the row greys only once they are all checked. Pure
+  // client-side — no agent round-trip — and a distinct class from the persisted dim.
+  function applyRulePreview() {
+    all(".finding[data-rule-deps]").forEach(function (f) {
+      var deps = (f.getAttribute("data-rule-deps") || "").split(/\s+/).filter(Boolean);
+      var dies = deps.length > 0 && deps.every(function (rq) { return state.scheduledRules.has(rq); });
+      f.classList.toggle("pending-invalid", dies);
+      if (dies) {
+        // Now non-actionable: drop any prior selection and clear the checkbox so a
+        // scheduled rule fix can't leave this finding's id in the next posted payload.
+        var id = f.getAttribute("data-record-id");
+        if (id) state.selected.delete(id);
+        var cb = f.querySelector(".row-cb");
+        if (cb) cb.checked = false;
+      }
+    });
+  }
+
+  // Checkbox changes: per-row, section select-all, and rule-quality scheduling.
   document.addEventListener("change", function (e) {
     var t = e.target;
     if (!t || !t.classList) return;
     if (t.classList.contains("row-cb")) {
+      // Actionable rows only: a dimmed (disregarded) or pending-invalid (rule-fix
+      // scheduled) row is non-actionable, so refuse a manual check rather than let
+      // its id enter state.selected / the posted payload — the same contract
+      // ACTIONABLE_ROW_CB enforces for the section select-all.
+      var f = t.closest(".finding");
+      if (t.checked && f && (f.classList.contains("dimmed") || f.classList.contains("pending-invalid"))) {
+        t.checked = false;
+        return;
+      }
       var id = recordId(t);
       if (id) { if (t.checked) state.selected.add(id); else state.selected.delete(id); }
       syncSections();
@@ -525,30 +611,43 @@
     } else if (t.classList.contains("section-cb")) {
       var sec = t.closest(".finding-section");
       if (!sec) return;
-      all(".row-cb", sec).forEach(function (cb) {
+      all(ACTIONABLE_ROW_CB, sec).forEach(function (cb) {
         cb.checked = t.checked;
         var rid = recordId(cb);
         if (rid) { if (t.checked) state.selected.add(rid); else state.selected.delete(rid); }
       });
       syncSections();
       updateBar();
+    } else if (t.classList.contains("quality-cb")) {
+      var rq = t.getAttribute("data-rq-id");
+      if (rq) { if (t.checked) state.scheduledRules.add(rq); else state.scheduledRules.delete(rq); }
+      applyRulePreview();
+      // The preview may have cleared selections that just became pending-invalid,
+      // so re-sync the section select-all tri-state to match.
+      syncSections();
+      updateBar();
     }
   });
 
-  // Action buttons → postMessage to the Treemon parent.
+  // Action buttons → postMessage to the Treemon parent. One unified, prefix-
+  // disambiguated payload carries the whole selection: `ids` mixes finding ids (f#)
+  // with scheduled rule-fix ids (rq#), `button` is the bare verb pressed
+  // (fix/disregard/document), `text` is the free-text box, and `run_id` lets the
+  // orchestrator match the action to the rendered run. Python's validate-action
+  // resolves each id by prefix and is the trust boundary — the canvas only posts.
   document.addEventListener("click", function (e) {
     var btn = e.target && e.target.closest ? e.target.closest("[data-action]") : null;
     if (!btn || btn.disabled) return;
     var action = btn.getAttribute("data-action") || "";
     if (action.indexOf(NS) !== 0) return;             // only our namespaced actions
-    var ids = Array.from(state.selected);
+    var ids = Array.from(state.selected).concat(Array.from(state.scheduledRules));
     if (!ids.length) return;
 
     window.parent.postMessage({
-      action: action,
-      run_id: getRunId(),
-      record_ids: ids,
-      instructions: instructions()
+      ids: ids,
+      button: action.slice(NS.length),
+      text: instructions(),
+      run_id: getRunId()
     }, getParentOrigin());
 
     // No optimistic disregard dimming (C-17): the confirmed server round-trip
@@ -557,9 +656,14 @@
     // declined/rejected confirmation can never leave a finding dimmed out of step
     // with persisted run-state until a reload.
 
-    // Clear selection after dispatch (matches the validated prototype).
+    // Clear the selection after dispatch (matches the validated prototype): both the
+    // finding checkboxes and the scheduled rule-fix checkboxes reset, and the live
+    // rule-fix preview is re-derived so a follow-up action starts from a clean slate.
     state.selected.clear();
+    state.scheduledRules.clear();
     all(".row-cb").forEach(function (cb) { cb.checked = false; });
+    all(".quality-cb").forEach(function (cb) { cb.checked = false; });
+    applyRulePreview();
     syncSections();
     updateBar();
   });
@@ -595,8 +699,8 @@
       if (f.classList.contains("dimmed")) state.disregarded.add(f.getAttribute("data-record-id"));
     });
     // Prune tracked state to record_ids still present: a morph can drop a finding from
-    // the selectable set (e.g. it is re-categorized invalid and loses its checkbox), so
-    // the count, button enabled-state and posted record_ids never reference off-screen ids.
+    // the selectable set (e.g. it is re-categorized into a hidden bucket and loses its checkbox), so
+    // the count, button enabled-state and posted ids never reference off-screen ids.
     var present = presentIds();
     pruneTo(state.selected, present);
     pruneTo(state.disregarded, present);
@@ -612,6 +716,16 @@
         if (d && !d.open) d.open = true;
       }
     });
+    // Re-apply the rule-fix preview after a morph: prune scheduled rq ids to those
+    // still present, re-check their boxes, and re-grey the rows their combined fix
+    // would kill (a fresh DOM loses the transient class until we re-derive it).
+    var presentRq = new Set();
+    all(".quality-cb").forEach(function (cb) { presentRq.add(cb.getAttribute("data-rq-id")); });
+    pruneTo(state.scheduledRules, presentRq);
+    all(".quality-cb").forEach(function (cb) {
+      cb.checked = state.scheduledRules.has(cb.getAttribute("data-rq-id"));
+    });
+    applyRulePreview();
     syncSections();
     updateBar();
   }
@@ -663,26 +777,22 @@
     <!-- FR:CONFIRMED_ROWS -->
   </section>
 
-  <section class="finding-section" data-section="questionable">
+  <section class="finding-section" data-section="needs-decision">
     <div class="section-header">
-      <input type="checkbox" class="section-cb" aria-label="Select all questionable findings">
-      <span class="section-title">Questionable Findings (<!-- FR:QUESTIONABLE_COUNT -->)</span>
+      <input type="checkbox" class="section-cb" aria-label="Select all needs-your-decision findings">
+      <span class="section-title">Needs Your Decision (<!-- FR:NEEDS_DECISION_COUNT -->)</span>
     </div>
-    <!-- FR:QUESTIONABLE_ROWS -->
+    <!-- FR:NEEDS_DECISION_ROWS -->
+  </section>
+
+  <section class="finding-section" data-section="pre-existing">
+    <div class="section-header">
+      <input type="checkbox" class="section-cb" aria-label="Select all pre-existing findings">
+      <span class="section-title">Pre-existing — non-gating (<!-- FR:PREEXISTING_COUNT -->)</span>
+    </div>
+    <!-- FR:PREEXISTING_ROWS -->
   </section>
 </div>
-
-<details class="collapsible invalid-section">
-  <summary class="collapsible-summary"><!-- FR:INVALID_SUMMARY --></summary>
-  <div class="collapsible-body">
-    <table class="invalid-table">
-      <thead>
-        <tr><th>ID</th><th>Sev</th><th>Title</th><th>Reason</th></tr>
-      </thead>
-      <tbody><!-- FR:INVALID_ROWS --></tbody>
-    </table>
-  </div>
-</details>
 
 <details class="collapsible quality-notes" open>
   <summary class="collapsible-summary"><!-- FR:QUALITY_SUMMARY --></summary>

@@ -5,6 +5,8 @@ description: Compiles pipeline findings into the records.json envelope (verdicts
 
 You compile findings from earlier pipeline phases into a single structured **`records.json` envelope** and write it to disk. Python's `render-review` subcommand consumes that envelope to produce `review.md`, the terminal summary, and the interactive canvas — so your job is the *semantic* compile (classify verdicts, apply rebuttal overrides, synthesize rule-quality notes, normalize provenance). You do **not** author Markdown or terminal text; Python renders all three artifacts from your envelope.
 
+You emit **semantic fields only.** Python owns the entire *display layer* and assigns it deterministically after you write your envelope: it derives each finding's display bucket from `(verdict, introduced_by)`, orders the findings, stamps the stable `f#` finding ids and `rq#` rule-quality-note ids, and computes the `run.*` tally counts. **Do not emit** `record_id` / `f#`, `display_number`, `display_bucket`, note `id` / `rq#`, the note `rule` label, or any of the `run` count fields (`consolidated_count` / `confirmed` / `questionable` / `invalid`) — Python overwrites them. Your responsibility stops at the meaning of each finding (its verdict, severity, provenance, and prose) and the canonical `introduced_by` / `rule_sources` labels Python routes on.
+
 ## Input
 
 Parse these named fields from your prompt:
@@ -18,11 +20,11 @@ Parse these named fields from your prompt:
 - `rule_count` — number of rules dispatched (integer)
 - `concern_count` — number of concerns dispatched (integer)
 - `rebuttal_overrides` — (optional) JSON list of `{id, severity, reasoning}` for findings a rebuttal reinstated. `id` is an assessment id (`A-XX`).
-- `validation_errors` — (optional) present only on a **retry**: the structured per-record error JSON Python's `render-review` emitted when your previous `records.json` failed validation (each error carries `record_id` / `assessment_id` / `path` / `field` / `message`). When present, treat it as authoritative — fix **exactly** the listed fields/records (a count mismatch, a bad enum, a truncated array, a duplicate id, …) and rewrite a complete, well-formed `records.json`.
+- `validation_errors` — (optional) present only on a **retry**: the structured per-record error JSON Python's `render-review` emitted when your previous `records.json` failed validation (each error carries `assessment_id` / `path` / `field` / `message`; `record_id` is `null` at this stage because Python has not yet assigned finding ids). When present, treat it as authoritative — fix **exactly** the listed fields/records, located by `assessment_id` + `path` (a bad enum, a missing field, a malformed `rule_sources`, a duplicate `assessment_id`, …) — and rewrite a complete, well-formed `records.json`.
 
 ## Output contract: `records.json`
 
-You write **one JSON object** (the "envelope"). Python validates it strictly and will reject the run — forcing a retry — if any field is wrong, so match this shape exactly:
+You write **one JSON object** (the "envelope"). Python validates it strictly and will reject the run — forcing a retry — if any **semantic** field is wrong, so match this shape exactly. Note what is **absent**: no `record_id` / `display_number` / `display_bucket` on findings, no `id` / `rule` on notes, and no count fields on `run` — Python assigns all of those.
 
 ```json
 {
@@ -32,23 +34,17 @@ You write **one JSON object** (the "envelope"). Python validates it strictly and
     "scope": "branch",
     "date": "2026-02-03T10:00:00Z",
     "rule_count": 5,
-    "concern_count": 3,
-    "consolidated_count": 4,
-    "confirmed": 2,
-    "questionable": 1,
-    "invalid": 1
+    "concern_count": 3
   },
   "rebuttal_overrides": [
-    { "record_id": "r7", "original_severity": "High", "severity": "High", "reasoning": "Reinstated: the guard is unreachable on the error path." }
+    { "assessment_id": "A-07", "original_severity": "High", "severity": "High", "reasoning": "Reinstated: the guard is unreachable on the error path." }
   ],
   "rule_quality_notes": [
-    { "rule": "no-comments", "observation": "4 findings, all Invalid in embedded template code.", "suggestion": "Add an exception for embedded templates." }
+    { "rule_sources": ["rule--no-comments"], "rule_file": "review/rules/no-comments.md", "observation": "4 findings, all Invalid in embedded template code.", "suggestion": "Add an exception for embedded templates." }
   ],
   "findings": [
     {
-      "record_id": "r1",
       "assessment_id": "A-01",
-      "display_number": 1,
       "title": "Null deref in request handler",
       "file": "src/a.py",
       "line": 10,
@@ -77,31 +73,31 @@ You write **one JSON object** (the "envelope"). Python validates it strictly and
 - `scope` — one of `branch`, `commit`, `staged`, `unstaged`, `full`.
 - `date` — non-empty string. Use the current ISO-8601 timestamp.
 - `rule_count`, `concern_count` — integers ≥ 0 (from Input).
-- `consolidated_count` — integer ≥ 0. **Must equal `len(findings)`.**
-- `confirmed`, `questionable`, `invalid` — integers ≥ 0. **Each must equal the number of findings with that verdict.** (A mismatch is the most common cause of a rejected envelope — count carefully.)
+- **Do not emit** `consolidated_count`, `confirmed`, `questionable`, or `invalid` — Python counts these from your finalized findings. (Any values you include are ignored and overwritten.)
 
-**`findings[]`** (one object per finding; every field required unless marked nullable/optional):
-- `record_id` — short, **non-empty, unique** stable token. Assign `r1`, `r2`, … in finding order. The canvas action bar references it, so it must be unique across the whole array (including Invalid findings).
-- `assessment_id` — the assessment id (`A-XX`) in `assessed` mode; **`null`** in `consolidated`/`raw_findings` mode (no assessment was performed). When non-null it must be **unique**. Must be a non-empty string whenever `has_detail` is `true` (the detail sidecar is located by it).
-- `display_number` — integer ≥ 1, **unique** across Confirmed+Questionable, assigned as one continuous sequence (see Step 4). **`null`** for Invalid findings.
+**`findings[]`** (one object per finding; every field required unless marked nullable/optional). **Do not emit** `record_id`, `display_number`, or `display_bucket` — Python assigns the finding id (`f#`), ordering, and bucket from the fields below:
+- `assessment_id` — the assessment id (`A-XX`) in `assessed` mode; **`null`** in `consolidated`/`raw_findings` mode (no assessment was performed). When non-null it must be **unique** (Python uses it as the finding's stable handle for rebuttal overrides and detail sidecars). Must be a non-empty string whenever `has_detail` is `true` (the detail sidecar is located by it).
 - `title` — non-empty string.
 - `file` — non-empty string (path).
 - `line` — integer ≥ 0, or `null` when the finding has no specific line.
 - `original_severity` — the severity *before* any rebuttal override; one of `Critical`, `High`, `Medium`, `Low`.
 - `severity` — the **final** severity; one of `Critical`, `High`, `Medium`, `Low`. Equals `original_severity` unless a rebuttal override changed it.
 - `fix_complexity` — one of `quickfix`, `moderate`, `complex`.
-- `verdict` — one of `Confirmed`, `Questionable`, `Invalid`.
+- `verdict` — one of `Confirmed`, `Questionable`, `Invalid`. **Load-bearing:** Python derives the display bucket (and thus whether the finding is shown/counted) from `(verdict, introduced_by)`.
 - `type` — one of `rule`, `concern`, `mixed`.
-- `introduced_by` — (optional) display-metadata string (e.g. `diff`, `pre-existing`). Pass it through when the source has it; omit the field otherwise.
+- `introduced_by` — (optional) provenance string, e.g. `diff` or `pre-existing`. **Load-bearing:** an `introduced_by` ending in `pre-existing` — i.e. `"pre-existing"` *or* the assessor's `"reclassified-pre-existing"` — routes the finding out of the gating tally (Confirmed → a non-gating `pre-existing` section; Questionable → hidden); any other value (`diff`, `reclassified-diff`, or omission) is treated as in-scope. Pass it through verbatim when the source has it; omit the field otherwise.
 - `description` — string (may be `""`). The finding's description.
 - `assessment` — string (may be `""`). The assessment reasoning (why Confirmed/Questionable). **For Invalid findings, put the one-line reason here** — it becomes the invalid table's "Reason". Use `""` for `consolidated`/`raw_findings` (no assessment).
 - `suggestion` — string (may be `""`). The fix suggestion.
 - `provenance` — **non-empty** array of source labels (see Step 3). Each entry is a string like `rule--<name>` or `concern--<name>--<model>` (or an object `{"source": "..."}`).
 - `has_detail` — boolean (see Step 5).
 
-**`rebuttal_overrides[]`** (array; use `[]` when none): one entry per applied override — `{ record_id, original_severity, severity, reasoning }`. `record_id` must match a finding; `original_severity`/`severity` are severity enums; `reasoning` is a non-empty string.
+**`rebuttal_overrides[]`** (array; use `[]` when none): one entry per applied override — `{ assessment_id, original_severity, severity, reasoning }`. `assessment_id` must match a finding's `assessment_id`; `original_severity`/`severity` are severity enums; `reasoning` is a non-empty string. (Reference the finding by its `assessment_id` — the `A-XX` id you know — *not* a finding id, which Python assigns later.)
 
-**`rule_quality_notes[]`** (array; use `[]` when none): `{ rule, observation, suggestion }`, all non-empty strings.
+**`rule_quality_notes[]`** (array; use `[]` when none): `{ rule_sources, rule_file, observation, suggestion }`. **Do not emit** `id` or `rule` — Python assigns the `rq#` id and derives the human-readable `rule` label from `rule_file`.
+- `rule_sources` — a **non-empty array** of canonical `rule--<name>` provenance labels, each matching the `provenance` entries of the findings the note explains. **One note per rule:** every label must name the *same* rule as `rule_file` (they all share its stem once any `--<chunk>` suffix is dropped). List several labels only when one rule was split across discovery chunks — the dispatch suffixes each chunk (e.g. `["rule--no-foo--1", "rule--no-foo--2"]`, all chunks of `no-foo`), and they collapse to that single rule. To flag a *different* rule, emit a **separate note** with its own `rule_file`; a label naming a rule other than `rule_file` is rejected. Each rule may be named by at most one note across the whole array (the rule-fix preview maps each source to a single note; cross-note duplicates are rejected by validation).
+- `rule_file` — a **safe relative path to the rule's `.md` file under the configured rules directory** (default `review/`, e.g. `review/rules/no-comments.md`). Validation rejects absolute paths, `..` traversal, non-`.md` targets, and anything outside the rules directory (the agent later edits this file to apply a rule fix). Its stem must match every `rule--<name>` in `rule_sources` (ignoring any trailing `--<chunk>` suffix) — they all name this one rule.
+- `observation` / `suggestion` — the pattern seen and the proposed rule improvement.
 
 ## Procedure
 
@@ -120,7 +116,7 @@ For each entry in the `rebuttal_overrides` input (`{id, severity, reasoning}`):
 - Set its `verdict` to `Confirmed`.
 - Keep its pre-override assessed severity as `original_severity`; set `severity` to the override's severity.
 - Append the override `reasoning` to that finding's `assessment` text (audit trail).
-- Add an entry to the envelope's `rebuttal_overrides[]`: `{ record_id: <that finding's record_id>, original_severity: <pre-override severity>, severity: <override severity>, reasoning }`.
+- Add an entry to the envelope's `rebuttal_overrides[]`: `{ assessment_id: <that finding's assessment_id>, original_severity: <pre-override severity>, severity: <override severity>, reasoning }`.
 
 If there are no overrides, emit `rebuttal_overrides: []`.
 
@@ -133,13 +129,14 @@ Provenance entries must be the **canonical source-file labels** `rule--<name>` a
 
 `provenance` must be non-empty for every finding.
 
-### 4. Classify and number
+### 4. Set the verdict and pass through `introduced_by`
 
-- Partition findings into Confirmed, Questionable, Invalid by verdict.
-- Order the actionable findings: all **Confirmed** first, then all **Questionable**; within each group, order by file path, then by line number.
-- Assign `display_number` as one continuous 1-based sequence over that ordered Confirmed+Questionable list (so every number is unique).
-- Invalid findings get `display_number: null` (they render in a separate table keyed by `assessment_id`).
-- Assign every finding — all three verdicts — a unique `record_id` (`r1`, `r2`, …).
+You do **not** bucket, order, or number findings — Python does all of that from the fields you emit. Your only display-relevant job is to get two semantic fields right per finding:
+
+- **`verdict`** — `Confirmed`, `Questionable`, or `Invalid` (from the assessment in `assessed` mode; all `Confirmed` in `consolidated`/`raw_findings` mode).
+- **`introduced_by`** — pass it through verbatim from the source when present (omit otherwise). A value ending in `pre-existing` (`"pre-existing"` or `"reclassified-pre-existing"`) tells Python the finding is out of scope.
+
+Python then derives each finding's display bucket, orders the findings (visible buckets `confirmed` → `needs-decision` → `pre-existing`, then file/line; `Invalid` and pre-existing-Questionable findings are hidden), assigns the gap-free `f#` ids, and computes the counts. Emit every finding — Confirmed, Questionable, **and** Invalid — with no id, number, or bucket fields.
 
 ### 5. Determine `has_detail`
 
@@ -148,21 +145,28 @@ A finding has a rich-detail sidecar when the file `{run_dir}/assessments/{assess
 ### 6. Synthesize rule-quality notes
 
 Add a `rule_quality_notes[]` entry when any of these hold:
-- A finding carries a `Rule quality note:` annotation from the assessor (the rule is technically correct but counterproductive in context).
+- One or more findings carry a `Rule quality note:` annotation from the assessor (a valid match the assessor Confirmed but judged *not* net-positive — the rule is counterproductive here). The assessor's note is mandatory in that case, so this is the common trigger.
 - A single rule produced **3+ findings assessed as Invalid** (the rule may be too broad/noisy).
-- Multiple findings from the same rule were assessed as **Questionable** (the rule may need tightening).
+- A single rule produced multiple **`mixed`-type** findings assessed as **Questionable** (the rule may need tightening). *(Pure `rule` findings are never Questionable, so they never hit this trigger.)*
 
-Each entry is `{ rule, observation, suggestion }` — *observation* describes the pattern seen, *suggestion* is the rule improvement. These help the user decide whether to run `/focused-review:review post-mortem`. Use `[]` when there are none.
+**One note per rule — merge before you write.** A rule that fires on several findings produces several per-finding annotations, but the schema permits **exactly one note per rule**. Group every annotation/trigger by the rule it names and emit a **single** note per rule: one `rule_file`, with `rule_sources` listing every contributing `rule--<name>` provenance label (collapsing any `--<chunk>` suffixes of that same rule). Never emit two notes for the same rule — validation rejects cross-note duplicates and forces a retry.
 
-### 7. Build the `run` object and self-check the counts
+Each entry is `{ rule_sources, rule_file, observation, suggestion }` (Python assigns the `rq#` id and derives the `rule` display label from `rule_file` — do not emit them):
+- `rule_sources` — a **non-empty array** of the `rule--<name>` provenance labels the note covers (usually one; list several only when one rule was split across discovery chunks, e.g. `["rule--no-foo--1", "rule--no-foo--2"]`). Every label must name the **same** rule as `rule_file`, match the explained findings' provenance, and be **unique across notes** — one note per rule (cover a different rule with a separate note).
+- `rule_file` — the rule's `.md` path under the configured rules directory (default `review/`, e.g. `review/rules/<name>.md`); must be a safe relative `.md` path inside that directory whose stem matches every `rule--<name>` in `rule_sources` (the trailing `--<chunk>` suffix is ignored).
+- `observation` describes the pattern seen; `suggestion` is the rule improvement.
 
-Set `consolidated_count = len(findings)`, and set `confirmed` / `questionable` / `invalid` to the exact verdict tallies. **Re-count from your finished `findings[]` right before writing** — these cross-checks are validated and any mismatch forces a retry.
+These help the user decide whether to run `/focused-review:review post-mortem`. Use `[]` when there are none.
+
+### 7. Build the `run` object
+
+Emit `run` with exactly the reporter-owned fields: `run_id`, `scope`, `date` (current ISO-8601 timestamp), `rule_count`, and `concern_count` (the last two from Input). **Do not** add `consolidated_count` / `confirmed` / `questionable` / `invalid` — Python computes those from your finalized findings, so there is no count for you to get wrong.
 
 ### 8. Write `records.json`
 
 Write the envelope to `records_path` (default `{run_dir}/records.json`) using the `create` tool, pretty-printed (2-space indent). If the file already exists (e.g. on a retry), delete it first with `powershell` (`Remove-Item`), then `create`.
 
-Make sure the JSON is **complete and well-formed** — a truncated `findings` array fails validation (`consolidated_count` won't match `len(findings)`) and forces a retry.
+Make sure the JSON is **complete and well-formed** — a truncated `findings` array or a malformed object fails validation and forces a retry.
 
 ### 9. Output
 
@@ -172,7 +176,7 @@ Output only a short confirmation for the orchestrator (this is internal, not the
 
 ```
 records.json written: {records_path}
-findings: {total} ({confirmed} confirmed, {questionable} questionable, {invalid} invalid)
+findings: {total} ({confirmed} Confirmed, {questionable} Questionable, {invalid} Invalid by verdict)
 ```
 
-If there were zero findings, still write a valid envelope (`findings: []`, all counts `0`) and report `findings: 0`.
+The counts here are just for the log line — tally them from your findings' `verdict` field (they are not part of the envelope; Python computes the canonical display tallies). If there were zero findings, still write a valid envelope (`findings: []`) and report `findings: 0`.
