@@ -236,15 +236,22 @@ def test_script_uses_document_level_delegation(template_text: str):
     assert "document.addEventListener" in template_text
 
 
-def test_script_posts_unified_action_payload(template_text: str):
+def test_script_posts_unified_action_payload(template_text: str, fixture_text: str):
     assert "window.parent.postMessage" in template_text
-    # Unified, prefix-disambiguated payload (verdict-model redesign):
-    #   { ids: [f#/rq#], button: "<bare verb>", text: "<free text>", run_id }
-    for key in ("ids:", "button:", "text:", "run_id:"):
+    # Unified, prefix-disambiguated payload (verdict-model redesign) plus the top-level
+    # `action` Treemon's inbound canvas gate requires:
+    #   { action: "<namespaced verb>", ids: [f#/rq#], button: "<bare verb>", text, run_id }
+    for key in ("action:", "ids:", "button:", "text:", "run_id:"):
         assert key in template_text, f"postMessage payload missing {key!r}"
-    # The legacy keys are gone — this is an API migration, not an additive change,
-    # so the old shape ({ action, record_ids, instructions }) must not linger.
-    for legacy in ("action:", "record_ids:", "instructions:"):
+    # `action` is the FULL namespaced verb (the data-action value), not the bare button —
+    # Treemon drops any inbound message whose `action` isn't a string, so it must ride
+    # along verbatim. (`button` still carries the namespace-sliced bare verb.) Asserted on
+    # BOTH ends of the channel so the fix can never drift between template and fixture.
+    for text in (template_text, fixture_text):
+        assert "action: action," in text, "postMessage payload missing top-level `action`"
+    # The truly-legacy keys stay gone — this was an API migration, not an additive change,
+    # so the old shape's `record_ids` / `instructions` must not linger.
+    for legacy in ("record_ids:", "instructions:"):
         assert legacy not in template_text, f"legacy payload key {legacy!r} still present"
     # ids unions the selected findings (f#) with the scheduled rule fixes (rq#),
     # button is the bare verb (the namespace prefix sliced off), text is the box.
