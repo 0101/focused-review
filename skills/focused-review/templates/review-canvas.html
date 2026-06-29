@@ -644,6 +644,12 @@
   // (fix/disregard/document), `text` is the free-text box, and `run_id` lets the
   // orchestrator match the action to the rendered run. Python's validate-action
   // resolves each id by prefix and is the trust boundary — the canvas only posts.
+  // `action` is the full namespaced verb (e.g. focused-review.fix): Treemon gates
+  // every inbound canvas message on a string `action`, so a payload without it is
+  // silently dropped and never forwarded to the owning session. The namespace keeps
+  // it clear of Treemon's reserved actions, so it falls through to the generic
+  // "forward the whole payload to the owner" path — ids/button/text/run_id ride along
+  // untouched.
   document.addEventListener("click", function (e) {
     var btn = e.target && e.target.closest ? e.target.closest("[data-action]") : null;
     if (!btn || btn.disabled) return;
@@ -653,6 +659,7 @@
     if (!ids.length) return;
 
     window.parent.postMessage({
+      action: action,
       ids: ids,
       button: action.slice(NS.length),
       text: instructions(),

@@ -511,7 +511,9 @@
   });
 
   // Action buttons → postMessage to the Treemon parent. Unified prefix-disambiguated
-  // payload: ids (f# findings + rq# rule fixes), button (bare verb), text, run_id.
+  // payload: action (full namespaced verb, e.g. focused-review.fix), ids (f# findings
+  // + rq# rule fixes), button (bare verb), text, run_id. Treemon gates every inbound
+  // canvas message on a string `action`, so it must be present or the post is dropped.
   document.addEventListener("click", function (e) {
     var btn = e.target && e.target.closest ? e.target.closest("[data-action]") : null;
     if (!btn || btn.disabled) return;
@@ -521,6 +523,7 @@
     if (!ids.length) return;
 
     window.parent.postMessage({
+      action: action,
       ids: ids,
       button: action.slice(NS.length),
       text: instructions(),
