@@ -1510,3 +1510,29 @@ class TestRuleFixInvalidationPersistsAcrossRerender:
         html2 = canvas.read_text(encoding="utf-8")
         assert {"f1", "f2"} <= _dimmed_ids(html2)
         assert '<span class="dim-reason">invalidated — rules RQ1, RQ2 fixed</span>' in html2
+
+    def test_preview_unions_persisted_rules_for_multi_rule_finding(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Finding C-07: the fix PREVIEW unions persisted rules, not the batch alone.
+
+        rq1 is applied first (f1 dies, f2 still needs rq2). Previewing the rq2 fix
+        (no --apply-rule-fixes) must report f2 as invalidated — its full set
+        {rq1,rq2} is satisfied by the persisted rq1 unioned with the posted rq2 — so
+        the confirmation preview agrees with the accumulated apply path instead of
+        promising f2 survives, then silently dropping it after the user confirms.
+        """
+        records = _write_records(tmp_path, _two_rule_renderable_envelope())
+        fr.validate_action_command(
+            _action_args(
+                records, RUN_ID, "rq1", action="focused-review.fix",
+                apply_rule_fixes=True, run_dir=str(tmp_path),
+            )
+        )
+        capsys.readouterr()
+        fr.validate_action_command(
+            _action_args(records, RUN_ID, "rq2", action="focused-review.fix", run_dir=str(tmp_path))
+        )
+        preview = json.loads(capsys.readouterr().out)
+        invalidated = {r["rule_id"]: r["invalidated_record_ids"] for r in preview["rules"]}
+        assert invalidated["rq2"] == ["f2"]
