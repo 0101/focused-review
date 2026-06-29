@@ -242,6 +242,14 @@
   .finding.dimmed { opacity: 0.35; }
   .finding.dimmed .title { text-decoration: line-through; }
 
+  /* Fixed (orchestrator applied the code-fix): reads as DONE — a green check glyph +
+     strikethrough title and a light 0.5 fade. Kept more visible than the 0.35 disregard
+     dim, so "fixed" reads as "done" (de-emphasized), not "ignored".
+     Orthogonal to .dimmed; a row may carry both and the two treatments stack. */
+  .finding.fixed { opacity: 0.5; }
+  .finding.fixed .title { text-decoration: line-through; }
+  .finding.fixed .title::before { content: '✓'; color: #a6e3a1; font-weight: 700; margin-right: 6px; }
+
   /* Live rule-fix preview: checking a rule-quality note greys the rows whose every
      rule source is scheduled to be fixed (client-only, no agent round-trip). Same
      look as .dimmed but a distinct class, so a transient preview is never mistaken
@@ -507,6 +515,7 @@
   var state = {
     selected: new Set(),                 // record_ids currently checked
     disregarded: new Set(),              // record_ids marked disregarded (dimmed)
+    fixed: new Set(),                    // record_ids the orchestrator marked fixed (done)
     scheduledRules: new Set(),           // rq ids whose rule-fix checkbox is checked
     openId: null                         // record_id of the open accordion, if any
   };
@@ -691,12 +700,18 @@
   }
 
   function restoreState() {
-    // Seed from server-rendered dimmed classes: render-review bakes the persisted
-    // disregard (read back from run-state.json) into the HTML, so a cold canvas load
-    // — not just an in-session morph where the click handler already populated the set
-    // — keeps those findings dimmed. Disregard is add-only, so this union is safe.
+    // Reconcile the server-derived sets from the CURRENT DOM on every call. render-review
+    // bakes the persisted disregard/fixed (read back from run-state.json, gated on run_id)
+    // into the HTML, and that server round-trip is the single source of truth (no optimistic
+    // add — the C-17 rule). Rebuild the sets fresh instead of unioning into prior state: the
+    // canvas is one morph-in-place file whose JS state survives across runs and record_ids are
+    // positional (f1..fN every run), so a stale mark from an earlier run would otherwise be
+    // re-applied to a still-present id even after a new run_id correctly dropped the class.
+    state.disregarded = new Set();
+    state.fixed = new Set();
     all(".finding").forEach(function (f) {
       if (f.classList.contains("dimmed")) state.disregarded.add(f.getAttribute("data-record-id"));
+      if (f.classList.contains("fixed")) state.fixed.add(f.getAttribute("data-record-id"));
     });
     // Prune tracked state to record_ids still present: a morph can drop a finding from
     // the selectable set (e.g. it is re-categorized into a hidden bucket and loses its checkbox), so
@@ -704,6 +719,7 @@
     var present = presentIds();
     pruneTo(state.selected, present);
     pruneTo(state.disregarded, present);
+    pruneTo(state.fixed, present);
     if (state.openId && !present.has(state.openId)) state.openId = null;
 
     all(".finding").forEach(function (f) {
@@ -711,6 +727,7 @@
       var cb = f.querySelector(".row-cb");
       if (cb) cb.checked = state.selected.has(id);
       f.classList.toggle("dimmed", state.disregarded.has(id));
+      f.classList.toggle("fixed", state.fixed.has(id));
       if (id && id === state.openId) {
         var d = f.querySelector(".finding-d");
         if (d && !d.open) d.open = true;
