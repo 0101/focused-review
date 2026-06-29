@@ -655,7 +655,7 @@ class TestRuleDependencyMap:
 
     def test_duplicate_source_defensive_tiebreak_keeps_first_note(self) -> None:
         # validate_records now rejects two notes naming the same rule_source
-        # (TestRejectRuleQualityNotes.test_note_rule_source_must_be_unique), so a
+        # (TestValidateRecordsRejectRuleQualityNotes.test_note_rule_source_must_be_unique_across_notes), so a
         # validated envelope never reaches here with duplicates. _rule_dependency_map
         # must still be total, so its setdefault tiebreak deterministically keeps
         # the first note rather than crashing on such (now schema-rejected) input.

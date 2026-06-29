@@ -2444,7 +2444,12 @@ def _validate_rule_file(value: object, rules_dir: str, add) -> None:
         return
     if rules_dir:
         norm_dir = Path(os.path.normpath(rules_dir))
-        if not Path(os.path.normpath(raw)).is_relative_to(norm_dir):
+        # Resolve both to absolute paths so a relative rule_file (the path-safety
+        # check above forces relative) is comparable to an absolute rules_dir; a
+        # relative path is never is_relative_to an absolute one otherwise.
+        abs_dir = Path(os.path.abspath(norm_dir))
+        abs_file = Path(os.path.abspath(os.path.normpath(raw)))
+        if not abs_file.is_relative_to(abs_dir):
             add(
                 "rule_file",
                 f"rule_file must live under the rules directory "
@@ -2621,22 +2626,11 @@ def _validate_rule_quality_note(
                 note_rule_sources.add(canonical)
                 valid_sources.append(normalized)
 
-    # rule_file — path safety, then per-source consistency (Finding C-12). The
-    # path-safety check runs once; the rule_source cross-check runs for every
-    # source label so the note can't point rule_file at a file matching none of its
-    # labels. Since each label must match that one file, all labels name the SAME
-    # rule (a note covers one rule; several labels are only its chunk suffixes).
+    # rule_file — path safety, then per-source consistency (Finding C-12), via the
+    # shared _collect_rule_file_errors helper (the same checks the action path runs).
     rule_file = item.get("rule_file", _MISSING)
-    path_messages: list[str] = []
-    _validate_rule_file(rule_file, rules_dir, lambda _f, message: path_messages.append(message))
-    if path_messages:
-        for message in path_messages:
-            add("rule_file", message)
-    else:
-        for source in valid_sources:
-            mismatch = _rule_file_source_mismatch(source, rule_file)
-            if mismatch is not None:
-                add("rule_file", mismatch)
+    for message in _collect_rule_file_errors(rule_file, valid_sources, rules_dir):
+        add("rule_file", message)
 
 
 def validate_records(data: object, *, rules_dir: str | None = None) -> list[dict]:
@@ -2833,14 +2827,11 @@ def finalize_records(data: object) -> object:
                 )
                 finding["display_bucket"] = bucket if bucket is not None else "hidden"
 
-        def bucket_of(finding: object) -> str:
-            if isinstance(finding, dict):
-                b = finding.get("display_bucket")
-                if b in VALID_DISPLAY_BUCKETS:
-                    return b
-            return "hidden"
-
-        findings.sort(key=lambda f: _finding_sort_key(f, bucket_of(f)))
+        findings.sort(
+            key=lambda f: _finding_sort_key(
+                f, f.get("display_bucket") if isinstance(f, dict) else "hidden"
+            )
+        )
 
         # f1..fN over the sorted order: visible buckets occupy f1..fK gap-free,
         # hidden findings trail as f(K+1)..fN (never shown).
@@ -2901,10 +2892,6 @@ def validate_finalized_records(data: object, *, rules_dir: str | None = None) ->
     errors = validate_records(data, rules_dir=rules_dir)
     if not isinstance(data, dict):
         return errors
-
-    def add_envelope(field: str | None, message: str) -> None:
-        path = "$" if field is None else field
-        errors.append(_records_error("envelope", None, path, field, message))
 
     # --- findings: f# gap-free in display order + bucket ordering ----------
     findings = data.get("findings")
@@ -3109,7 +3096,7 @@ def validate_records_command(args: argparse.Namespace) -> None:
 # validated findings by verdict, formats the provenance labels, and templates the
 # three artifacts. review.md preserves the heading/field shape the reporter used
 # to hand-author (locked by a golden-file test, and read downstream by the
-# post-mortem mode, which matches each finding's "(record_id)" heading anchor and
+# post-mortem mode, which matches each finding's leading "### F<n>." heading anchor and
 # the rule:/concern: provenance labels). The canvas fills the version-controlled
 # template, html.escape()-ing every structured text field.
 # See docs/spec/canvas-review-report.md.
@@ -4663,6 +4650,7 @@ def validate_action(
     action: str | None = None,
     instructions: str = "",
     rules_dir: str | None = None,
+    run_dir: str | None = None,
 ) -> tuple[dict | None, list[dict]]:
     """Validate/expand a posted canvas action against a records.json envelope.
 
@@ -4687,6 +4675,12 @@ def validate_action(
     validation, so this is the only place those checks run at action time (Findings
     C-12 / C-13). When ``None`` it defaults to :data:`DEFAULT_RULES_DIR` so a caller
     that omits it still gets the secure-by-default ``review/`` prefix check.
+
+    ``run_dir`` (when given) is the run directory whose ``run-state.json`` holds
+    rules already applied in earlier actions; the preview unions them with the
+    posted batch when computing each rule's ``invalidated_record_ids`` so it matches
+    the accumulated apply path (Finding C-07/C-11) instead of under-reporting a
+    multi-rule finding whose last rule is fixed here.
     """
     errors: list[dict] = []
 
@@ -4850,13 +4844,23 @@ def validate_action(
 
     # Resolve each matched rule-quality note to its rule file + suggested change +
     # the record_ids its fix invalidates. Per Decision 12 a finding dies only when
-    # *all* of its rule sources are in the applied set, so the invalidation is
-    # computed against the *full* set of posted RQ ids and then attributed back to
-    # each rule that knocked the finding out — a multi-rule finding lists under
-    # every rule it depends on, which is exactly what persist_rule_fixes expects.
+    # *all* of its rule sources are in the applied set; the applied set is the posted
+    # RQ ids UNIONed with rules already persisted in run-state (when run_dir is
+    # given), so this preview agrees with _accumulated_rule_fixes — a multi-rule
+    # finding whose remaining rule is fixed here is correctly reported invalidated,
+    # not silently dropped after the user confirms. Invalidation is attributed back
+    # to each posted rule it depends on, which is exactly what persist_rule_fixes
+    # expects.
     resolved_rules: list[dict] = []
     if matched_notes:
         applied = {n.get("id") for n in matched_notes}
+        if run_dir is not None:
+            persisted = load_run_state(run_dir, expected_run_id=run_id).get(
+                "rule_fixes_applied", []
+            )
+            applied |= {
+                e.get("rule_id") for e in persisted if _is_nonempty_str(e.get("rule_id"))
+            }
         dep_map = _rule_dependency_map(findings_list, notes_list)
         dying = {rid: deps for rid, deps in dep_map.items() if set(deps) <= applied}
         for note in matched_notes:
@@ -5050,7 +5054,7 @@ def validate_action_command(args: argparse.Namespace) -> None:
 
     resolved, errors = validate_action(
         data, posted_run_id, ids, action=action, instructions=instructions,
-        rules_dir=rules_dir,
+        rules_dir=rules_dir, run_dir=args.run_dir or os.path.dirname(path) or ".",
     )
     if errors:
         _emit_action_error(path, posted_run_id, action, errors)
