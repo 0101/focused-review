@@ -638,18 +638,29 @@
     }
   });
 
-  // Action buttons → postMessage to the Treemon parent. One unified, prefix-
-  // disambiguated payload carries the whole selection: `ids` mixes finding ids (f#)
-  // with scheduled rule-fix ids (rq#), `button` is the bare verb pressed
-  // (fix/disregard/document), `text` is the free-text box, and `run_id` lets the
-  // orchestrator match the action to the rendered run. Python's validate-action
-  // resolves each id by prefix and is the trust boundary — the canvas only posts.
-  // `action` is the full namespaced verb (e.g. focused-review.fix): Treemon gates
-  // every inbound canvas message on a string `action`, so a payload without it is
-  // silently dropped and never forwarded to the owning session. The namespace keeps
-  // it clear of Treemon's reserved actions, so it falls through to the generic
-  // "forward the whole payload to the owner" path — ids/button/text/run_id ride along
-  // untouched.
+  // Post a namespaced action to the Treemon parent. Shared by the action buttons (click)
+  // and the Enter-to-ask handler below, so the payload shape can never drift between the
+  // two paths. One unified, prefix-disambiguated payload carries the whole selection: `ids`
+  // mixes finding ids (f#) with scheduled rule-fix ids (rq#), `button` is the bare verb
+  // (fix/disregard/document/ask), `text` is the free-text box, and `run_id` lets the
+  // orchestrator match the action to the rendered run. Python's validate-action resolves
+  // each id by prefix and is the trust boundary — the canvas only posts. `action` is the
+  // full namespaced verb (e.g. focused-review.fix): Treemon gates every inbound canvas
+  // message on a string `action`, so a payload without it is silently dropped and never
+  // forwarded to the owning session. The namespace keeps it clear of Treemon's reserved
+  // actions, so it falls through to the generic "forward the whole payload to the owner"
+  // path — ids/button/text/run_id ride along untouched.
+  function postAction(action, ids) {
+    window.parent.postMessage({
+      action: action,
+      ids: ids,
+      button: action.slice(NS.length),
+      text: instructions(),
+      run_id: getRunId()
+    }, getParentOrigin());
+  }
+
+  // Action buttons (fix/disregard/document) dispatch on a real selection.
   document.addEventListener("click", function (e) {
     var btn = e.target && e.target.closest ? e.target.closest("[data-action]") : null;
     if (!btn || btn.disabled) return;
@@ -658,13 +669,7 @@
     var ids = Array.from(state.selected).concat(Array.from(state.scheduledRules));
     if (!ids.length) return;
 
-    window.parent.postMessage({
-      action: action,
-      ids: ids,
-      button: action.slice(NS.length),
-      text: instructions(),
-      run_id: getRunId()
-    }, getParentOrigin());
+    postAction(action, ids);
 
     // No optimistic disregard dimming (C-17): the confirmed server round-trip
     // (validate-action --apply-disregard → re-render) bakes the `dimmed` class into
@@ -682,6 +687,21 @@
     applyRulePreview();
     syncSections();
     updateBar();
+  });
+
+  // Enter in the instructions box posts a free-text follow-up question (focused-review.ask).
+  // Unlike the action buttons it needs NO selection — an empty-selection Enter is a plain
+  // question to the agent; when findings ARE selected their ids ride along as context. An
+  // empty box is a no-op so a stray Enter posts nothing. It uses the same namespaced-action
+  // channel as the buttons, so Treemon forwards it to the owning session identically.
+  document.addEventListener("keydown", function (e) {
+    if (e.key !== "Enter") return;
+    var box = e.target;
+    if (!box || !box.classList || !box.classList.contains("instructions-input")) return;
+    e.preventDefault();
+    if (!instructions()) return;
+    postAction(NS + "ask", Array.from(state.selected).concat(Array.from(state.scheduledRules)));
+    box.value = "";
   });
 
   // Track the open accordion. 'toggle' does not bubble, so listen in the capture phase.
@@ -827,7 +847,7 @@
   <span class="selection-count" data-sel-count>0 selected</span>
   <input type="text" class="instructions-input" data-instructions
          aria-label="Instructions for the selected findings"
-         placeholder="Instructions (e.g., 'fix with minimal changes', 'disregard these for now')">
+         placeholder="Ask a question and press Enter — or add instructions, then pick an action →">
   <button class="action-btn action-fix" data-action="focused-review.fix" disabled>🔧 Fix selected</button>
   <button class="action-btn action-disregard" data-action="focused-review.disregard" disabled>👁 Disregard</button>
   <button class="action-btn action-doc" data-action="focused-review.document" disabled>📄 Document for later</button>

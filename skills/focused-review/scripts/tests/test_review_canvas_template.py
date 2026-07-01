@@ -275,6 +275,41 @@ def test_script_clears_scheduled_rules_on_dispatch(template_text: str, fixture_t
         assert "state.scheduledRules.clear()" in text
 
 
+def test_script_shares_postaction_helper(template_text: str, fixture_text: str):
+    # The action buttons and the Enter-to-ask handler both post through one helper so the
+    # payload shape (and the top-level `action` Treemon requires) can never drift between
+    # the two paths. Asserted on both ends of the channel.
+    for text in (template_text, fixture_text):
+        assert "function postAction(action, ids)" in text
+        assert "postAction(action, ids);" in text
+
+
+def test_script_enter_submits_free_text_question(template_text: str, fixture_text: str):
+    # A follow-up question must be submittable from the free-text box alone — pressing Enter,
+    # with no finding selected and no action button pressed. This is the `ask` verb.
+    for text in (template_text, fixture_text):
+        # Enter-key handler wired to the free-text box via document-level delegation.
+        assert 'document.addEventListener("keydown"' in text
+        assert 'e.key !== "Enter"' in text
+        assert 'classList.contains("instructions-input")' in text
+        # Posts the namespaced ask verb through the shared helper; an empty box is a no-op,
+        # and the box is cleared after the question is sent.
+        assert 'postAction(NS + "ask"' in text
+        assert "if (!instructions()) return;" in text
+        assert 'box.value = ""' in text
+
+
+def test_script_ask_path_needs_no_selection(template_text: str, fixture_text: str):
+    # The ask handler must NOT gate on a selection (that is the buttons' contract): it
+    # guards on an empty text box instead, so a plain question with zero selected findings
+    # still posts. Guard against a regression that copies the buttons' `if (!ids.length)`.
+    keydown_block = re.search(
+        r'addEventListener\("keydown".*?\}\);', template_text, re.DOTALL
+    )
+    assert keydown_block, "keydown (Enter-to-ask) handler not found"
+    assert "if (!ids.length) return;" not in keydown_block.group(0)
+
+
 @pytest.mark.parametrize("action", NAMESPACED_ACTIONS)
 def test_template_action_buttons_namespaced(template_text: str, action: str):
     assert f'data-action="{action}"' in template_text
