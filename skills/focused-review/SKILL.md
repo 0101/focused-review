@@ -1,7 +1,7 @@
 ---
 name: review
 description: Run unified code reviews through a 5-phase discovery-consolidation-assessment pipeline
-argument-hint: "[branch|commit|staged|unstaged|full|refresh|configure|post-mortem|post-comments] [path ...]"
+argument-hint: "[branch|commit|staged|unstaged|full|refresh|configure|post-mortem|post-comments] [path ...] [top N]"
 ---
 
 You are the orchestrator for the focused-review plugin. Your mode depends on the argument.
@@ -40,7 +40,7 @@ If none of the above match, proceed to Step B.
 
 ### Step B: Resolve scope and paths for Review Mode
 
-The user's argument may contain an explicit scope keyword, free-text describing what to review, or both. Your job is to determine three things: **scope** (`branch`, `commit`, `staged`, `unstaged`, or `full`), **paths** (optional list of directories/globs), and **base ref** (optional, for `branch` scope only — overrides the configured base).
+The user's argument may contain an explicit scope keyword, free-text describing what to review, or both. Your job is to determine four things: **scope** (`branch`, `commit`, `staged`, `unstaged`, or `full`), **paths** (optional list of directories/globs), **base ref** (optional, for `branch` scope only — overrides the configured base), and an optional **findings cap** (`max_findings`).
 
 **1. Explicit scope keyword** — if the argument starts with one of `branch`, `commit`, `staged`, `unstaged`, `full`, use it directly. Everything after the keyword is path filters (and optionally a base ref).
    - `/review branch src/` → scope `branch`, paths `["src/"]`
@@ -65,6 +65,8 @@ The user's argument may contain an explicit scope keyword, free-text describing 
 
 **Base ref extraction:** If the user mentions comparing against a specific branch or ref (e.g., "against origin/dev", "compared to develop", "vs upstream/release"), extract it as the **base ref**. This only applies to `branch` scope. If not mentioned, omit it — the Python script resolves the base from `focused-review.json` config (key: `"base_branch"`), falling back to `origin/main`.
 
+**Findings cap extraction:** If the user asks for a limited number of findings — e.g. "top 20", "max 20", "limit 20 findings", "just the top 10" — extract that integer as `max_findings`. It caps how many prioritized findings the consolidation phase presents (and, for diff scopes, how many get assessed), so a large target can return a fast, focused top-N. If the user does not ask for a limit, `max_findings` is **none** — present all findings (the default). Applies to every scope.
+
 **Path extraction:** After determining the scope, extract path filters from the remaining text. The user may describe paths in natural language ("the auth module in src/services/auth") — resolve these to actual directory or glob paths. If the user describes files by type or pattern ("all the unit tests", "*.cs files"), convert to appropriate globs (e.g., `**/*Tests*.cs`, `**/*.cs`).
 
 Examples of full resolution:
@@ -76,8 +78,10 @@ Examples of full resolution:
 - `review changes in src/auth, CI run don't ask questions` → scope `branch`, paths `["src/auth"]`
 - `review branch against origin/dev` → scope `branch`, no paths, base ref `origin/dev`
 - `review changes vs develop` → scope `branch`, base ref `develop`
+- `review full top 20` → scope `full`, no paths, max_findings `20`
+- `review branch top 15` → scope `branch`, no paths, max_findings `15`
 
-Store the resolved scope, paths, and base ref for use in Step 1.
+Store the resolved scope, paths, base ref, and findings cap for use in later steps.
 
 ---
 
@@ -166,9 +170,10 @@ Launch a `focused-review:review-consolidator` Task agent with this prompt:
 ```
 findings_dir: {run_dir}/findings
 output_path: {run_dir}/consolidated.md
+max_findings: {the resolved findings cap from Step B, or `none`}
 ```
 
-This agent reads all finding files from Phase 1 (`rule--*.md` and `concern--*.md`), deduplicates semantically (same location + same issue = one finding), merges provenance, and writes `{run_dir}/consolidated.md` with up to 30 prioritized findings.
+This agent reads all finding files from Phase 1 (`rule--*.md` and `concern--*.md`), deduplicates semantically (same location + same issue = one finding), merges provenance, and writes `{run_dir}/consolidated.md`. By default every deduplicated finding is presented, prioritized by severity → source count → fix complexity. When Step B resolved a `max_findings` cap, only the top N are presented (and thus assessed); the report header notes how many were omitted.
 
 Wait for completion. If the agent fails, report the error and skip to Step 6 with whatever findings are available. If the consolidated report shows 0 findings, skip to Step 6 and report "no findings".
 
