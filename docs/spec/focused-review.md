@@ -160,7 +160,7 @@ Discovery optimizes for recall over precision — flag everything suspicious. As
 
 ### Phase 2: Consolidation
 
-Single agent reads all finding files. Semantic deduplication: same file + within 5 lines + same issue = one finding with merged provenance. Prioritizes by severity → source count → fix complexity. Caps at 30 findings. Output: `consolidated.md`.
+Single agent reads all finding files. Semantic deduplication: same file + within 5 lines + same issue = one finding with merged provenance. Prioritizes by severity → source count → fix complexity. Presents **all** findings by default; an optional per-run cap (`top N` / `max N` in the invocation) keeps the highest-priority N and notes the omitted count. Output: `consolidated.md`.
 
 ### Phase 3: Assessment (parallel)
 
