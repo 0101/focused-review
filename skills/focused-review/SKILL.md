@@ -364,12 +364,12 @@ python {script_path} validate-action --records "{run_dir}/records.json" --repo .
   - `findings[]` — each `f#` resolved to `record_id` / `file` / `line` / `title` / `severity` / `verdict` / `fix_complexity` / `suggestion`.
   - `rules[]` — each `rq#` resolved to `rule_id` / `rule` / `rule_sources` / `rule_file` (the safe path to edit) / `observation` / `suggestion` (the suggested rule change) / `invalidated_record_ids` (the findings this rule fix removes).
 
-**2. Require explicit human confirmation before ANY execution — nothing auto-runs.** Show the user the resolved findings (`file:line` + title) and resolved rules (`rule_file` + what would change), and exactly what the action would do, then wait for a clear go-ahead. If the user declines or is silent, stop. This confirmation gate applies to **every** action below, including persisting a disregard or a rule fix.
+**2. The posted action *is* the human's confirmation — after Step 1 validates, act on it directly.** Pressing an action-bar button (or issuing the equivalent terminal order in Step 6e) is itself the go-ahead; do **not** stop for a second, separate approval. Step 1's `validate-action` is the authorization boundary — it resolves the untrusted payload against `records.json`, so once it exits 0 you act on the **resolved** `findings[]` / `rules[]` only. Stay transparent (tell the user which resolved findings — `file:line` + title — and rules — `rule_file` + what will change — you're about to act on), but proceed without waiting. Only pause to ask when the request is genuinely ambiguous or self-contradictory (e.g. free-text that conflicts with the selection), never as a routine gate. This applies to **every** action below — a `fix` (of findings and/or rule-quality notes), a `disregard`, or a `document`.
 
-**3. After confirmation, dispatch on `button`, resolving the mixed selection by id prefix:**
+**3. After validation (Step 1), dispatch on `button`, resolving the mixed selection by id prefix:**
 
 - **`fix`** — handle any combination of resolved findings and rules:
-  - **Findings (`f#`)** — Propose fixes for the resolved `findings[]`, guided by the free-text box (`text`). Work through them using the normal edit flow (each carries its `file` / `line` / `suggestion`); apply changes only with the user's approval and only to findings in the resolved set. Do not touch findings outside it. After the approved code-fixes are applied, persist the fix and re-render so the canvas marks those rows done:
+  - **Findings (`f#`)** — Fix the resolved `findings[]`, guided by the free-text box (`text`). Work through them using the normal edit flow (each carries its `file` / `line` / `suggestion`); apply changes only to findings in the resolved set — never touch findings outside it. After the code-fixes are applied, persist the fix and re-render so the canvas marks those rows done:
 
     ```bash
     python "{script_path}" validate-action --records "{run_dir}/records.json" --repo . --run-id "{run_id}" --ids "{the f# ids you actually fixed, comma-joined}" --action focused-review.fix --apply-fixed --run-dir "{run_dir}"
@@ -404,8 +404,8 @@ python {script_path} validate-action --records "{run_dir}/records.json" --repo .
 The user may ask you to fix findings **in the terminal** (e.g. "fix finding 3", "fix f1 and f4") instead of pressing the canvas button. It is the **same** fix flow as Step 6d's `fix` branch — not a new mode:
 
 1. **Locate the run.** If you rendered it this session, reuse that `run_dir` / `run_id`. Otherwise find the latest run exactly as **Post-Mortem Mode → "Step 1: Locate latest report"** does (the newest dir under `.agents/focused-review/`); `records.json` and `run-state.json` sit beside its `review.md`, and `{run_id}` is `records.json`'s `run.run_id`.
-2. **Resolve to `f#` ids against `records.json`.** Map the requested findings to their `record_id`s, identifying each by the globally-unique `### F#.` heading in the report (a bare number `N` means `fN`). Confirm the resolved findings before touching code.
-3. **Confirm, then fix.** Show the resolved `file:line` + title, get explicit approval (the Step 6d confirmation gate applies here too), and edit only the approved findings.
+2. **Resolve to `f#` ids against `records.json`.** Map the requested findings to their `record_id`s, identifying each by the globally-unique `### F#.` heading in the report (a bare number `N` means `fN`). Verify each resolved to the intended finding before touching code.
+3. **Fix directly — the request *is* the confirmation.** The "fix finding N" order is itself the go-ahead (same as pressing the canvas button in Step 6d), so don't ask for a separate approval. Tell the user the resolved `file:line` + title you're fixing, then edit only those resolved findings.
 4. **Mark fixed + re-render**, exactly as the canvas `fix` path above — pass only the `f#` ids you actually fixed:
 
    ```bash
