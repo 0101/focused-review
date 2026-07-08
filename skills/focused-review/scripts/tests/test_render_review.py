@@ -741,6 +741,30 @@ class TestCanvasRuleDeps:
         assert "data-rq-id=" not in out
         assert '<div class="quality-item">' in out
 
+    def test_quality_note_renders_as_collapsible(self) -> None:
+        # Each note is an expandable <details> like a finding: the summary carries
+        # only the RQ# label + rule name; the observation and suggestion prose live
+        # in the expandable body so a long note never overflows the section.
+        out = _canvas(_render_envelope())
+        item = out.split('class="quality-item" data-rq-id="rq1"', 1)[1].split("</details>", 1)[0]
+        assert '<details class="quality-d" name="quality">' in item
+        assert '<summary class="quality-summary">' in item
+        assert '<strong class="quality-rule">no-comments</strong>' in item
+        # Observation + suggestion moved into labelled detail sections in the body.
+        assert "Observation" in item and "4 findings, all Invalid in embedded template code." in item
+        assert "Suggested rule change" in item and "Add an exception for embedded templates." in item
+
+    def test_quality_note_checkbox_outside_summary(self) -> None:
+        # The schedulable checkbox is a sibling BEFORE the <details> (never inside
+        # <summary>), so checking it schedules the rule fix without toggling the
+        # disclosure — the same contract the finding rows honour.
+        out = _canvas(_render_envelope())
+        item = out.split('class="quality-item" data-rq-id="rq1"', 1)[1].split("</div>", 1)[0]
+        cb = item.index('class="quality-cb"')
+        details = item.index("<details")
+        summary = item.index("<summary")
+        assert cb < details < summary
+
 
 class TestCanvasInvalidationDim:
     """A persisted rule fix dims its invalidated rows with an audit reason pill."""

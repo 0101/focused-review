@@ -328,17 +328,37 @@
   .collapsible[open] > .collapsible-summary::before { content: '▾ '; }
   .collapsible-body { padding: 0 16px 12px; }
 
-  .quality-item { margin: 8px 0; color: #a6adc8; }
-  .quality-item strong { color: #f9e2af; }
+  .quality-item {
+    display: grid;
+    grid-template-columns: var(--col-cb) 1fr;
+    gap: 0 10px;
+    align-items: start;
+    margin: 8px 0;
+    color: #a6adc8;
+  }
+  .quality-item > .quality-cb { margin-top: 9px; justify-self: center; }
+  .quality-d { grid-column: 2; min-width: 0; }
+  .quality-summary {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    padding: 7px 10px 7px 0;
+    cursor: pointer;
+    list-style: none;
+    user-select: none;
+  }
+  .quality-summary::-webkit-details-marker { display: none; }
+  .quality-summary::marker { content: ''; }
+  .quality-summary:hover .quality-rule { color: #f9e2af; }
+  .quality-d[open] > .quality-summary .caret::before { content: '▾'; }
+  .quality-rule { color: #f9e2af; font-weight: 600; }
   .quality-cb {
     accent-color: #89b4fa;
     width: 15px;
     height: 15px;
     cursor: pointer;
-    margin-right: 6px;
-    vertical-align: middle;
   }
-  .quality-id { color: #f9e2af; font-weight: 600; margin-right: 2px; }
+  .quality-id { color: #f9e2af; font-weight: 600; }
 
   .action-bar {
     position: fixed;
@@ -883,8 +903,46 @@ replaceChild(view-dashboard)</div>
 <details class="collapsible quality-notes" open>
   <summary class="collapsible-summary">Rule Quality Notes (2)</summary>
   <div class="collapsible-body">
-    <div class="quality-item" data-rq-id="rq1"><input type="checkbox" class="quality-cb" data-rq-id="rq1" aria-label="Schedule rule fix RQ1: single-responsibility"><span class="quality-id">RQ1</span> <strong>single-responsibility</strong>: 4 findings, all Invalid. Each flagged sequential steps of a single cohesive operation, which the rule explicitly exempts. — Add examples of exempted orchestrator patterns to the rule's "Right" section.</div>
-    <div class="quality-item" data-rq-id="rq2"><input type="checkbox" class="quality-cb" data-rq-id="rq2" aria-label="Schedule rule fix RQ2: no-unnecessary-comments"><span class="quality-id">RQ2</span> <strong>no-unnecessary-comments</strong>: 10 findings; 4 Invalid, 4 Questionable, 2 Confirmed (Low). Mostly navigational comments in embedded JavaScript inside an F# string template. — Consider an exception for embedded template code.</div>
+    <div class="quality-item" data-rq-id="rq1">
+      <input type="checkbox" class="quality-cb" data-rq-id="rq1" aria-label="Schedule rule fix RQ1: single-responsibility">
+      <details class="quality-d" name="quality">
+        <summary class="quality-summary">
+          <span class="caret" aria-hidden="true"></span>
+          <span class="quality-id">RQ1</span>
+          <strong class="quality-rule">single-responsibility</strong>
+        </summary>
+        <div class="detail-content">
+          <div class="detail-section">
+            <div class="detail-label">Observation</div>
+            <p>4 findings, all Invalid. Each flagged sequential steps of a single cohesive operation, which the rule explicitly exempts.</p>
+          </div>
+          <div class="detail-suggestion">
+            <div class="detail-label">Suggested rule change</div>
+            <p>Add examples of exempted orchestrator patterns to the rule's "Right" section.</p>
+          </div>
+        </div>
+      </details>
+    </div>
+    <div class="quality-item" data-rq-id="rq2">
+      <input type="checkbox" class="quality-cb" data-rq-id="rq2" aria-label="Schedule rule fix RQ2: no-unnecessary-comments">
+      <details class="quality-d" name="quality">
+        <summary class="quality-summary">
+          <span class="caret" aria-hidden="true"></span>
+          <span class="quality-id">RQ2</span>
+          <strong class="quality-rule">no-unnecessary-comments</strong>
+        </summary>
+        <div class="detail-content">
+          <div class="detail-section">
+            <div class="detail-label">Observation</div>
+            <p>10 findings; 4 Invalid, 4 Questionable, 2 Confirmed (Low). Mostly navigational comments in embedded JavaScript inside an F# string template.</p>
+          </div>
+          <div class="detail-suggestion">
+            <div class="detail-label">Suggested rule change</div>
+            <p>Consider an exception for embedded template code.</p>
+          </div>
+        </div>
+      </details>
+    </div>
   </div>
 </details>
 

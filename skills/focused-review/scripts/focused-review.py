@@ -3910,29 +3910,72 @@ def _canvas_finding_block(
 def _canvas_quality_item(note: dict) -> str:
     """One ``.quality-item`` block for the canvas.
 
-    When the note carries a valid ``rq#`` id, the item gains a schedulable
-    checkbox (``quality-cb`` + ``data-rq-id``) so checking it live-previews which
-    findings the rule fix would invalidate (the suggested change is shown inline).
-    The visible ``quality-id`` is the uppercase label (``RQ1``) while the
-    ``data-rq-id`` attribute carries the lowercase id (``rq1``). A note without a
-    usable id renders read-only (no checkbox).
+    Each note renders as a collapsible ``<details class="quality-d">`` (the same
+    expandable pattern as a finding row) so a long observation/suggestion never
+    overflows the section: the always-visible ``<summary>`` carries just the
+    ``RQ#`` label and the rule name (the "title"), and the full ``observation`` +
+    ``suggestion`` prose live in the expandable body (the "details"). The checkbox
+    sits **outside** the summary — as a grid sibling of the ``<details>`` — so
+    selecting it schedules the rule fix without toggling the disclosure.
+
+    When the note carries a valid ``rq#`` id it gains that schedulable checkbox
+    (``quality-cb`` + ``data-rq-id``); checking it live-previews which findings the
+    rule fix would invalidate. The visible ``quality-id`` is the uppercase label
+    (``RQ1``) while the ``data-rq-id`` attribute carries the lowercase id
+    (``rq1``). A note without a usable id renders read-only (no checkbox).
     """
     rule = html.escape(str(note.get("rule", "")))
     observation = html.escape(str(note.get("observation", "")))
-    suggestion = html.escape(str(note.get("suggestion", "")))
-    body = f"<strong>{rule}</strong>: {observation} — {suggestion}"
+    suggestion = str(note.get("suggestion", ""))
+
+    sections = [
+        '        <div class="detail-section">\n'
+        '          <div class="detail-label">Observation</div>\n'
+        f'          <p>{observation}</p>\n'
+        '        </div>'
+    ]
+    if suggestion:
+        sections.append(
+            '        <div class="detail-suggestion">\n'
+            '          <div class="detail-label">Suggested rule change</div>\n'
+            f'          <p>{html.escape(suggestion)}</p>\n'
+            '        </div>'
+        )
+    detail_content = "\n".join(sections)
 
     note_id = note.get("id")
     if not _is_nonempty_str(note_id):
-        return f'    <div class="quality-item">{body}</div>'
+        return (
+            '    <div class="quality-item">\n'
+            '      <details class="quality-d" name="quality">\n'
+            '        <summary class="quality-summary">\n'
+            '          <span class="caret" aria-hidden="true"></span>\n'
+            f'          <strong class="quality-rule">{rule}</strong>\n'
+            '        </summary>\n'
+            '        <div class="detail-content">\n'
+            f'{detail_content}\n'
+            '        </div>\n'
+            '      </details>\n'
+            '    </div>'
+        )
 
     rq = html.escape(str(note_id), quote=True)
     label = _display_label(note_id)
     aria = html.escape(f"Schedule rule fix {label}: {note.get('rule', '')}", quote=True)
     return (
-        f'    <div class="quality-item" data-rq-id="{rq}">'
-        f'<input type="checkbox" class="quality-cb" data-rq-id="{rq}" aria-label="{aria}">'
-        f'<span class="quality-id">{html.escape(label)}</span> {body}</div>'
+        f'    <div class="quality-item" data-rq-id="{rq}">\n'
+        f'      <input type="checkbox" class="quality-cb" data-rq-id="{rq}" aria-label="{aria}">\n'
+        '      <details class="quality-d" name="quality">\n'
+        '        <summary class="quality-summary">\n'
+        '          <span class="caret" aria-hidden="true"></span>\n'
+        f'          <span class="quality-id">{html.escape(label)}</span>\n'
+        f'          <strong class="quality-rule">{rule}</strong>\n'
+        '        </summary>\n'
+        '        <div class="detail-content">\n'
+        f'{detail_content}\n'
+        '        </div>\n'
+        '      </details>\n'
+        '    </div>'
     )
 
 

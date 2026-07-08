@@ -26,10 +26,16 @@
     <!-- FR:PREEXISTING_COUNT -->   integer shown in the Pre-existing section header.
     <!-- FR:PREEXISTING_ROWS -->    one ".finding" block per pre-existing (non-gating) finding.
     <!-- FR:QUALITY_SUMMARY -->     e.g. "Rule Quality Notes (2)".
-    <!-- FR:QUALITY_NOTES -->       ".quality-item" blocks. Each note with an rq# id carries a
-                                    "quality-cb" checkbox (data-rq-id="rq#", visible label "RQ#");
-                                    checking it live-greys the findings whose entire rule-source
-                                    set is scheduled to be fixed (client-only preview, no round-trip).
+    <!-- FR:QUALITY_NOTES -->       ".quality-item" blocks. Each is a collapsible
+                                    "<details class=\"quality-d\">" whose summary shows the RQ#
+                                    label + rule name (the observation/suggestion prose lives in
+                                    the expandable body, so a long note never overflows). A note
+                                    with an rq# id also carries a "quality-cb" checkbox
+                                    (data-rq-id="rq#", visible label "RQ#") placed OUTSIDE the
+                                    summary (a grid sibling of the details), so checking it
+                                    schedules the rule fix — live-greying the findings whose entire
+                                    rule-source set is scheduled to be fixed (client-only preview,
+                                    no round-trip) — without toggling the disclosure.
 
   Invalid findings are NEVER rendered (no Invalid section, badge, or summary row); they
   stay in records.json only. A finding's verdict bucket is decided server-side from its
@@ -437,17 +443,37 @@
   .collapsible[open] > .collapsible-summary::before { content: '▾ '; }
   .collapsible-body { padding: 0 16px 12px; }
 
-  .quality-item { margin: 8px 0; color: #a6adc8; }
-  .quality-item strong { color: #f9e2af; }
+  .quality-item {
+    display: grid;
+    grid-template-columns: var(--col-cb) 1fr;
+    gap: 0 10px;
+    align-items: start;
+    margin: 8px 0;
+    color: #a6adc8;
+  }
+  .quality-item > .quality-cb { margin-top: 9px; justify-self: center; }
+  .quality-d { grid-column: 2; min-width: 0; }
+  .quality-summary {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    padding: 7px 10px 7px 0;
+    cursor: pointer;
+    list-style: none;
+    user-select: none;
+  }
+  .quality-summary::-webkit-details-marker { display: none; }
+  .quality-summary::marker { content: ''; }
+  .quality-summary:hover .quality-rule { color: #f9e2af; }
+  .quality-d[open] > .quality-summary .caret::before { content: '▾'; }
+  .quality-rule { color: #f9e2af; font-weight: 600; }
   .quality-cb {
     accent-color: #89b4fa;
     width: 15px;
     height: 15px;
     cursor: pointer;
-    margin-right: 6px;
-    vertical-align: middle;
   }
-  .quality-id { color: #f9e2af; font-weight: 600; margin-right: 2px; }
+  .quality-id { color: #f9e2af; font-weight: 600; }
 
   /* ── Sticky action bar ──────────────────────────────────────────────────── */
   .action-bar {
