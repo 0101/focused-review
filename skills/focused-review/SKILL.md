@@ -377,6 +377,8 @@ python {script_path} validate-action --records "{run_dir}/records.json" --repo .
     ```
 
     Pass **only** the `f#` ids you actually fixed — a partial fix marks only what was resolved, never the whole selection. The first call re-validates and writes the `fixed` key into `{run_dir}/run-state.json`; the second re-renders `review.md` + the canvas with those rows shown **done** (green ✓ + strikethrough title). The mark **persists across re-renders** because `render-review` reads `run-state.json` back on every run. Relay the re-render's terminal summary verbatim (as in Step 6c). `--apply-fixed` (code-fix → done) is distinct from `--apply-rule-fixes` (rule-invalidation dim): a `fix` message that mixes `f#` and `rq#` fires **both** — `--apply-fixed` here for the findings you fixed, `--apply-rule-fixes` below for the rules you edited — so keep both.
+
+    **Then commit the fixes** so they land in history instead of the working tree. Stage only the files you edited for these findings (don't `git add -A` — you'd sweep in unrelated changes), and use a message naming what was fixed (`- {file}:{line} — {title}` per finding).
   - **Rules (`rq#`)** — For each resolved rule, edit its `rule_file` (a safe path under `review/`): when `text` is **empty**, apply the rule's `suggestion` (accept the suggested change); when `text` is **present**, do what the text says (the `suggestion` is context). After the rule files are edited, persist the invalidation and re-render so the now-moot findings disappear:
 
     ```bash
@@ -414,6 +416,7 @@ The user may ask you to fix findings **in the terminal** (e.g. "fix finding 3", 
    ```
 
    Relay the re-render's terminal summary verbatim; the canvas morphs those rows to ✓ done.
+5. **Commit the fixes** as in the 6d `fix` path: stage only the files you edited (not `git add -A`) and commit with a message naming the fixed findings.
 
 ---
 
