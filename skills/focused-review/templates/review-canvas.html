@@ -256,6 +256,28 @@
   .finding.fixed .title { text-decoration: line-through; }
   .finding.fixed .title::before { content: '✓'; color: #a6e3a1; font-weight: 700; margin-right: 6px; }
 
+  /* Submitting: the row's action was posted and we're awaiting the server round-trip. A
+     low-key spinner replaces the F# id badge (the color-transparent id keeps the column
+     width steady). The checkbox is deliberately LEFT CHECKED so a dropped session
+     connection — no morph, no server re-render — still lets the user re-post the fix or
+     ask about the row. Client-only and transient: restoreState() clears it once the
+     server re-render lands and .fixed/.dimmed take over. */
+  .finding.submitting .num { color: transparent; position: relative; }
+  .finding.submitting .num::after {
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 11px;
+    height: 11px;
+    margin: -6px 0 0 -6px;
+    border: 2px solid #45475a;
+    border-top-color: #89b4fa;
+    border-radius: 50%;
+    animation: fr-spin 0.7s linear infinite;
+  }
+  @keyframes fr-spin { to { transform: rotate(360deg); } }
+
   /* Live rule-fix preview: checking a rule-quality note greys the rows whose every
      rule source is scheduled to be fixed (client-only, no agent round-trip). Same
      look as .dimmed but a distinct class, so a transient preview is never mistaken
@@ -540,10 +562,12 @@
   var NS = "focused-review.";            // namespaced actions; avoids Treemon reserved names
   var state = {
     selected: new Set(),                 // record_ids currently checked
+    pending: new Set(),                  // record_ids posted for an action, awaiting the server round-trip (spinner)
     disregarded: new Set(),              // record_ids marked disregarded (dimmed)
     fixed: new Set(),                    // record_ids the orchestrator marked fixed (done)
     scheduledRules: new Set(),           // rq ids whose rule-fix checkbox is checked
-    openId: null                         // record_id of the open accordion, if any
+    openId: null,                        // record_id of the open accordion, if any
+    lastRunId: null                      // run_id restoreState() last reconciled — a change resets carried-over selection
   };
 
   function all(sel, root) {
@@ -581,6 +605,15 @@
     var c = document.querySelector("[data-sel-count]");
     if (c) c.textContent = n + " selected";
     all("[data-action]").forEach(function (b) { b.disabled = n === 0; });
+  }
+
+  // Reflect state.pending in the DOM: each posted finding row shows a low-key spinner (in
+  // place of its F# id badge). Shared by the dispatch path (add ids, show spinner) and
+  // restoreState (pending emptied on the server round-trip, so this clears the spinners).
+  function applySubmitting() {
+    all(".finding").forEach(function (f) {
+      f.classList.toggle("submitting", state.pending.has(f.getAttribute("data-record-id")));
+    });
   }
 
   // Actionable rows only. A section select-all (and the tri-state that mirrors it) skips
@@ -703,12 +736,18 @@
     // declined/rejected confirmation can never leave a finding dimmed out of step
     // with persisted run-state until a reload.
 
-    // Clear the selection after dispatch (matches the validated prototype): both the
-    // finding checkboxes and the scheduled rule-fix checkboxes reset, and the live
-    // rule-fix preview is re-derived so a follow-up action starts from a clean slate.
-    state.selected.clear();
+    // Low-key "submitting" spinner instead of clearing the finding selection: each posted
+    // finding row KEEPS its checkbox and shows a spinner (in place of its F# id badge) until
+    // the server round-trip re-renders. Keeping the row checked means a dropped session
+    // connection (no morph) still lets the user re-post the fix or ask about the issue.
+    // restoreState() empties state.pending once the re-render lands, clearing the spinner.
+    state.selected.forEach(function (id) { state.pending.add(id); });
+    applySubmitting();
+
+    // Scheduled rule-fix checkboxes still reset on dispatch: they only drive the live
+    // rule-fix preview (not a re-submittable per-row task), so a follow-up action starts
+    // clean and the agent's re-render stays the sole source of persisted dim truth.
     state.scheduledRules.clear();
-    all(".row-cb").forEach(function (cb) { cb.checked = false; });
     all(".quality-cb").forEach(function (cb) { cb.checked = false; });
     applyRulePreview();
     syncSections();
@@ -753,6 +792,19 @@
   }
 
   function restoreState() {
+    // Reset genuine client state on a run change. state.selected / scheduledRules / openId
+    // survive a same-run morph on purpose (a mid-run re-render must not lose the user's
+    // selection), but record_ids are positional (f1..fN every run), so a selection left over
+    // from an earlier run would otherwise re-check a semantically DIFFERENT finding at the
+    // same position under a new run_id. Mirror the fresh rebuild the server-derived sets get
+    // below: when the rendered run_id changes, drop the carried-over selection up front.
+    var currentRunId = getRunId();
+    if (state.lastRunId !== currentRunId) {
+      state.selected = new Set();
+      state.scheduledRules = new Set();
+      state.openId = null;
+      state.lastRunId = currentRunId;
+    }
     // Reconcile the server-derived sets from the CURRENT DOM on every call. render-review
     // bakes the persisted disregard/fixed (read back from run-state.json, gated on run_id)
     // into the HTML, and that server round-trip is the single source of truth (no optimistic
@@ -765,6 +817,13 @@
     all(".finding").forEach(function (f) {
       if (f.classList.contains("dimmed")) state.disregarded.add(f.getAttribute("data-record-id"));
       if (f.classList.contains("fixed")) state.fixed.add(f.getAttribute("data-record-id"));
+    });
+    // The morph IS the server round-trip landing, so the submit cycle is over: drop the
+    // transient spinner. Rows now resolved (fixed or dimmed) also leave the selection so
+    // their checkbox clears; an unresolved row stays selected for a re-post.
+    state.pending = new Set();
+    state.selected.forEach(function (id) {
+      if (state.fixed.has(id) || state.disregarded.has(id)) state.selected.delete(id);
     });
     // Prune tracked state to record_ids still present: a morph can drop a finding from
     // the selectable set (e.g. it is re-categorized into a hidden bucket and loses its checkbox), so
@@ -796,6 +855,7 @@
       cb.checked = state.scheduledRules.has(cb.getAttribute("data-rq-id"));
     });
     applyRulePreview();
+    applySubmitting();
     syncSections();
     updateBar();
   }

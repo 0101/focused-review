@@ -155,6 +155,25 @@
   .finding.fixed .title { text-decoration: line-through; }
   .finding.fixed .title::before { content: '✓'; color: #a6e3a1; font-weight: 700; margin-right: 6px; }
 
+  /* Submitting: action posted, awaiting the server round-trip. A low-key spinner replaces
+     the F# id badge; the checkbox stays checked so a dropped connection lets the user
+     re-post or ask. Client-only + transient: restoreState() clears it on the re-render. */
+  .finding.submitting .num { color: transparent; position: relative; }
+  .finding.submitting .num::after {
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 11px;
+    height: 11px;
+    margin: -6px 0 0 -6px;
+    border: 2px solid #45475a;
+    border-top-color: #89b4fa;
+    border-radius: 50%;
+    animation: fr-spin 0.7s linear infinite;
+  }
+  @keyframes fr-spin { to { transform: rotate(360deg); } }
+
   .finding.pending-invalid { opacity: 0.35; }
   .finding.pending-invalid .title { text-decoration: line-through; }
 
@@ -414,10 +433,12 @@
   var NS = "focused-review.";
   var state = {
     selected: new Set(),
+    pending: new Set(),
     disregarded: new Set(),
     fixed: new Set(),
     scheduledRules: new Set(),
-    openId: null
+    openId: null,
+    lastRunId: null
   };
 
   function all(sel, root) {
@@ -454,6 +475,14 @@
     var c = document.querySelector("[data-sel-count]");
     if (c) c.textContent = n + " selected";
     all("[data-action]").forEach(function (b) { b.disabled = n === 0; });
+  }
+
+  // Reflect state.pending in the DOM: each posted finding row shows a low-key spinner in
+  // place of its F# id badge. Shared by the dispatch path and restoreState.
+  function applySubmitting() {
+    all(".finding").forEach(function (f) {
+      f.classList.toggle("submitting", state.pending.has(f.getAttribute("data-record-id")));
+    });
   }
 
   // Actionable rows only: section select-all skips .dimmed / .pending-invalid findings.
@@ -558,9 +587,14 @@
 
     // No optimistic disregard dimming (C-17): dimming is server-seeded via restoreState.
 
-    state.selected.clear();
+    // Low-key "submitting" spinner instead of clearing the finding selection: each posted
+    // row keeps its checkbox and shows a spinner (in place of its F# id badge) until the
+    // server re-render, so a dropped connection still lets the user re-post or ask.
+    state.selected.forEach(function (id) { state.pending.add(id); });
+    applySubmitting();
+
+    // Scheduled rule-fix checkboxes still reset (they drive the live preview only).
     state.scheduledRules.clear();
-    all(".row-cb").forEach(function (cb) { cb.checked = false; });
     all(".quality-cb").forEach(function (cb) { cb.checked = false; });
     applyRulePreview();
     syncSections();
@@ -600,6 +634,16 @@
   }
 
   function restoreState() {
+    // Reset carried-over client state on a run change: selection survives a same-run morph
+    // on purpose, but positional record_ids (f1..fN every run) mean a stale selection would
+    // re-check a different finding under a new run_id — so drop it when the run_id changes.
+    var currentRunId = getRunId();
+    if (state.lastRunId !== currentRunId) {
+      state.selected = new Set();
+      state.scheduledRules = new Set();
+      state.openId = null;
+      state.lastRunId = currentRunId;
+    }
     // Rebuild the server-derived sets fresh from the current DOM each call so a stale
     // cross-run mark is never re-applied to a still-present id (see the template rationale).
     state.disregarded = new Set();
@@ -607,6 +651,12 @@
     all(".finding").forEach(function (f) {
       if (f.classList.contains("dimmed")) state.disregarded.add(f.getAttribute("data-record-id"));
       if (f.classList.contains("fixed")) state.fixed.add(f.getAttribute("data-record-id"));
+    });
+    // The morph is the server round-trip landing: drop the transient spinner, and drop any
+    // now-resolved (fixed/dimmed) rows from the selection so their checkbox clears.
+    state.pending = new Set();
+    state.selected.forEach(function (id) {
+      if (state.fixed.has(id) || state.disregarded.has(id)) state.selected.delete(id);
     });
     var present = presentIds();
     pruneTo(state.selected, present);
@@ -635,6 +685,7 @@
       cb.checked = state.scheduledRules.has(cb.getAttribute("data-rq-id"));
     });
     applyRulePreview();
+    applySubmitting();
     syncSections();
     updateBar();
   }
