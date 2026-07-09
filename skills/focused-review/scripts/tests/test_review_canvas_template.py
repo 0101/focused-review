@@ -385,6 +385,76 @@ def test_fixture_has_no_optimistic_fixed_marking(fixture_text: str):
     assert 'classList.add("fixed")' not in fixture_text
 
 
+# ── submitting: low-key spinner on posted rows; checkboxes persist for a re-post ──
+
+
+@pytest.mark.parametrize("end", ["template", "fixture"])
+def test_defines_submitting_spinner_css(template_text: str, fixture_text: str, end: str):
+    # A posted finding row shows a low-key spinner IN PLACE OF its F# id badge: the id text
+    # is made transparent (keeps the column width) and a spinning ::after is layered on the
+    # .num cell, driven by the shared fr-spin keyframes.
+    text = template_text if end == "template" else fixture_text
+    assert ".finding.submitting .num" in text
+    assert ".finding.submitting .num::after" in text
+    assert "@keyframes fr-spin" in text
+    assert "animation: fr-spin" in text
+
+
+@pytest.mark.parametrize("end", ["template", "fixture"])
+def test_state_tracks_pending_set(template_text: str, fixture_text: str, end: str):
+    # state.pending holds the record_ids currently awaiting the server round-trip; the
+    # shared applySubmitting() helper reflects it as the .submitting spinner class.
+    text = template_text if end == "template" else fixture_text
+    assert "pending: new Set()" in text
+    assert "function applySubmitting()" in text
+    assert 'classList.toggle("submitting"' in text
+
+
+@pytest.mark.parametrize("end", ["template", "fixture"])
+def test_dispatch_keeps_finding_selection_and_marks_submitting(template_text: str, fixture_text: str, end: str):
+    # The whole point of this change: a dispatch must NOT clear the finding selection or
+    # uncheck the row checkboxes — a dropped session connection (no morph) has to leave the
+    # rows checked so the user can re-post the fix or ask about the issue. Instead the posted
+    # ids are moved into state.pending and the spinner is shown.
+    text = template_text if end == "template" else fixture_text
+    assert "state.selected.forEach(function (id) { state.pending.add(id); });" in text
+    assert "applySubmitting();" in text
+    # The old clear-on-dispatch of the finding selection / row checkboxes is gone (scheduled
+    # rule fixes are a separate preview mechanism and are still reset — asserted elsewhere).
+    assert "state.selected.clear()" not in text
+    assert 'all(".row-cb").forEach(function (cb) { cb.checked = false; })' not in text
+
+
+@pytest.mark.parametrize("end", ["template", "fixture"])
+def test_restore_state_clears_pending_and_resolved_selection(template_text: str, fixture_text: str, end: str):
+    # The morph is the server round-trip landing: restoreState() must empty state.pending
+    # (clearing every spinner) and drop now-resolved (fixed/dimmed) rows from the selection
+    # so their checkbox clears — while an unresolved row stays selected for a re-post.
+    body = _restore_state_js(template_text if end == "template" else fixture_text)
+    assert "state.pending = new Set()" in body
+    assert "if (state.fixed.has(id) || state.disregarded.has(id)) state.selected.delete(id);" in body
+
+
+@pytest.mark.parametrize("end", ["template", "fixture"])
+def test_restore_state_resets_selection_on_run_change(template_text: str, fixture_text: str, end: str):
+    # F1/A-04 regression. state.selected survives a same-run morph on purpose (a mid-run
+    # re-render must not lose the user's selection), but record_ids are positional (f1..fN
+    # every run), so a selection carried across a run_id change would re-check a semantically
+    # DIFFERENT finding at the same position. restoreState() must reset the carried-over
+    # client selection when the rendered run_id differs from the one it last reconciled —
+    # mirroring the fresh rebuild the server-derived sets already get.
+    text = template_text if end == "template" else fixture_text
+    assert "lastRunId: null" in text
+    body = _restore_state_js(text)
+    assert "var currentRunId = getRunId();" in body
+    assert "if (state.lastRunId !== currentRunId) {" in body
+    assert "state.selected = new Set();" in body
+    assert "state.lastRunId = currentRunId;" in body
+    # The reset must precede the prune/re-check block that re-checks row checkboxes from
+    # state.selected, else the stale selection would already have re-checked the wrong row.
+    assert body.index("state.lastRunId !== currentRunId") < body.index("cb.checked = state.selected.has(id)")
+
+
 # ── F2 regression: restoreState rebuilds the server-derived sets fresh (no stale re-add) ──
 
 
