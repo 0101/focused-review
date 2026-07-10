@@ -130,13 +130,14 @@
   .sev-medium { background: #f9e2af33; color: #f9e2af; }
   .sev-low { background: #a6adc833; color: #a6adc8; }
 
-  .found-by { display: flex; flex-wrap: wrap; gap: 3px; }
+  .found-by { display: flex; flex-wrap: wrap; gap: 3px; min-width: 0; }
   .found-tag {
     display: inline-block;
+    max-width: 100%;
     padding: 1px 6px;
     border-radius: 8px;
     font-size: 11px;
-    white-space: nowrap;
+    overflow-wrap: anywhere;
   }
   .found-tag-concern { background: #cba6f722; color: #cba6f7; }
   .found-tag-rule { background: #89b4fa22; color: #89b4fa; }
