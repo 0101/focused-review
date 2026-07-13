@@ -34,6 +34,9 @@
     padding: 20px;
     line-height: 1.5;
     padding-bottom: 80px;
+    /* Treemon's injected base caps :where(body) at ~800px; the review report's dense
+       multi-column finding rows read better full-width, so opt out of that cap. */
+    max-width: none;
   }
 
   .header { margin-bottom: 20px; }
