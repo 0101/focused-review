@@ -385,7 +385,7 @@ def test_fixture_has_no_optimistic_fixed_marking(fixture_text: str):
     assert 'classList.add("fixed")' not in fixture_text
 
 
-# ── submitting: low-key spinner on posted rows; checkboxes persist for a re-post ──
+# ── submitting: low-key spinner on posted rows; dispatch consumes the selection ──
 
 
 @pytest.mark.parametrize("end", ["template", "fixture"])
@@ -411,18 +411,29 @@ def test_state_tracks_pending_set(template_text: str, fixture_text: str, end: st
 
 
 @pytest.mark.parametrize("end", ["template", "fixture"])
-def test_dispatch_keeps_finding_selection_and_marks_submitting(template_text: str, fixture_text: str, end: str):
-    # The whole point of this change: a dispatch must NOT clear the finding selection or
-    # uncheck the row checkboxes — a dropped session connection (no morph) has to leave the
-    # rows checked so the user can re-post the fix or ask about the issue. Instead the posted
-    # ids are moved into state.pending and the spinner is shown.
+def test_dispatch_consumes_finding_selection_and_marks_submitting(template_text: str, fixture_text: str, end: str):
+    # Option 2: dispatch consumes the finding selection. Posted ids first move into
+    # state.pending so the spinner can mark in-flight rows, then state.selected and the row
+    # checkboxes reset to mean exactly what the NEXT action will submit.
     text = template_text if end == "template" else fixture_text
     assert "state.selected.forEach(function (id) { state.pending.add(id); });" in text
     assert "applySubmitting();" in text
-    # The old clear-on-dispatch of the finding selection / row checkboxes is gone (scheduled
-    # rule fixes are a separate preview mechanism and are still reset — asserted elsewhere).
-    assert "state.selected.clear()" not in text
-    assert 'all(".row-cb").forEach(function (cb) { cb.checked = false; })' not in text
+    assert "state.selected.clear();" in text
+    assert 'all(".row-cb").forEach(function (cb) { cb.checked = false; });' in text
+    # pending must be captured BEFORE the selection is cleared, else the spinner is lost.
+    assert text.index("state.pending.add(id)") < text.index("state.selected.clear()")
+
+
+@pytest.mark.parametrize("end", ["template", "fixture"])
+def test_ask_path_consumes_finding_selection(template_text: str, fixture_text: str, end: str):
+    # Option 2 applies to the Enter-to-ask path too: after posting the question (with the
+    # selected findings as context) and clearing the box, the selection is consumed so it
+    # can't silently ride along in the next action.
+    text = template_text if end == "template" else fixture_text
+    keydown_block = re.search(r'addEventListener\("keydown".*?\}\);', text, re.DOTALL).group(0)
+    assert 'box.value = ""' in keydown_block
+    assert "state.selected.clear();" in keydown_block
+    assert 'all(".row-cb").forEach(function (cb) { cb.checked = false; });' in keydown_block
 
 
 @pytest.mark.parametrize("end", ["template", "fixture"])

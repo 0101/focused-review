@@ -160,8 +160,9 @@
   .finding.fixed .title::before { content: '✓'; color: #a6e3a1; font-weight: 700; margin-right: 6px; }
 
   /* Submitting: action posted, awaiting the server round-trip. A low-key spinner replaces
-     the F# id badge; the checkbox stays checked so a dropped connection lets the user
-     re-post or ask. Client-only + transient: restoreState() clears it on the re-render. */
+     the F# id badge; dispatch clears the row checkbox selection so the posted finding
+     can't ride along in the next action. state.pending marks the row in-flight, and
+     restoreState() clears that transient spinner on the re-render. */
   .finding.submitting .num { color: transparent; position: relative; }
   .finding.submitting .num::after {
     content: '';
@@ -591,11 +592,13 @@
 
     // No optimistic disregard dimming (C-17): dimming is server-seeded via restoreState.
 
-    // Low-key "submitting" spinner instead of clearing the finding selection: each posted
-    // row keeps its checkbox and shows a spinner (in place of its F# id badge) until the
-    // server re-render, so a dropped connection still lets the user re-post or ask.
+    // Posted rows show a spinner via state.pending; dispatch consumes the selection so
+    // old ids cannot ride along in the next action.
     state.selected.forEach(function (id) { state.pending.add(id); });
     applySubmitting();
+
+    state.selected.clear();
+    all(".row-cb").forEach(function (cb) { cb.checked = false; });
 
     // Scheduled rule-fix checkboxes still reset (they drive the live preview only).
     state.scheduledRules.clear();
@@ -606,7 +609,7 @@
   });
 
   // Enter in the instructions box posts a free-text follow-up question (focused-review.ask).
-  // No selection needed; any selected ids ride along as context. Empty box is a no-op.
+  // No selection needed; selected ids are sent as context and then consumed.
   document.addEventListener("keydown", function (e) {
     if (e.key !== "Enter") return;
     var box = e.target;
@@ -615,6 +618,11 @@
     if (!instructions()) return;
     postAction(NS + "ask", Array.from(state.selected).concat(Array.from(state.scheduledRules)));
     box.value = "";
+
+    state.selected.clear();
+    all(".row-cb").forEach(function (cb) { cb.checked = false; });
+    syncSections();
+    updateBar();
   });
 
   document.addEventListener("toggle", function (e) {

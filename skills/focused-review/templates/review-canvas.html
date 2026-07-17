@@ -262,9 +262,9 @@
 
   /* Submitting: the row's action was posted and we're awaiting the server round-trip. A
      low-key spinner replaces the F# id badge (the color-transparent id keeps the column
-     width steady). The checkbox is deliberately LEFT CHECKED so a dropped session
-     connection — no morph, no server re-render — still lets the user re-post the fix or
-     ask about the row. Client-only and transient: restoreState() clears it once the
+     width steady). Dispatch clears the row checkbox selection (the selection is consumed)
+     so the posted finding cannot ride along in the next action; state.pending is what
+     marks the row in-flight. Client-only and transient: restoreState() clears it once the
      server re-render lands and .fixed/.dimmed take over. */
   .finding.submitting .num { color: transparent; position: relative; }
   .finding.submitting .num::after {
@@ -740,13 +740,19 @@
     // declined/rejected confirmation can never leave a finding dimmed out of step
     // with persisted run-state until a reload.
 
-    // Low-key "submitting" spinner instead of clearing the finding selection: each posted
-    // finding row KEEPS its checkbox and shows a spinner (in place of its F# id badge) until
-    // the server round-trip re-renders. Keeping the row checked means a dropped session
-    // connection (no morph) still lets the user re-post the fix or ask about the issue.
-    // restoreState() empties state.pending once the re-render lands, clearing the spinner.
+    // Low-key "submitting" spinner for posted finding rows: state.pending marks them
+    // in-flight after dispatch, while the finding selection is consumed below so those ids
+    // cannot silently ride along in the next action. If a connection drops with no morph,
+    // the spinner remains and the user re-checks the row to re-post.
     state.selected.forEach(function (id) { state.pending.add(id); });
     applySubmitting();
+
+    // Consume the finding selection on dispatch: the posted ids are now tracked solely by
+    // state.pending (the spinner), so state.selected goes back to meaning exactly "what
+    // the NEXT action will submit". Clearing it and unchecking the rows stops a finding
+    // sent in one action from silently riding along in the next.
+    state.selected.clear();
+    all(".row-cb").forEach(function (cb) { cb.checked = false; });
 
     // Scheduled rule-fix checkboxes still reset on dispatch: they only drive the live
     // rule-fix preview (not a re-submittable per-row task), so a follow-up action starts
@@ -760,9 +766,10 @@
 
   // Enter in the instructions box posts a free-text follow-up question (focused-review.ask).
   // Unlike the action buttons it needs NO selection — an empty-selection Enter is a plain
-  // question to the agent; when findings ARE selected their ids ride along as context. An
-  // empty box is a no-op so a stray Enter posts nothing. It uses the same namespaced-action
-  // channel as the buttons, so Treemon forwards it to the owning session identically.
+  // question to the agent. When findings ARE selected, their ids are sent as context and
+  // then consumed. An empty box is a no-op so a stray Enter posts nothing. It uses the same
+  // namespaced-action channel as the buttons, so Treemon forwards it to the owning session
+  // identically.
   document.addEventListener("keydown", function (e) {
     if (e.key !== "Enter") return;
     var box = e.target;
@@ -771,6 +778,14 @@
     if (!instructions()) return;
     postAction(NS + "ask", Array.from(state.selected).concat(Array.from(state.scheduledRules)));
     box.value = "";
+
+    // Consume the selection here too (same contract as the action buttons): the ask carried
+    // the selected findings as context, so leaving them selected would re-submit them with
+    // the next action. Ask is fire-and-forget (no spinner/pending), so just clear + uncheck.
+    state.selected.clear();
+    all(".row-cb").forEach(function (cb) { cb.checked = false; });
+    syncSections();
+    updateBar();
   });
 
   // Track the open accordion. 'toggle' does not bubble, so listen in the capture phase.
@@ -823,8 +838,9 @@
       if (f.classList.contains("fixed")) state.fixed.add(f.getAttribute("data-record-id"));
     });
     // The morph IS the server round-trip landing, so the submit cycle is over: drop the
-    // transient spinner. Rows now resolved (fixed or dimmed) also leave the selection so
-    // their checkbox clears; an unresolved row stays selected for a re-post.
+    // transient spinner. Rows now resolved (fixed or dimmed) also leave any remaining
+    // selection so their checkbox clears; unresolved rows selected outside a submit stay
+    // selected across the same-run morph.
     state.pending = new Set();
     state.selected.forEach(function (id) {
       if (state.fixed.has(id) || state.disregarded.has(id)) state.selected.delete(id);
