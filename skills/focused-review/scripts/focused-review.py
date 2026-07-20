@@ -242,12 +242,17 @@ class FamilyRule:
 # Single source of truth for family shorthands.  Keys are the shorthands users
 # write in concern frontmatter; values describe how to pick a live slug.
 FAMILY_RULES: dict[str, FamilyRule] = {
-    "opus": FamilyRule(prefix="claude-opus-", fallback="claude-opus-4.6-1m"),
+    "opus": FamilyRule(prefix="claude-opus-", fallback="claude-opus-4.8"),
     "sonnet": FamilyRule(prefix="claude-sonnet-", fallback="claude-sonnet-4.6"),
     "haiku": FamilyRule(prefix="claude-haiku-", fallback="claude-haiku-4.5"),
-    "gpt": FamilyRule(prefix="gpt-", fallback="gpt-5.5", exclude=("codex", "mini")),
+    "gpt": FamilyRule(
+        prefix="gpt-",
+        fallback="gpt-5.6-sol",
+        exclude=("codex", "mini"),
+        prefer=("sol",),
+    ),
     "codex": FamilyRule(prefix="gpt-", fallback="gpt-5.3-codex", require=("codex",)),
-    "gemini": FamilyRule(prefix="gemini-", fallback="gemini-3-pro-preview", prefer=("pro",)),
+    "gemini": FamilyRule(prefix="gemini-", fallback="gemini-3.1-pro-preview", prefer=("pro",)),
 }
 
 _MODEL_ITEM_RE = re.compile(r'^\s*-\s*"([^"]+)"\s*$')

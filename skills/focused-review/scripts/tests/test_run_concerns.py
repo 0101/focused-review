@@ -110,15 +110,20 @@ def _write_finding(
 # A realistic snapshot of the live ``copilot help config`` model list, used so
 # tests never depend on a live CLI call.
 AVAILABLE_MODELS = (
+    "claude-sonnet-5",
     "claude-sonnet-4.6",
     "claude-sonnet-4.5",
     "claude-haiku-4.5",
     "claude-fable-5",
     "claude-opus-4.8",
+    "claude-opus-4.8-fast",
     "claude-opus-4.7",
     "claude-opus-4.6",
     "claude-opus-4.6-fast",
     "claude-opus-4.5",
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
     "gpt-5.5",
     "gpt-5.4",
     "gpt-5.3-codex",
@@ -139,7 +144,7 @@ HELP_CONFIG_SAMPLE = """Configuration Settings:
   `model`: AI model to use for Copilot CLI; can be changed with /model command or --model flag option.
     - "claude-sonnet-4.6"
     - "claude-opus-4.8"
-    - "gpt-5.5"
+    - "gpt-5.6-sol"
     - "gpt-5.3-codex"
     - "gemini-3.1-pro-preview"
 
@@ -175,7 +180,7 @@ class TestParseModelList:
         assert fr._parse_model_list(HELP_CONFIG_SAMPLE) == (
             "claude-sonnet-4.6",
             "claude-opus-4.8",
-            "gpt-5.5",
+            "gpt-5.6-sol",
             "gpt-5.3-codex",
             "gemini-3.1-pro-preview",
         )
@@ -192,11 +197,11 @@ class TestParseModelList:
     def test_deduplicates_preserving_order(self) -> None:
         text = (
             "  `model`: AI model to use.\n"
-            '    - "gpt-5.5"\n'
-            '    - "gpt-5.5"\n'
+            '    - "gpt-5.6-sol"\n'
+            '    - "gpt-5.6-sol"\n'
             '    - "claude-opus-4.8"\n'
         )
-        assert fr._parse_model_list(text) == ("gpt-5.5", "claude-opus-4.8")
+        assert fr._parse_model_list(text) == ("gpt-5.6-sol", "claude-opus-4.8")
 
 
 class TestQueryAvailableModels:
@@ -208,7 +213,7 @@ class TestQueryAvailableModels:
             assert fr._query_available_models() == (
                 "claude-sonnet-4.6",
                 "claude-opus-4.8",
-                "gpt-5.5",
+                "gpt-5.6-sol",
                 "gpt-5.3-codex",
                 "gemini-3.1-pro-preview",
             )
@@ -238,8 +243,12 @@ class TestBestMatch:
         assert fr._best_match("opus", avail) == "claude-opus-4.8"
 
     def test_gpt_excludes_codex_and_mini(self) -> None:
-        avail = ("gpt-5.3-codex", "gpt-5.4-mini", "gpt-5.4", "gpt-5.2")
-        assert fr._best_match("gpt", avail) == "gpt-5.4"
+        avail = ("gpt-5.3-codex", "gpt-5.4-mini", "gpt-5.6-sol", "gpt-5.2")
+        assert fr._best_match("gpt", avail) == "gpt-5.6-sol"
+
+    def test_gpt_picks_sol_from_same_version_variants(self) -> None:
+        avail = ("gpt-5.6-ace", "gpt-5.6-terra", "gpt-5.6-sol")
+        assert fr._best_match("gpt", avail) == "gpt-5.6-sol"
 
     def test_codex_requires_codex_token_and_highest_version(self) -> None:
         avail = ("gpt-5.5", "gpt-5.2-codex", "gpt-5.3-codex")
@@ -274,7 +283,7 @@ class TestResolveModel:
 
     def test_sonnet_resolves_to_best_available(self) -> None:
         with _with_models(AVAILABLE_MODELS):
-            assert fr._resolve_model("sonnet") == "claude-sonnet-4.6"
+            assert fr._resolve_model("sonnet") == "claude-sonnet-5"
 
     def test_haiku_resolves_to_best_available(self) -> None:
         with _with_models(AVAILABLE_MODELS):
@@ -282,7 +291,7 @@ class TestResolveModel:
 
     def test_gpt_resolves_to_best_available(self) -> None:
         with _with_models(AVAILABLE_MODELS):
-            assert fr._resolve_model("gpt") == "gpt-5.5"
+            assert fr._resolve_model("gpt") == "gpt-5.6-sol"
 
     def test_codex_resolves_to_best_available(self) -> None:
         with _with_models(AVAILABLE_MODELS):
@@ -297,7 +306,7 @@ class TestResolveModel:
             assert fr._resolve_model("Opus") == "claude-opus-4.8"
             assert fr._resolve_model("OPUS") == "claude-opus-4.8"
             assert fr._resolve_model("Codex") == "gpt-5.3-codex"
-            assert fr._resolve_model("GPT") == "gpt-5.5"
+            assert fr._resolve_model("GPT") == "gpt-5.6-sol"
 
     def test_full_slug_passes_through(self) -> None:
         """Exact/internal slugs (not a family shorthand) pass through unchanged."""
@@ -321,9 +330,9 @@ class TestResolveModel:
     def test_falls_back_to_static_when_enumeration_unavailable(self) -> None:
         """When the live list can't be enumerated, use the offline fallback."""
         with _with_models(()):
-            assert fr._resolve_model("opus") == "claude-opus-4.6-1m"
-            assert fr._resolve_model("gpt") == "gpt-5.5"
-            assert fr._resolve_model("gemini") == "gemini-3-pro-preview"
+            assert fr._resolve_model("opus") == "claude-opus-4.8"
+            assert fr._resolve_model("gpt") == "gpt-5.6-sol"
+            assert fr._resolve_model("gemini") == "gemini-3.1-pro-preview"
 
 
 # ---------------------------------------------------------------------------
