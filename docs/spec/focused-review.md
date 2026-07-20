@@ -152,7 +152,7 @@ Five-phase pipeline: Discovery → Consolidation → Assessment → (Rebuttal) �
 
 All rules and concerns run simultaneously.
 
-**Rules** dispatch as lightweight Task subagents (one per rule, model from rule frontmatter). Each reads its own rule file + diff chunk. Writes findings to `findings/rule--{name}.md`.
+**Rules** dispatch as the namespaced `focused-review:review-runner` Task subagent (one per rule, model from rule frontmatter). Each reads its own rule file + diff chunk. Writes findings to `findings/rule--{name}.md`.
 
 **Concerns** dispatch as full `copilot -p` CLI sessions (one per concern × model). Deep codebase exploration with full tool access. Writes findings to `findings/concern--{name}--{model}.md`.
 

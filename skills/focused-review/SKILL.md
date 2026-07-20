@@ -126,7 +126,7 @@ Read `{run_dir}/dispatch.json` (rule dispatch) and `{run_dir}/concern-dispatch.j
 - **Subsequent batches**: up to 12 rule agents each (concern runner is already running)
 - **CRITICAL: Wait for the current batch to fully complete before launching the next batch.** Do NOT launch a new batch while the previous one is still running. This prevents process accumulation that can cause out-of-memory.
 
-**Rule agents** — For each entry in `dispatch.json`, launch a `review-runner` Task agent. Each agent's prompt must contain exactly:
+**Rule agents** — For each entry in `dispatch.json`, launch a `focused-review:review-runner` Task agent. Each agent's prompt must contain exactly:
 
 ```
 rule_path: {entry.rule_path}
