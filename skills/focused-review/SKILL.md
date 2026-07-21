@@ -1,6 +1,6 @@
 ---
 name: review
-description: Run unified code reviews through a 5-phase discovery-consolidation-assessment pipeline
+description: Runs a time-consuming, expensive 5-phase code-review pipeline. Use only when the user or applicable instructions explicitly request this skill; do not auto-invoke it for ordinary review requests.
 argument-hint: "[branch|commit|staged|unstaged|full|refresh|configure|post-mortem|post-comments] [path ...] [top N]"
 ---
 
